@@ -10,6 +10,8 @@ A release's section is used as its GitHub release notes.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-26
+
 ### Added
 
 - Light theme, and an `auto` theme (the default) that picks dark or light from
@@ -56,6 +58,7 @@ A release's section is used as its GitHub release notes.
 - Prebuilt binaries for Linux (x86_64, ARM64), macOS (Apple Silicon, Intel)
   and Windows (x86_64).
 
-[Unreleased]: https://github.com/hbro/leeroy/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/hbro/leeroy/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/hbro/leeroy/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/hbro/leeroy/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/hbro/leeroy/releases/tag/v0.1.0
