@@ -140,6 +140,16 @@ Content lives in tabs, switched with the F-keys (shown in the tab bar):
 | --- | --- |
 | `F1` | Jobs |
 
+Global keys (bottom bar), available everywhere except while typing in a field:
+
+| Key | Action |
+| --- | --- |
+| `q` | quit |
+| `s` | settings |
+| `?` | help |
+| `r` | refresh now (reconnects if the connection failed) |
+| `R` | toggle auto-refresh for this session |
+
 ### Jobs
 
 All jobs of the instance, with folders and multibranch projects flattened into
@@ -152,10 +162,9 @@ build runs.
 | `/` | filter (live, case-insensitive; space-separated words must all match) |
 | `Enter` / `Esc` while filtering | apply / cancel |
 | `Esc` | clear an applied filter |
-| `r` | refresh now |
-| `R` | auto-refresh on/off for this session |
 
-The status bar (bottom right) shows whether auto-refresh is on, its interval,
-and how long ago the data was fetched (`⟳ auto 10s · updated 4s ago`). The
+The header's right end shows how long ago the data was fetched: `⟳ 4s`. The
+icon is green while auto-refresh is on and gray while it's off; `⟳ …` means a
+refresh is running and `✕` that the last one failed. The
 default and the interval are in the settings (`[refresh]`); a failed refresh is
 retried after a full interval, never in a tight loop.

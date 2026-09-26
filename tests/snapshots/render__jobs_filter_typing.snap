@@ -2,7 +2,7 @@
 source: tests/render.rs
 expression: render(&app).backend()
 ---
-" Leeroy  ● https://ci.example.com · Jenkins 2.504.1 · me                        "
+" Leeroy  ● https://ci.example.com · Jenkins 2.504.1 · me                   ⟳ 0s "
 "  F1 Jobs                                                                       "
 "╭ Jobs (2/6) ──────────────────────────────────────────────────────────────────╮"
 "│ / api█                                                                       │"
@@ -25,4 +25,4 @@ expression: render(&app).backend()
 "│                                                                              │"
 "╰──────────────────────────────────────────────────────────────────────────────╯"
 " Filter   Enter  apply   Esc  cancel   ↑/↓  select   C-u  clear                 "
-" q  quit   s  settings   ?  help                  ⟳ auto 10s · updated just now "
+" q  quit   s  settings   ?  help   r  refresh   R  toggle auto-refresh          "

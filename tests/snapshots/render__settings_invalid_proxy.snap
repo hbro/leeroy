@@ -25,4 +25,4 @@ expression: render_after(&actions).backend()
 "│   socks5:// and socks4:// resolve DNS locally. HTTP(S) proxies always resolve│"
 "╰──────────────────────────────────────────────────────────────────────────────╯"
 " Edit   Enter  save   Esc  cancel   ↑/↓  save & move   ←/→  cursor   C-u  clear "
-" q  quit   s  settings   ?  help                                                "
+" q  quit   s  settings   ?  help   r  refresh   R  toggle auto-refresh          "

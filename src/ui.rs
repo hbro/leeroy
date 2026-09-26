@@ -89,7 +89,15 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App) {
             Span::styled(format!(" · {error}"), Style::new().red()),
         ],
     });
-    frame.render_widget(Paragraph::new(Line::from(spans)).on_dark_gray(), area);
+    // Refresh status on the far right; the connection info gets the rest.
+    let status = refresh_status(app);
+    let [left, right] = Layout::horizontal([
+        Constraint::Min(0),
+        Constraint::Length(status.width() as u16),
+    ])
+    .areas(area);
+    frame.render_widget(Paragraph::new(Line::from(spans)).on_dark_gray(), left);
+    frame.render_widget(Paragraph::new(status).on_dark_gray(), right);
 }
 
 fn view_block(title: &str) -> Block<'_> {
@@ -451,51 +459,44 @@ fn render_global_bar(frame: &mut Frame, area: Rect, app: &App) {
     if captured {
         commands = commands.gray().italic();
     }
-    let status = refresh_status(app);
-    let [left, right] = Layout::horizontal([
-        Constraint::Min(0),
-        Constraint::Length(status.width() as u16),
-    ])
-    .areas(area);
-    frame.render_widget(Paragraph::new(commands).on_dark_gray(), left);
-    frame.render_widget(Paragraph::new(status).on_dark_gray(), right);
+    frame.render_widget(Paragraph::new(commands).on_dark_gray(), area);
 }
 
-/// `auto 30s · updated 12s ago`: whether auto-refresh is on and how old the
-/// data is. Only shown when connected (there's nothing to refresh otherwise).
+/// `⟳ 4s`: how old the data is; the icon is green while auto-refresh is on,
+/// gray while it's off. `⟳ …` while fetching, `✕` after a failed refresh.
+/// Only shown when connected (there's nothing to refresh otherwise).
 fn refresh_status(app: &App) -> Line<'static> {
     if !matches!(app.connection, ConnectionStatus::Connected { .. }) {
         return Line::default();
     }
-    let dim = Style::new().gray();
-    let mut spans = vec![if app.auto_refresh {
-        let secs = app.settings.effective().refresh_interval().as_secs();
-        Span::styled(format!("⟳ auto {secs}s"), Style::new().green())
+    let icon = if app.auto_refresh {
+        Style::new().green()
     } else {
-        Span::styled("auto off", dim)
-    }];
-    let busy = app.jobs.refreshing || app.jobs.load == JobsLoad::Loading;
+        Style::new().gray()
+    };
+    // Leading space: a gap even when the connection text is cut off.
+    let mut spans = vec![Span::raw(" "), Span::styled("⟳", icon)];
+    let busy = app.jobs.fetch_in_flight();
     if busy {
-        spans.push(Span::styled(" · refreshing…", Style::new().yellow()));
+        spans.push(Span::styled(" …", Style::new().yellow()));
     } else if let Some(at) = app.jobs.fetched_at {
-        let age = app.now.saturating_duration_since(at);
-        spans.push(Span::styled(format!(" · updated {}", format_age(age)), dim));
+        let age = format_age(app.now.saturating_duration_since(at));
+        spans.push(Span::styled(format!(" {age}"), Style::new().gray()));
     }
     if matches!(app.jobs.load, JobsLoad::Failed(_)) && !busy {
-        spans.push(Span::styled(" · last refresh failed", Style::new().red()));
+        spans.push(Span::styled(" ✕", Style::new().red()));
     }
     spans.push(Span::raw(" "));
     Line::from(spans)
 }
 
-/// `just now`, `12s ago`, `4m ago`, `2h ago`, `3d ago`.
+/// `0s`, `12s`, `4m`, `2h`, `3d`.
 fn format_age(age: std::time::Duration) -> String {
     match age.as_secs() {
-        0 => "just now".into(),
-        s @ 1..60 => format!("{s}s ago"),
-        s @ 60..3600 => format!("{}m ago", s / 60),
-        s @ 3600..86_400 => format!("{}h ago", s / 3600),
-        s => format!("{}d ago", s / 86_400),
+        s @ 0..60 => format!("{s}s"),
+        s @ 60..3600 => format!("{}m", s / 60),
+        s @ 3600..86_400 => format!("{}h", s / 3600),
+        s => format!("{}d", s / 86_400),
     }
 }
 

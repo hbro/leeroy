@@ -15,23 +15,21 @@ const fn bind(key: &'static str, desc: &'static str) -> Binding {
 }
 
 /// Bindings that work everywhere (bottom bar), except while typing text.
-pub const GLOBAL_BINDINGS: &[Binding] =
-    &[bind("q", "quit"), bind("s", "settings"), bind("?", "help")];
+pub const GLOBAL_BINDINGS: &[Binding] = &[
+    bind("q", "quit"),
+    bind("s", "settings"),
+    bind("?", "help"),
+    bind("r", "refresh"),
+    bind("R", "toggle auto-refresh"),
+];
 
 /// Bindings that only apply in the given context (context bar).
 pub fn context_bindings(context: Context) -> &'static [Binding] {
-    const JOBS: &[Binding] = &[
-        bind("↑/↓", "select"),
-        bind("/", "filter"),
-        bind("r", "refresh"),
-        bind("R", "auto-refresh"),
-    ];
+    const JOBS: &[Binding] = &[bind("↑/↓", "select"), bind("/", "filter")];
     const JOBS_FILTERED: &[Binding] = &[
         bind("↑/↓", "select"),
         bind("/", "filter"),
-        bind("Esc", "clear"),
-        bind("r", "refresh"),
-        bind("R", "auto-refresh"),
+        bind("Esc", "clear filter"),
     ];
     const JOBS_FILTER: &[Binding] = &[
         bind("Enter", "apply"),
@@ -105,6 +103,12 @@ pub fn map_key(app: &App, key: KeyEvent) -> Option<Action> {
         KeyCode::Char('q') => return Some(Action::Quit),
         KeyCode::Char('s') => return Some(Action::OpenSettings),
         KeyCode::Char('?') => return Some(Action::ToggleHelp),
+        // Some terminals report Shift+r as 'r' with SHIFT instead of 'R'.
+        KeyCode::Char('R') => return Some(Action::ToggleAutoRefresh),
+        KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::SHIFT) => {
+            return Some(Action::ToggleAutoRefresh);
+        }
+        KeyCode::Char('r') => return Some(Action::Refresh),
         _ => {}
     }
     match (context, key.code) {
@@ -121,12 +125,6 @@ pub fn map_key(app: &App, key: KeyEvent) -> Option<Action> {
             KeyCode::Home | KeyCode::Char('g') => Some(Action::SelectFirst),
             KeyCode::End | KeyCode::Char('G') => Some(Action::SelectLast),
             KeyCode::Char('/') => Some(Action::StartFilter),
-            // Some terminals report Shift+r as 'r' with SHIFT instead of 'R'.
-            KeyCode::Char('R') => Some(Action::ToggleAutoRefresh),
-            KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::SHIFT) => {
-                Some(Action::ToggleAutoRefresh)
-            }
-            KeyCode::Char('r') => Some(Action::Refresh),
             _ => None,
         },
         _ => None,
@@ -205,6 +203,40 @@ mod tests {
                 "{context:?}"
             );
             assert_eq!(map_key(&app, key(KeyCode::F(12))), None, "no such tab");
+        }
+    }
+
+    #[test]
+    fn refresh_keys_are_global() {
+        for context in [
+            Context::Jobs,
+            Context::JobsFiltered,
+            Context::Settings,
+            Context::Help,
+        ] {
+            let app = app_in(context);
+            assert_eq!(
+                map_key(&app, key(KeyCode::Char('r'))),
+                Some(Action::Refresh),
+                "{context:?}"
+            );
+            assert_eq!(
+                map_key(&app, key(KeyCode::Char('R'))),
+                Some(Action::ToggleAutoRefresh),
+                "{context:?}"
+            );
+        }
+        // ...but typing in a field still types.
+        for context in [Context::JobsFilter, Context::EditSetting] {
+            let app = app_in(context);
+            assert_eq!(
+                map_key(&app, key(KeyCode::Char('r'))),
+                Some(Action::Input('r'))
+            );
+            assert_eq!(
+                map_key(&app, key(KeyCode::Char('R'))),
+                Some(Action::Input('R'))
+            );
         }
     }
 

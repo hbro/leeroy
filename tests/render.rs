@@ -78,7 +78,7 @@ fn header_shows_connected_instance() {
         .iter()
         .map(|cell| cell.symbol())
         .collect();
-    insta::assert_snapshot!(header.trim_end(), @" Leeroy  ● https://jenkins.example.com · Jenkins 2.504.1 · hbro");
+    insta::assert_snapshot!(header.trim_end(), @" Leeroy  ● https://jenkins.example.com · Jenkins 2.504.1 · hbro               ⟳");
 }
 
 #[test]
@@ -350,32 +350,48 @@ fn tab_bar_marks_settings_while_open() {
     assert_eq!(row(&app), "  F1 Jobs   Settings");
 }
 
+/// First line of the screen (the header).
+fn header_line(app: &App) -> String {
+    let terminal = render(app);
+    terminal.backend().buffer().content()[..WIDTH as usize]
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect()
+}
+
 #[test]
-fn refresh_status_in_global_bar() {
+fn refresh_status_in_header() {
     use std::time::Duration;
-    let last_line = |app: &App| -> String {
-        let terminal = render(app);
-        let content = terminal.backend().buffer().content();
-        content[content.len() - WIDTH as usize..]
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect::<String>()
-    };
     let mut app = app_with_jobs();
     let base = app.now;
     let ends = |app: &App, tail: &str| {
-        let line = last_line(app);
+        let line = header_line(app);
         assert!(line.ends_with(tail), "expected …{tail:?} in {line:?}");
     };
-    ends(&app, "⟳ auto 10s · updated just now ");
+    ends(&app, "· me                   ⟳ 0s ");
 
-    // R: off; the age keeps counting.
+    // Same compact form with auto-refresh off (only the icon colour differs).
     apply(&mut app, &[Action::ToggleAutoRefresh]);
     apply(&mut app, &[Action::Tick(base + Duration::from_secs(75))]);
-    ends(&app, "auto off · updated 1m ago ");
+    ends(&app, "⟳ 1m ");
 
-    // R again: stale data is refreshed right away, and the bar says so.
+    // R again: stale data is refreshed right away.
     apply(&mut app, &[Action::ToggleAutoRefresh]);
-    ends(&app, "⟳ auto 10s · refreshing… ");
+    ends(&app, "⟳ … ");
+
+    // A failed refresh keeps the last good age and adds a marker.
+    let generation = app.connection_generation;
+    apply(
+        &mut app,
+        &[Action::JobsFetched {
+            generation,
+            result: Err("HTTP 502".into()),
+        }],
+    );
+    ends(&app, "⟳ 1m ✕ ");
     insta::assert_snapshot!(render(&app).backend());
+
+    // Not connected: no refresh status at all.
+    let line = header_line(&test_app());
+    assert!(!line.contains('⟳'), "{line}");
 }

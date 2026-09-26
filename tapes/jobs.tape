@@ -11,6 +11,12 @@ Show
 Screenshot target/screenshots/jobs.png
 Sleep 500ms
 Hide
+Type "R"
+Sleep 300ms
+Show
+Screenshot target/screenshots/jobs-auto-off.png
+Sleep 500ms
+Hide
 Type "/"
 Type "main"
 Sleep 300ms

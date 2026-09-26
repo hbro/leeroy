@@ -25,4 +25,4 @@ expression: screen
 "│                                                                              │"
 "╰──────────────────────────────────────────────────────────────────────────────╯"
 " Settings   ↑/↓  select   Enter  edit/toggle   Esc  back                        "
-" q  quit   s  settings   ?  help                                                "
+" q  quit   s  settings   ?  help   r  refresh   R  toggle auto-refresh          "

@@ -25,4 +25,4 @@ expression: screen
 "│     Authorization: Bearer <token>                                            │"
 "╰──────────────────────────────────────────────────────────────────────────────╯"
 " Edit   Enter  save   Esc  cancel   ↑/↓  save & move   ←/→  cursor   C-u  clear "
-" q  quit   s  settings   ?  help                                                "
+" q  quit   s  settings   ?  help   r  refresh   R  toggle auto-refresh          "

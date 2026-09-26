@@ -36,6 +36,9 @@ Rules:
 - Header: app name + connected Jenkins instance (`App::connection`).
 - Tabs: `app::Tab` (`ALL`, F-key = position + 1), tab bar under the header. New
   content = new `Tab` + `View` variant. F-keys work everywhere except text input.
+- Global keys (`GLOBAL_BINDINGS`, bottom bar): q, s, ?, r (refresh), R (toggle
+  auto-refresh). The refresh status is a compact `⟳ 4s` at the right end of the
+  header (icon green = auto-refresh on, gray = off; `…` fetching, `✕` failed).
 - Jobs: fetched after each successful connect and on `r`, tagged with the
   connection generation (stale results ignored; list cleared on reconnect). A
   reload keeps the old list visible (`refreshing`) and restores the selection by
