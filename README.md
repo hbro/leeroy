@@ -176,5 +176,15 @@ retried after a full interval, never in a tight loop.
 it took, what triggered it, parameters, description and the SCM changes it
 included. A running build shows its elapsed time against Jenkins' estimate as a
 progress bar. `r` and auto-refresh re-fetch the build while this view is open (so
-a running build updates live), and the header's `⟳` age refers to it. `↑/↓`
-`PgUp/PgDn` `g/G` scroll, `Esc` goes back to the list.
+a running build updates live), and the header's `⟳` age refers to it.
+
+| Key | Action |
+| --- | --- |
+| `←` / `→` | older / newer build (deleted builds are skipped) |
+| `Home` / `End` | first (oldest kept) / latest build |
+| `↑/↓` `PgUp/PgDn` `g/G` | scroll |
+| `Esc` | back to the list |
+
+The title shows which build you're on (`#42 · 17 of 20`, counted from the
+oldest). On the latest build, refreshing follows new builds as they start; an
+older build stays put.

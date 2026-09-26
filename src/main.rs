@@ -191,6 +191,7 @@ impl Executor {
             Effect::FetchBuild {
                 generation,
                 job,
+                which,
                 config,
             } => {
                 if let Some(previous) = self.build_task.take() {
@@ -198,16 +199,21 @@ impl Executor {
                 }
                 let tx = tx.clone();
                 let task = tokio::spawn(async move {
-                    let result = jenkins::fetch_last_build(&config, &job).await;
+                    let result = jenkins::fetch_build(&config, &job, which).await;
                     match &result {
-                        Ok(build) => {
-                            tracing::info!(%job, number = ?build.as_ref().map(|b| b.number), "fetched build")
-                        }
-                        Err(err) => tracing::warn!(%job, %err, "fetching build failed"),
+                        Ok(page) => tracing::info!(
+                            %job,
+                            ?which,
+                            number = ?page.build.as_ref().map(|b| b.number),
+                            builds = ?page.numbers.as_ref().map(Vec::len),
+                            "fetched build"
+                        ),
+                        Err(err) => tracing::warn!(%job, ?which, %err, "fetching build failed"),
                     }
                     let _ = tx.send(Action::BuildFetched {
                         generation,
                         job,
+                        which,
                         result,
                     });
                 });

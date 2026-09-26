@@ -5,7 +5,7 @@ use std::{fmt, time::Duration};
 use serde::Deserialize;
 
 use crate::{
-    builds::{self, Build},
+    builds::{self, BuildPage, BuildRef},
     config::redact_url,
     jobs::{self, Job},
 };
@@ -102,15 +102,26 @@ pub async fn fetch_jobs(config: &ConnectionConfig) -> Result<Vec<Job>, String> {
     jobs::parse_jobs(&response.body)
 }
 
-/// The most recent build of a job; `None` if it has never been built.
-pub async fn fetch_last_build(
+/// `which` build of a job. For [`BuildRef::Latest`] this also returns the
+/// job's build numbers; a never-built job gives `build: None`. For a number,
+/// `build: None` means that build doesn't exist (deleted).
+pub async fn fetch_build(
     config: &ConnectionConfig,
     full_name: &str,
-) -> Result<Option<Build>, String> {
-    // Jenkins answers 404 on lastBuild when there is none.
-    match get(config, &builds::last_build_path(full_name), true).await? {
-        Some(response) => builds::parse_build(&response.body).map(Some),
-        None => Ok(None),
+    which: BuildRef,
+) -> Result<BuildPage, String> {
+    let response = get(config, &builds::build_path(full_name, which), true).await?;
+    match (which, response) {
+        (BuildRef::Latest, Some(response)) => builds::parse_job_builds(&response.body),
+        (BuildRef::Latest, None) => Err(format!("job {full_name} no longer exists")),
+        (BuildRef::Number(_), Some(response)) => Ok(BuildPage {
+            build: Some(builds::parse_build(&response.body)?),
+            numbers: None,
+        }),
+        (BuildRef::Number(_), None) => Ok(BuildPage {
+            build: None,
+            numbers: None,
+        }),
     }
 }
 
@@ -461,29 +472,62 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fetches_last_build_or_none() {
+    async fn fetches_builds_latest_and_numbered() {
         let server = MockServer::start().await;
-        Mock::given(path("/job/team/job/my%20svc/lastBuild/api/json"))
+        Mock::given(path("/job/team/job/my%20svc/api/json"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "number": 3, "result": "SUCCESS", "building": false,
-                "timestamp": 1_700_000_000_000u64, "duration": 1000
+                "allBuilds": [{"number": 3}, {"number": 1}],
+                "lastBuild": {"number": 3, "result": "SUCCESS", "building": false,
+                              "timestamp": 1_700_000_000_000u64, "duration": 1000}
             })))
             .mount(&server)
             .await;
-        Mock::given(path("/job/never/lastBuild/api/json"))
-            .respond_with(ResponseTemplate::new(404))
+        Mock::given(path("/job/team/job/my%20svc/1/api/json"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "number": 1, "result": "FAILURE", "timestamp": 0, "duration": 0
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(path("/job/never/api/json"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"allBuilds": [], "lastBuild": null})),
+            )
             .mount(&server)
             .await;
 
         let config = config(&server.uri());
-        let build = fetch_last_build(&config, "team/my svc")
+        let latest = fetch_build(&config, "team/my svc", BuildRef::Latest)
             .await
-            .unwrap()
             .unwrap();
-        assert_eq!(build.number, 3);
-        assert_eq!(fetch_last_build(&config, "never").await.unwrap(), None);
-        // Elsewhere a 404 is still an error.
-        assert!(check(&config).await.is_err());
+        assert_eq!(latest.numbers, Some(vec![1, 3]));
+        assert_eq!(latest.build.unwrap().number, 3);
+        let first = fetch_build(&config, "team/my svc", BuildRef::Number(1))
+            .await
+            .unwrap();
+        assert_eq!(first.build.unwrap().number, 1);
+        assert_eq!(first.numbers, None);
+        // Deleted build: not found, not an error.
+        let gone = fetch_build(&config, "team/my svc", BuildRef::Number(2))
+            .await
+            .unwrap();
+        assert_eq!(gone.build, None);
+        let never = fetch_build(&config, "never", BuildRef::Latest)
+            .await
+            .unwrap();
+        assert_eq!(
+            never,
+            BuildPage {
+                build: None,
+                numbers: Some(vec![])
+            }
+        );
+        // A job that's gone is an error.
+        assert!(
+            fetch_build(&config, "gone", BuildRef::Latest)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]

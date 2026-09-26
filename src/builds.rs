@@ -35,17 +35,87 @@ pub struct Change {
     pub author: Option<String>,
 }
 
-/// Request path (relative to the Jenkins URL) for a job's last build.
+/// Which build of a job to show.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuildRef {
+    /// The newest build; follows new builds on refresh.
+    Latest,
+    Number(u64),
+}
+
+/// Request path (relative to the Jenkins URL) for `which` build of a job.
+///
+/// `Latest` asks the *job* for its build numbers and last build in one go
+/// (the numbers are needed to step between builds: they have gaps where
+/// builds were deleted). `Number` asks for that one build.
 ///
 /// Built from the full name rather than the job's `url` from the API: that
 /// URL uses Jenkins' configured root, which behind a reverse proxy can be an
 /// internal address the user can't (or shouldn't) reach directly.
-pub fn last_build_path(full_name: &str) -> String {
+pub fn build_path(full_name: &str, which: BuildRef) -> String {
     let job_path: String = full_name
         .split('/')
         .map(|segment| format!("job/{}/", encode_segment(segment)))
         .collect();
-    format!("{job_path}lastBuild/api/json?tree={TREE}")
+    match which {
+        // `allBuilds` has every number; `builds` is the fallback where it's
+        // not exported (and may be capped to recent ones).
+        BuildRef::Latest => {
+            format!("{job_path}api/json?tree=allBuilds[number],builds[number],lastBuild[{TREE}]")
+        }
+        BuildRef::Number(n) => format!("{job_path}{n}/api/json?tree={TREE}"),
+    }
+}
+
+/// What a build fetch returns: the build (`None`: not found / never built)
+/// and, for [`BuildRef::Latest`], all build numbers (ascending).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuildPage {
+    pub build: Option<Build>,
+    pub numbers: Option<Vec<u64>>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawJob {
+    all_builds: Option<Vec<RawNumber>>,
+    builds: Option<Vec<RawNumber>>,
+    last_build: Option<serde_json::Value>,
+}
+
+#[derive(Deserialize)]
+struct RawNumber {
+    number: u64,
+}
+
+/// Parse the job-level answer for [`BuildRef::Latest`].
+pub fn parse_job_builds(json: &str) -> Result<BuildPage, String> {
+    let raw: RawJob =
+        serde_json::from_str(json).map_err(|err| format!("unexpected job data: {err}"))?;
+    let mut numbers: Vec<u64> = raw
+        .all_builds
+        .or(raw.builds)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|n| n.number)
+        .collect();
+    numbers.sort_unstable();
+    numbers.dedup();
+    let build = match raw.last_build {
+        Some(value) if !value.is_null() => Some(parse_build(&value.to_string())?),
+        _ => None,
+    };
+    // The last build is newer than the list if one started in between.
+    if let Some(build) = &build
+        && !numbers.contains(&build.number)
+    {
+        numbers.push(build.number);
+        numbers.sort_unstable();
+    }
+    Ok(BuildPage {
+        build,
+        numbers: Some(numbers),
+    })
 }
 
 /// Percent-encode one path segment (job names may contain spaces, `#`, ...).
@@ -229,6 +299,10 @@ pub enum BuildLoad {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuildView {
     pub job: String,
+    /// The build being shown (or loaded).
+    pub target: BuildRef,
+    /// All build numbers, ascending; known after the first `Latest` fetch.
+    pub numbers: Option<Vec<u64>>,
     pub load: BuildLoad,
     /// A reload is running while the current details stay visible.
     pub refreshing: bool,
@@ -245,6 +319,8 @@ impl BuildView {
     pub fn new(job: String) -> Self {
         Self {
             job,
+            target: BuildRef::Latest,
+            numbers: None,
             load: BuildLoad::Loading,
             refreshing: false,
             fetched_at: None,
@@ -257,6 +333,61 @@ impl BuildView {
     pub fn fetch_in_flight(&self) -> bool {
         self.refreshing || self.load == BuildLoad::Loading
     }
+
+    /// Number of the build shown (or being loaded), if known.
+    pub fn current_number(&self) -> Option<u64> {
+        match self.target {
+            BuildRef::Number(n) => Some(n),
+            BuildRef::Latest => match &self.load {
+                BuildLoad::Loaded(Some(build)) => Some(build.number),
+                _ => self.numbers.as_ref()?.last().copied(),
+            },
+        }
+    }
+
+    /// Where a step would go: `None` when there's nowhere to go (edge of the
+    /// list, or numbers not known yet). The newest build is always `Latest`,
+    /// so a view that reaches it follows new builds again.
+    pub fn step(&self, step: BuildStep) -> Option<BuildRef> {
+        let numbers = self.numbers.as_ref().filter(|n| !n.is_empty())?;
+        let current = self.current_number();
+        let newest = *numbers.last()?;
+        let target = match step {
+            BuildStep::Older => {
+                let current = current?;
+                *numbers.iter().rev().find(|&&n| n < current)?
+            }
+            BuildStep::Newer => {
+                let current = current?;
+                *numbers.iter().find(|&&n| n > current)?
+            }
+            BuildStep::First => *numbers.first()?,
+            BuildStep::Last => newest,
+        };
+        let target = if target == newest {
+            BuildRef::Latest
+        } else {
+            BuildRef::Number(target)
+        };
+        (target != self.target).then_some(target)
+    }
+
+    /// Position of the shown build, 1 = oldest: `(position, total)`.
+    pub fn position(&self) -> Option<(usize, usize)> {
+        let numbers = self.numbers.as_ref()?;
+        let current = self.current_number()?;
+        let index = numbers.iter().position(|&n| n == current)?;
+        Some((index + 1, numbers.len()))
+    }
+}
+
+/// A step through a job's builds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuildStep {
+    Older,
+    Newer,
+    First,
+    Last,
 }
 
 #[cfg(test)]
@@ -264,10 +395,81 @@ mod tests {
     use super::*;
 
     #[test]
-    fn path_from_full_name() {
-        let path = last_build_path("team/my svc/main#1");
+    fn path_for_a_numbered_build() {
+        let path = build_path("team/svc", BuildRef::Number(41));
         assert!(
-            path.starts_with("job/team/job/my%20svc/job/main%231/lastBuild/api/json?tree="),
+            path.starts_with("job/team/job/svc/41/api/json?tree=number,"),
+            "{path}"
+        );
+    }
+
+    #[test]
+    fn job_builds_list_with_gaps_and_a_newer_last_build() {
+        let json = r#"{"allBuilds": [{"number": 7}, {"number": 3}, {"number": 5}],
+                       "builds": [{"number": 7}],
+                       "lastBuild": {"number": 8, "result": null, "building": true,
+                                     "timestamp": 0, "duration": 0}}"#;
+        let page = parse_job_builds(json).unwrap();
+        assert_eq!(page.numbers, Some(vec![3, 5, 7, 8]));
+        assert_eq!(page.build.unwrap().number, 8);
+
+        // Fallback to `builds`; never built.
+        let page = parse_job_builds(r#"{"builds": [], "lastBuild": null}"#).unwrap();
+        assert_eq!(
+            page,
+            BuildPage {
+                build: None,
+                numbers: Some(vec![])
+            }
+        );
+    }
+
+    fn view(numbers: &[u64], target: BuildRef) -> BuildView {
+        BuildView {
+            numbers: Some(numbers.to_vec()),
+            target,
+            ..BuildView::new("job".into())
+        }
+    }
+
+    #[test]
+    fn stepping_skips_gaps_and_returns_to_latest() {
+        let latest = view(&[3, 5, 7, 8], BuildRef::Latest);
+        assert_eq!(latest.current_number(), Some(8));
+        assert_eq!(latest.step(BuildStep::Older), Some(BuildRef::Number(7)));
+        assert_eq!(latest.step(BuildStep::Newer), None, "already newest");
+        assert_eq!(latest.step(BuildStep::Last), None, "already latest");
+        assert_eq!(latest.step(BuildStep::First), Some(BuildRef::Number(3)));
+        assert_eq!(latest.position(), Some((4, 4)));
+
+        let at5 = view(&[3, 5, 7, 8], BuildRef::Number(5));
+        assert_eq!(at5.step(BuildStep::Older), Some(BuildRef::Number(3)));
+        assert_eq!(at5.step(BuildStep::Newer), Some(BuildRef::Number(7)));
+        assert_eq!(at5.position(), Some((2, 4)));
+        let at7 = view(&[3, 5, 7, 8], BuildRef::Number(7));
+        assert_eq!(
+            at7.step(BuildStep::Newer),
+            Some(BuildRef::Latest),
+            "newest = Latest"
+        );
+        let at3 = view(&[3, 5, 7, 8], BuildRef::Number(3));
+        assert_eq!(at3.step(BuildStep::Older), None, "oldest");
+        assert_eq!(at3.step(BuildStep::First), None, "already first");
+    }
+
+    #[test]
+    fn no_stepping_before_numbers_are_known() {
+        let fresh = BuildView::new("job".into());
+        assert_eq!(fresh.step(BuildStep::Older), None);
+        assert_eq!(fresh.step(BuildStep::First), None);
+        assert_eq!(view(&[], BuildRef::Latest).step(BuildStep::First), None);
+    }
+
+    #[test]
+    fn path_from_full_name() {
+        let path = build_path("team/my svc/main#1", BuildRef::Latest);
+        assert!(
+            path.starts_with("job/team/job/my%20svc/job/main%231/api/json?tree=allBuilds[number],"),
             "{path}"
         );
     }

@@ -7,6 +7,8 @@
 Serves (under any path prefix, with an X-Jenkins header):
   GET /whoAmI/api/json   the current user
   GET /api/json          a job tree: folders, a multibranch project, every status
+  GET /job/../api/json             the job: allBuilds (numbers, with gaps) + lastBuild
+  GET /job/../<n>/api/json         build n (404 if it doesn't exist)
   GET /job/../lastBuild/api/json   the job's last build (404 if never built)
 --auth      require HTTP basic auth, 401 otherwise; the user is echoed back
 --delay     sleep before answering (to see "connecting" / "refreshing")
@@ -74,27 +76,56 @@ RESULTS = {
 }
 
 
-def last_build(full_name: str, color: str):
-    """A plausible last build for a job, or None if it was never built."""
+def build_numbers(full_name: str, color: str) -> list:
+    """Build numbers of a job, oldest first, with gaps (deleted builds)."""
     if color == "notbuilt":
+        return []
+    last = 40 + len(full_name) % 17
+    return [n for n in range(last - 12, last + 1) if n % 5 != 0 or n == last]
+
+
+def build(full_name: str, color: str, number: int):
+    """A plausible build of a job, or None if that build doesn't exist."""
+    numbers = build_numbers(full_name, color)
+    if number not in numbers:
         return None
-    now_ms = SERVER_START_MS  # fixed, so running builds progress over time
-    number = 40 + len(full_name) % 17
-    running = color.endswith("_anime")
-    build = {
+    last = numbers[-1]
+    running = number == last and color.endswith("_anime")
+    if number == last:
+        result = (
+            None if running else RESULTS.get(color.removesuffix("_anime"), "SUCCESS")
+        )
+    else:
+        result = (
+            "FAILURE"
+            if number % 4 == 0
+            else "UNSTABLE"
+            if number % 7 == 0
+            else "SUCCESS"
+        )
+    started = (
+        SERVER_START_MS - (last - number) * 3_600_000
+    )  # fixed, so running builds progress
+    data = {
         "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
         "number": number,
         "displayName": f"#{number}",
-        "result": None if running else RESULTS.get(color, "SUCCESS"),
+        "result": result,
         "building": running,
-        "timestamp": now_ms - (150_000 if running else 600_000),
-        "duration": 0 if running else 95_000,
+        "timestamp": started - (150_000 if running else 600_000),
+        "duration": 0 if running else 60_000 + number * 1_000,
         "estimatedDuration": 300_000,
         "description": "Release candidate" if "release" in full_name else None,
         "actions": [
             {
                 "_class": "hudson.model.CauseAction",
-                "causes": [{"shortDescription": "Started by user Hans"}],
+                "causes": [
+                    {
+                        "shortDescription": "Started by user Hans"
+                        if number % 2
+                        else "Started by timer"
+                    }
+                ],
             },
             {},
         ],
@@ -102,8 +133,8 @@ def last_build(full_name: str, color: str):
             {
                 "items": [
                     {
-                        "commitId": "0123abcd4567",
-                        "msg": "Fix login redirect\n\ndetails",
+                        "commitId": f"{number:04x}abcd4567",
+                        "msg": f"Change for build {number}\n\ndetails",
                         "author": {"fullName": "Alice"},
                     },
                     {
@@ -116,7 +147,7 @@ def last_build(full_name: str, color: str):
         ],
     }
     if full_name.startswith("backend/"):
-        build["actions"].append(
+        data["actions"].append(
             {
                 "_class": "hudson.model.ParametersAction",
                 "parameters": [
@@ -125,7 +156,12 @@ def last_build(full_name: str, color: str):
                 ],
             }
         )
-    return build
+    return data
+
+
+def last_build(full_name: str, color: str):
+    numbers = build_numbers(full_name, color)
+    return build(full_name, color, numbers[-1]) if numbers else None
 
 
 def job_tree(extra: int, churn_step: int) -> dict:
@@ -212,7 +248,7 @@ def main() -> None:
                 return self.reply(
                     200, {"name": user, "authenticated": user != "anonymous"}
                 )
-            if path.endswith("/lastBuild/api/json"):
+            if "/job/" in path and path.endswith("/api/json"):
                 parts = path.split("/")
                 names = [
                     unquote(parts[i + 1])
@@ -223,10 +259,27 @@ def main() -> None:
                 color = find_color(job_tree(args.jobs, 0)["jobs"], full_name)
                 if color is None:
                     return self.reply(404, {"error": "no such job"})
-                build = last_build(full_name, color)
-                if build is None:
-                    return self.reply(404, {"error": "no builds"})
-                return self.reply(200, build)
+                # What follows the last /job/<name>/: "", "lastBuild" or a number.
+                last_job = max(i for i, p in enumerate(parts[:-1]) if p == "job") + 1
+                tail = parts[last_job + 1 : -2]
+                if not tail:
+                    numbers = build_numbers(full_name, color)
+                    return self.reply(
+                        200,
+                        {
+                            "allBuilds": [{"number": n} for n in reversed(numbers)],
+                            "lastBuild": last_build(full_name, color),
+                        },
+                    )
+                if tail == ["lastBuild"]:
+                    data = last_build(full_name, color)
+                elif tail[0].isdigit():
+                    data = build(full_name, color, int(tail[0]))
+                else:
+                    data = None
+                if data is None:
+                    return self.reply(404, {"error": "no such build"})
+                return self.reply(200, data)
             if path.endswith("/api/json"):
                 job_requests[0] += 1
                 step = job_requests[0] if args.churn else 0

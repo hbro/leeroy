@@ -3,7 +3,7 @@
 
 use leeroy::{
     app::{Action, App, ConnectionStatus, SettingsState},
-    builds::{Build, Change},
+    builds::{Build, BuildPage, BuildRef, BuildStep, Change},
     config::{SettingKey, Settings},
     jenkins::ServerInfo,
     jobs::{Job, JobStatus},
@@ -441,12 +441,19 @@ fn app_with_build(build: Option<Build>) -> App {
     app.wall_now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
     apply(&mut app, &[Action::SelectNext, Action::OpenBuild]);
     let generation = app.connection_generation;
+    let numbers = build
+        .as_ref()
+        .map_or(vec![], |b| vec![38, 40, 41, b.number]);
     apply(
         &mut app,
         &[Action::BuildFetched {
             generation,
             job: "backend/api/release-1.2".into(),
-            result: Ok(build),
+            which: BuildRef::Latest,
+            result: Ok(BuildPage {
+                build,
+                numbers: Some(numbers),
+            }),
         }],
     );
     app
@@ -522,4 +529,38 @@ fn build_never_run() {
     let screen = format!("{}", render(&app_with_build(None)).backend());
     assert!(screen.contains("No builds yet"), "{screen}");
     assert!(screen.contains("backend/api/release-1.2"), "{screen}");
+}
+
+#[test]
+fn build_navigation_title_and_deleted_build() {
+    let mut app = app_with_build(Some(finished_build()));
+    let screen = format!("{}", render(&app).backend());
+    assert!(
+        screen.contains("backend/api/release-1.2 · #42 · 4 of 4"),
+        "{screen}"
+    );
+    assert!(
+        screen.contains("←/→  older/newer   Home/End  first/last"),
+        "{screen}"
+    );
+
+    apply(&mut app, &[Action::BuildStep(BuildStep::Older)]);
+    let screen = format!("{}", render(&app).backend());
+    assert!(screen.contains("Loading build #41…"), "{screen}");
+
+    let generation = app.connection_generation;
+    apply(
+        &mut app,
+        &[Action::BuildFetched {
+            generation,
+            job: "backend/api/release-1.2".into(),
+            which: BuildRef::Number(41),
+            result: Ok(BuildPage {
+                build: None,
+                numbers: None,
+            }),
+        }],
+    );
+    let screen = format!("{}", render(&app).backend());
+    assert!(screen.contains("Build #41 no longer exists"), "{screen}");
 }

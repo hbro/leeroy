@@ -4,7 +4,7 @@ use std::{
 };
 
 use crate::{
-    builds::{Build, BuildLoad, BuildView},
+    builds::{BuildLoad, BuildPage, BuildRef, BuildStep, BuildView},
     config::{SettingKey, Settings, header_env_var, parse_header, redact_url},
     input::TextInput,
     jenkins::{ConnectionConfig, ServerInfo},
@@ -39,6 +39,8 @@ pub enum Action {
     StartFilter,
     /// Jobs tab: show the selected job's most recent build.
     OpenBuild,
+    /// Build view: go to another build of the same job.
+    BuildStep(BuildStep),
     /// Reload the job list (or reconnect if the connection failed).
     Refresh,
     /// `R`: turn auto-refresh on/off for this session.
@@ -70,11 +72,12 @@ pub enum Action {
         generation: u64,
         result: Result<Vec<Job>, String>,
     },
-    /// Outcome of [`Effect::FetchBuild`]; `Ok(None)`: never built.
+    /// Outcome of [`Effect::FetchBuild`].
     BuildFetched {
         generation: u64,
         job: String,
-        result: Result<Option<Build>, String>,
+        which: BuildRef,
+        result: Result<BuildPage, String>,
     },
 }
 
@@ -98,10 +101,11 @@ pub enum Effect {
         generation: u64,
         config: ConnectionConfig,
     },
-    /// Load `job`'s last build; answer with [`Action::BuildFetched`].
+    /// Load `which` build of `job`; answer with [`Action::BuildFetched`].
     FetchBuild {
         generation: u64,
         job: String,
+        which: BuildRef,
         config: ConnectionConfig,
     },
 }
@@ -622,25 +626,44 @@ impl App {
             Action::BuildFetched {
                 generation,
                 job,
+                which,
                 result,
             } => {
                 let now = self.now;
-                let Some(build) = self
-                    .build
-                    .as_mut()
-                    .filter(|b| b.job == job && generation == self.connection_generation)
-                else {
-                    return Vec::new(); // another job or connection by now
+                let Some(build) = self.build.as_mut().filter(|b| {
+                    b.job == job && b.target == which && generation == self.connection_generation
+                }) else {
+                    return Vec::new(); // another job, build or connection by now
                 };
                 build.refreshing = false;
                 build.attempted_at = Some(now);
-                if result.is_ok() {
-                    build.fetched_at = Some(now);
-                }
                 build.load = match result {
-                    Ok(found) => BuildLoad::Loaded(found),
+                    Ok(page) => {
+                        build.fetched_at = Some(now);
+                        if let Some(numbers) = page.numbers {
+                            build.numbers = Some(numbers);
+                        }
+                        BuildLoad::Loaded(page.build)
+                    }
                     Err(error) => BuildLoad::Failed(error),
                 };
+            }
+            Action::BuildStep(step) => {
+                let Some(build) = self.build.as_mut().filter(|_| self.view == View::Build) else {
+                    return Vec::new();
+                };
+                let Some(target) = build.step(step) else {
+                    return Vec::new();
+                };
+                // Another build: load it right away. A fetch still running for
+                // the previous one is cancelled / its answer ignored.
+                build.target = target;
+                build.load = BuildLoad::Loading;
+                build.refreshing = false;
+                build.fetched_at = None;
+                build.attempted_at = None;
+                build.scroll = 0;
+                return self.build_effect().into_iter().collect();
             }
             Action::JobsFetched { generation, result } => {
                 if generation != self.connection_generation {
@@ -712,9 +735,11 @@ impl App {
 
     /// The fetch for the open build view (no in-flight check).
     fn build_effect(&self) -> Option<Effect> {
+        let build = self.build.as_ref()?;
         Some(Effect::FetchBuild {
             generation: self.connection_generation,
-            job: self.build.as_ref()?.job.clone(),
+            job: build.job.clone(),
+            which: build.target,
             config: self.settings.connection_config()?,
         })
     }
@@ -1700,6 +1725,17 @@ mod tests {
         assert_eq!(fetches(&effects), 1);
     }
 
+    use crate::builds::Build;
+
+    /// A `Latest` answer: the build plus numbers 1..=its number.
+    fn latest_page(build: Option<Build>) -> BuildPage {
+        let numbers = build.as_ref().map_or(vec![], |b| (1..=b.number).collect());
+        BuildPage {
+            build,
+            numbers: Some(numbers),
+        }
+    }
+
     fn sample_build(number: u64) -> Build {
         Build {
             number,
@@ -1738,10 +1774,12 @@ mod tests {
         app.update(Action::BuildFetched {
             generation,
             job: "b".into(),
-            result: Ok(Some(sample_build(7))),
+            which: BuildRef::Latest,
+            result: Ok(latest_page(Some(sample_build(7)))),
         });
         let build = app.build.as_ref().unwrap();
         assert_eq!(build.load, BuildLoad::Loaded(Some(sample_build(7))));
+        assert_eq!(build.numbers, Some((1..=7).collect()));
         assert_eq!(build.fetched_at, Some(app.now));
     }
 
@@ -1752,13 +1790,15 @@ mod tests {
         app.update(Action::BuildFetched {
             generation,
             job: "a".into(),
-            result: Ok(None),
+            which: BuildRef::Latest,
+            result: Ok(latest_page(None)),
         });
         assert_eq!(app.build.as_ref().unwrap().load, BuildLoad::Loaded(None));
         app.update(Action::Refresh);
         app.update(Action::BuildFetched {
             generation,
             job: "a".into(),
+            which: BuildRef::Latest,
             result: Err("HTTP 500".into()),
         });
         assert_eq!(
@@ -1777,13 +1817,15 @@ mod tests {
         app.update(Action::BuildFetched {
             generation,
             job: "a".into(),
-            result: Ok(Some(sample_build(1))),
+            which: BuildRef::Latest,
+            result: Ok(latest_page(Some(sample_build(1)))),
         });
         assert_eq!(app.build.as_ref().unwrap().load, BuildLoad::Loading);
         app.update(Action::BuildFetched {
             generation: generation + 99,
             job: "b".into(),
-            result: Ok(Some(sample_build(1))),
+            which: BuildRef::Latest,
+            result: Ok(latest_page(Some(sample_build(1)))),
         });
         assert_eq!(app.build.as_ref().unwrap().load, BuildLoad::Loading);
     }
@@ -1800,7 +1842,8 @@ mod tests {
         app.update(Action::BuildFetched {
             generation,
             job: "a".into(),
-            result: Ok(Some(sample_build(1))),
+            which: BuildRef::Latest,
+            result: Ok(latest_page(Some(sample_build(1)))),
         });
         // r: the build, not the job list.
         let effects = app.update(Action::Refresh);
@@ -1814,7 +1857,8 @@ mod tests {
         app.update(Action::BuildFetched {
             generation,
             job: "a".into(),
-            result: Ok(Some(sample_build(2))),
+            which: BuildRef::Latest,
+            result: Ok(latest_page(Some(sample_build(2)))),
         });
         // Auto-refresh (on by default) re-fetches the build after the interval.
         assert_eq!(tick(&mut app, Duration::from_secs(9)), Vec::new());
@@ -1860,5 +1904,145 @@ mod tests {
         let mut app = connected_with_jobs(&[]);
         assert_eq!(app.update(Action::OpenBuild), Vec::new());
         assert_eq!(app.view, View::Jobs);
+    }
+
+    fn build_fetch_which(effects: &[Effect]) -> Option<BuildRef> {
+        effects.iter().find_map(|e| match e {
+            Effect::FetchBuild { which, .. } => Some(*which),
+            _ => None,
+        })
+    }
+
+    /// Build view of job "a" showing latest #8, with builds 3, 5, 7, 8.
+    fn app_on_latest_build() -> App {
+        let mut app = connected_with_jobs(&["a"]);
+        app.update(Action::OpenBuild);
+        let generation = app.connection_generation;
+        app.update(Action::BuildFetched {
+            generation,
+            job: "a".into(),
+            which: BuildRef::Latest,
+            result: Ok(BuildPage {
+                build: Some(sample_build(8)),
+                numbers: Some(vec![3, 5, 7, 8]),
+            }),
+        });
+        app
+    }
+
+    fn arrive(app: &mut App, which: BuildRef, build: Option<Build>) {
+        let generation = app.connection_generation;
+        app.update(Action::BuildFetched {
+            generation,
+            job: "a".into(),
+            which,
+            result: Ok(BuildPage {
+                build,
+                numbers: None,
+            }),
+        });
+    }
+
+    #[test]
+    fn stepping_through_builds() {
+        let mut app = app_on_latest_build();
+        let effects = app.update(Action::BuildStep(BuildStep::Older));
+        assert_eq!(build_fetch_which(&effects), Some(BuildRef::Number(7)));
+        let view = app.build.as_ref().unwrap();
+        assert_eq!(view.load, BuildLoad::Loading);
+        assert_eq!(
+            view.position(),
+            Some((3, 4)),
+            "position known while loading"
+        );
+        arrive(&mut app, BuildRef::Number(7), Some(sample_build(7)));
+
+        assert_eq!(
+            build_fetch_which(&app.update(Action::BuildStep(BuildStep::First))),
+            Some(BuildRef::Number(3))
+        );
+        arrive(&mut app, BuildRef::Number(3), Some(sample_build(3)));
+        assert_eq!(
+            app.update(Action::BuildStep(BuildStep::Older)),
+            Vec::new(),
+            "oldest"
+        );
+        assert_eq!(
+            build_fetch_which(&app.update(Action::BuildStep(BuildStep::Last))),
+            Some(BuildRef::Latest)
+        );
+        assert_eq!(
+            app.build.as_ref().unwrap().numbers,
+            Some(vec![3, 5, 7, 8]),
+            "kept"
+        );
+    }
+
+    #[test]
+    fn quick_steps_ignore_answers_for_builds_left_behind() {
+        let mut app = app_on_latest_build();
+        app.update(Action::BuildStep(BuildStep::Older)); // 7
+        app.update(Action::BuildStep(BuildStep::Older)); // 5, while 7 is loading
+        assert_eq!(app.build.as_ref().unwrap().target, BuildRef::Number(5));
+        arrive(&mut app, BuildRef::Number(7), Some(sample_build(7)));
+        assert_eq!(
+            app.build.as_ref().unwrap().load,
+            BuildLoad::Loading,
+            "7 ignored"
+        );
+        arrive(&mut app, BuildRef::Number(5), Some(sample_build(5)));
+        assert_eq!(
+            app.build.as_ref().unwrap().load,
+            BuildLoad::Loaded(Some(sample_build(5)))
+        );
+    }
+
+    #[test]
+    fn refresh_follows_latest_but_pins_older_builds() {
+        let mut app = app_on_latest_build();
+        assert_eq!(
+            build_fetch_which(&app.update(Action::Refresh)),
+            Some(BuildRef::Latest)
+        );
+        let generation = app.connection_generation;
+        // A new build #9 appeared: latest follows it, numbers grow.
+        app.update(Action::BuildFetched {
+            generation,
+            job: "a".into(),
+            which: BuildRef::Latest,
+            result: Ok(BuildPage {
+                build: Some(sample_build(9)),
+                numbers: Some(vec![3, 5, 7, 8, 9]),
+            }),
+        });
+        assert_eq!(app.build.as_ref().unwrap().position(), Some((5, 5)));
+
+        app.update(Action::BuildStep(BuildStep::Older)); // 8
+        arrive(&mut app, BuildRef::Number(8), Some(sample_build(8)));
+        assert_eq!(
+            build_fetch_which(&app.update(Action::Refresh)),
+            Some(BuildRef::Number(8)),
+            "an older build stays pinned"
+        );
+    }
+
+    #[test]
+    fn a_deleted_build_is_a_state_not_an_error() {
+        let mut app = app_on_latest_build();
+        app.update(Action::BuildStep(BuildStep::Older));
+        arrive(&mut app, BuildRef::Number(7), None);
+        let view = app.build.as_ref().unwrap();
+        assert_eq!(view.load, BuildLoad::Loaded(None));
+        // Can still move on from there.
+        assert_eq!(view.step(BuildStep::Older), Some(BuildRef::Number(5)));
+    }
+
+    #[test]
+    fn steps_scroll_back_to_the_top() {
+        let mut app = app_on_latest_build();
+        app.build.as_ref().unwrap().max_scroll.set(5);
+        app.update(Action::SelectLast);
+        app.update(Action::BuildStep(BuildStep::Older));
+        assert_eq!(app.build.as_ref().unwrap().scroll, 0);
     }
 }

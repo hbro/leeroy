@@ -1,6 +1,9 @@
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
-use crate::app::{Action, App, Context, Tab};
+use crate::{
+    app::{Action, App, Context, Tab},
+    builds::BuildStep,
+};
 
 /// A keybinding as shown to the user. Display-only: keep in sync with
 /// [`map_key`] (the tests below check the advertised keys).
@@ -36,7 +39,12 @@ pub fn context_bindings(context: Context) -> &'static [Binding] {
         bind("/", "filter"),
         bind("Esc", "clear filter"),
     ];
-    const BUILD: &[Binding] = &[bind("↑/↓", "scroll"), bind("Esc", "back")];
+    const BUILD: &[Binding] = &[
+        bind("←/→", "older/newer"),
+        bind("Home/End", "first/last"),
+        bind("↑/↓", "scroll"),
+        bind("Esc", "back"),
+    ];
     const JOBS_FILTER: &[Binding] = &[
         bind("Enter", "apply"),
         bind("Esc", "cancel"),
@@ -136,12 +144,17 @@ pub fn map_key(app: &App, key: KeyEvent) -> Option<Action> {
             _ => None,
         },
         (Context::Build, code) => match code {
+            KeyCode::Left => Some(Action::BuildStep(BuildStep::Older)),
+            KeyCode::Right => Some(Action::BuildStep(BuildStep::Newer)),
+            KeyCode::Home => Some(Action::BuildStep(BuildStep::First)),
+            KeyCode::End => Some(Action::BuildStep(BuildStep::Last)),
+            // Scrolling the details (Home/End go to the first/last build).
             KeyCode::Down | KeyCode::Char('j') => Some(Action::SelectNext),
             KeyCode::Up | KeyCode::Char('k') => Some(Action::SelectPrev),
             KeyCode::PageDown => Some(Action::SelectPageDown),
             KeyCode::PageUp => Some(Action::SelectPageUp),
-            KeyCode::Home | KeyCode::Char('g') => Some(Action::SelectFirst),
-            KeyCode::End | KeyCode::Char('G') => Some(Action::SelectLast),
+            KeyCode::Char('g') => Some(Action::SelectFirst),
+            KeyCode::Char('G') => Some(Action::SelectLast),
             _ => None,
         },
         _ => None,
@@ -206,6 +219,8 @@ mod tests {
                 "↓" => key(KeyCode::Down),
                 "←" => key(KeyCode::Left),
                 "→" => key(KeyCode::Right),
+                "Home" => key(KeyCode::Home),
+                "End" => key(KeyCode::End),
                 s if s.starts_with("C-") && s.chars().count() == 3 => {
                     ctrl(s.chars().nth(2).unwrap())
                 }
@@ -289,6 +304,23 @@ mod tests {
     #[test]
     fn build_view_keys() {
         let app = app_in(Context::Build);
+        for (code, step) in [
+            (KeyCode::Left, BuildStep::Older),
+            (KeyCode::Right, BuildStep::Newer),
+            (KeyCode::Home, BuildStep::First),
+            (KeyCode::End, BuildStep::Last),
+        ] {
+            assert_eq!(
+                map_key(&app, key(code)),
+                Some(Action::BuildStep(step)),
+                "{code:?}"
+            );
+        }
+        assert_eq!(
+            map_key(&app, key(KeyCode::Char('G'))),
+            Some(Action::SelectLast),
+            "scroll"
+        );
         assert_eq!(map_key(&app, key(KeyCode::Esc)), Some(Action::Back));
         assert_eq!(
             map_key(&app, key(KeyCode::Char('j'))),

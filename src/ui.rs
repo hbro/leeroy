@@ -11,7 +11,7 @@ use ratatui::{
 
 use crate::{
     app::{App, ConnectionStatus, SettingsRow, SettingsState, StatusMessage, Tab, View},
-    builds::{Build, BuildLoad, format_duration},
+    builds::{Build, BuildLoad, BuildRef, format_duration},
     config::{DEFAULT_REFRESH_SECS, HEADERS_DOC, SettingKey, header_env_var, redact_url},
     event::{Binding, GLOBAL_BINDINGS, context_bindings},
     jobs::{JobStatus, JobsLoad},
@@ -270,35 +270,55 @@ fn render_build(frame: &mut Frame, area: Rect, app: &App) {
             .wrap(Wrap { trim: true })
             .block(view_block(title))
     };
+    let what = match view.target {
+        BuildRef::Latest => "last build".to_owned(),
+        BuildRef::Number(n) => format!("build #{n}"),
+    };
     let build = match &view.load {
         BuildLoad::Loading => {
             let lines = vec![
                 Line::raw(""),
-                Line::styled("Loading last build…", Style::new().italic()),
+                Line::styled(format!("Loading {what}…"), Style::new().italic()),
             ];
             return frame.render_widget(message(lines, &view.job), area);
         }
         BuildLoad::Failed(error) => {
             let lines = vec![
                 Line::raw(""),
-                Line::styled("Could not load the last build", Style::new().italic()),
+                Line::styled(format!("Could not load the {what}"), Style::new().italic()),
                 Line::styled(error.clone(), Style::new().red()),
                 Line::styled("Press r to retry, Esc to go back", hint),
             ];
             return frame.render_widget(message(lines, &view.job), area);
         }
         BuildLoad::Loaded(None) => {
-            let lines = vec![
-                Line::raw(""),
-                Line::styled("No builds yet", Style::new().italic()),
-                Line::styled("This job has never run", hint),
-            ];
+            let lines = match view.target {
+                BuildRef::Latest => vec![
+                    Line::raw(""),
+                    Line::styled("No builds yet", Style::new().italic()),
+                    Line::styled("This job has never run", hint),
+                ],
+                BuildRef::Number(n) => vec![
+                    Line::raw(""),
+                    Line::styled(
+                        format!("Build #{n} no longer exists"),
+                        Style::new().italic(),
+                    ),
+                    Line::styled(
+                        "It was probably deleted: ←/→ to move on, End for the latest",
+                        hint,
+                    ),
+                ],
+            };
             return frame.render_widget(message(lines, &view.job), area);
         }
         BuildLoad::Loaded(Some(build)) => build,
     };
 
     let mut title = format!("{} · {}", view.job, build.display_name);
+    if let Some((position, total)) = view.position() {
+        title.push_str(&format!(" · {position} of {total}"));
+    }
     if view.refreshing {
         title.push_str(" · refreshing…");
     }

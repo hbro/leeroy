@@ -49,7 +49,11 @@ Rules:
   auto-refresh). The refresh status is a compact `⟳ 4s` at the right end of the
   header (icon green = auto-refresh on, gray = off; `…` fetching, `✕` failed).
 - Build view (`View::Build`, part of the Jobs tab): `Enter` on a job opens it
-  and fetches unconditionally; `r`/auto-refresh re-fetch what's on screen (build
+  and fetches unconditionally. `BuildRef::Latest` fetches the job's build numbers
+  (`allBuilds`, gaps!) + lastBuild in one request; `←/→ Home/End` step through
+  those numbers (`BuildView::step`; the newest is always `Latest` so it follows
+  new builds), each step fetching `BuildRef::Number(n)` immediately. Answers are
+  also matched on `which`, so quick steps ignore builds left behind; `r`/auto-refresh re-fetch what's on screen (build
   view: the build, not the job list) under the same one-in-flight rule. Results
   are tagged with connection generation + job name; mismatches are ignored.
 - Jobs: fetched after each successful connect and on `r`, tagged with the
