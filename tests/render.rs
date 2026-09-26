@@ -347,9 +347,9 @@ fn tab_bar_marks_settings_while_open() {
             .trim_end()
             .to_owned()
     };
-    assert_eq!(row(&app), "  F1 Jobs");
+    assert_eq!(row(&app), " F1 Jobs");
     apply(&mut app, &[Action::OpenSettings]);
-    assert_eq!(row(&app), "  F1 Jobs   Settings");
+    assert_eq!(row(&app), " F1 Jobs   Settings");
 }
 
 /// First line of the screen (the header).
@@ -418,7 +418,7 @@ fn selected_row_status_stays_readable() {
         let buffer = terminal.backend().buffer();
         // The selected row is marked with "▶"; check its status cells.
         let y = (0..HEIGHT)
-            .find(|&y| buffer[(1, y)].symbol() == "▶")
+            .find(|&y| (0..2).any(|x| buffer[(x, y)].symbol() == "▶"))
             .expect("selected row");
         let line: String = (0..WIDTH).map(|x| buffer[(x, y)].symbol()).collect();
         let start = line.find(label).expect("status label on the row");
@@ -617,4 +617,76 @@ fn console_paused_and_complete() {
     let done = app_with_console(3, false);
     let screen = format!("{}", render(&done).backend());
     assert!(screen.contains("console · complete"), "{screen}");
+}
+
+/// Header and global bar: white across the full width; global hotkeys white
+/// on black; the context bar has no context name.
+#[test]
+fn bar_colours() {
+    use ratatui::style::Color;
+    let app = app_with_jobs();
+    let terminal = render(&app);
+    let buffer = terminal.backend().buffer();
+    // Header white up to the refresh block (which has its own colour).
+    let block = (0..WIDTH)
+        .find(|&x| buffer[(x, 0)].symbol() == "⟳")
+        .expect("refresh block")
+        - 2;
+    for x in 0..block {
+        assert_eq!(buffer[(x, 0)].bg, Color::White, "header column {x}");
+    }
+    let y = HEIGHT - 1;
+    let global: String = (0..WIDTH).map(|x| buffer[(x, y)].symbol()).collect();
+    // Hotkeys white on black, everything else black on white to the edge.
+    let q = global.find(" q ").unwrap() as u16 + 1;
+    assert_eq!(
+        (buffer[(q, y)].fg, buffer[(q, y)].bg),
+        (Color::White, Color::Black)
+    );
+    let quit = global.find("quit").unwrap() as u16;
+    assert_eq!(
+        (buffer[(quit, y)].fg, buffer[(quit, y)].bg),
+        (Color::Black, Color::White)
+    );
+    assert_eq!(
+        buffer[(WIDTH - 1, y)].bg,
+        Color::White,
+        "white to the right edge"
+    );
+
+    // Context bar: selection gray, hotkeys in the tab blue, no context name.
+    let y = HEIGHT - 2;
+    let context: String = (0..WIDTH).map(|x| buffer[(x, y)].symbol()).collect();
+    assert!(context.starts_with(" ↑/↓ "), "no context name: {context:?}");
+    assert_eq!(buffer[(1, y)].bg, Color::Blue, "hotkey");
+    assert_eq!(
+        buffer[(WIDTH - 1, y)].bg,
+        Color::DarkGray,
+        "bar to the right edge"
+    );
+}
+
+/// The refresh block is coloured as a whole: green = auto-refresh on.
+#[test]
+fn refresh_block_colour() {
+    use ratatui::style::Color;
+    let block_bg = |app: &App| {
+        let terminal = render(app);
+        let buffer = terminal.backend().buffer();
+        let x = (0..WIDTH)
+            .find(|&x| buffer[(x, 0)].symbol() == "⟳")
+            .expect("refresh icon");
+        (
+            buffer[(x - 1, 0)].bg,
+            buffer[(x, 0)].bg,
+            buffer[(WIDTH - 1, 0)].bg,
+        )
+    };
+    let mut app = app_with_jobs();
+    assert_eq!(block_bg(&app), (Color::Green, Color::Green, Color::Green));
+    apply(&mut app, &[Action::ToggleAutoRefresh]);
+    assert_eq!(
+        block_bg(&app),
+        (Color::DarkGray, Color::DarkGray, Color::DarkGray)
+    );
 }

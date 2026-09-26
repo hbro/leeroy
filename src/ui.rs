@@ -53,7 +53,7 @@ pub fn render(frame: &mut Frame, app: &App) {
 /// Header: app name + the Jenkins instance we're connected to.
 fn render_header(frame: &mut Frame, area: Rect, app: &App) {
     let mut spans = vec![
-        Span::styled(" Leeroy ", Style::new().black().on_yellow().bold()),
+        Span::styled(" Leeroy ", Style::new().bold()),
         Span::raw(" "),
     ];
     // First, so it's never cut off on narrow terminals.
@@ -68,14 +68,14 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App) {
         ));
         spans.push(Span::raw(" "));
     }
-    let dim = Style::new().gray();
+    let dim = Style::new().fg(Color::DarkGray);
     spans.extend(match &app.connection {
         ConnectionStatus::NotConfigured => vec![
             Span::styled("○", Style::new().red()),
             Span::raw(" not connected"),
         ],
         ConnectionStatus::Connecting { url } => vec![
-            Span::styled("◌", Style::new().yellow()),
+            Span::styled("◌", dim),
             Span::raw(format!(" {url}")),
             Span::styled(" · connecting…", dim),
         ],
@@ -103,24 +103,31 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App) {
         Constraint::Length(status.width() as u16),
     ])
     .areas(area);
-    frame.render_widget(Paragraph::new(Line::from(spans)).on_dark_gray(), left);
-    frame.render_widget(Paragraph::new(status).on_dark_gray(), right);
+    frame.render_widget(Paragraph::new(Line::from(spans)).style(BAR), left);
+    frame.render_widget(Paragraph::new(status).style(BAR), right);
 }
 
+/// Active tab and context-bar hotkeys.
+const TAB_BLUE: Color = Color::Blue;
+
+/// Header and global bar: black on white across the full width.
+const BAR: Style = Style::new().fg(Color::Black).bg(Color::White);
+
+/// Frame of the main content: a line above (with the title) and below, no
+/// side borders.
 fn view_block(title: &str) -> Block<'static> {
     Block::new()
-        .title(format!(" {title} "))
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
+        .title(format!("{title} "))
+        .borders(Borders::TOP | Borders::BOTTOM)
         .border_style(Style::new().fg(Color::Blue))
 }
 
 /// Tab bar: `F1 Jobs  F2 …`, the active one highlighted. Settings isn't a
 /// tab but shows up as active while open, so it's clear where you are.
 fn render_tabs(frame: &mut Frame, area: Rect, app: &App) {
-    let active = Style::new().black().on_blue().bold();
+    let active = Style::new().fg(Color::Black).bg(TAB_BLUE).bold();
     let inactive = Style::new().gray();
-    let mut spans = vec![Span::raw(" ")];
+    let mut spans = Vec::new();
     for tab in Tab::ALL {
         let style = if app.view.tab() == Some(tab) {
             active
@@ -697,35 +704,32 @@ fn binding_spans(bindings: &[Binding], key_style: Style) -> Vec<Span<'static>> {
 
 /// Context bar: what has focus + the keys that only work there.
 fn render_context_bar(frame: &mut Frame, area: Rect, app: &App) {
-    let context = app.context();
-    let mut spans = vec![
-        Span::styled(
-            format!(" {} ", context.title()),
-            Style::new().black().on_magenta().bold(),
-        ),
-        Span::raw(" "),
-    ];
-    spans.extend(binding_spans(
-        context_bindings(context),
-        Style::new().black().on_blue(),
-    ));
-    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    // The selection gray as background, hotkeys in the active tab's blue.
+    let spans = binding_spans(
+        context_bindings(app.context()),
+        Style::new().fg(Color::Black).bg(TAB_BLUE),
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(spans)).style(Style::new().fg(Color::White).bg(SELECTED_BG)),
+        area,
+    );
 }
 
 /// Global bar: application-wide commands (dimmed while typing text, since
 /// the keys then go to the input) and the refresh status on the right.
 fn render_global_bar(frame: &mut Frame, area: Rect, app: &App) {
     let captured = app.context().global_keys_off();
+    // Keys are the inverse of their bar: white on black (gray when inactive).
     let key_style = if captured {
-        Style::new().black().on_gray()
+        Style::new().fg(Color::White).bg(Color::DarkGray)
     } else {
-        Style::new().black().on_yellow()
+        Style::new().fg(Color::White).bg(Color::Black)
     };
     let mut commands = Line::from(binding_spans(GLOBAL_BINDINGS, key_style));
     if captured {
-        commands = commands.gray().italic();
+        commands = commands.fg(Color::DarkGray).italic();
     }
-    frame.render_widget(Paragraph::new(commands).on_dark_gray(), area);
+    frame.render_widget(Paragraph::new(commands).style(BAR), area);
 }
 
 /// `⟳ 4s`: how old the data is; the icon is green while auto-refresh is on,
@@ -735,13 +739,13 @@ fn refresh_status(app: &App) -> Line<'static> {
     if !matches!(app.connection, ConnectionStatus::Connected { .. }) {
         return Line::default();
     }
-    let icon = if app.auto_refresh {
-        Style::new().green()
+    // One block, coloured as a whole: green while auto-refresh is on, gray
+    // while it's off (a coloured icon alone doesn't show up on the white bar).
+    let block = if app.auto_refresh {
+        Style::new().fg(Color::Black).bg(Color::Green)
     } else {
-        Style::new().gray()
+        Style::new().fg(Color::White).bg(Color::DarkGray)
     };
-    // Leading space: a gap even when the connection text is cut off.
-    let mut spans = vec![Span::raw(" "), Span::styled("⟳", icon)];
     // The data on screen: the open build, or the job list.
     let (busy, fetched_at, failed) = match (&app.view, &app.build) {
         (View::Console, _) if app.console.is_some() => {
@@ -763,17 +767,20 @@ fn refresh_status(app: &App) -> Line<'static> {
             matches!(app.jobs.load, JobsLoad::Failed(_)),
         ),
     };
+    let mut text = String::from(" ⟳");
     if busy {
-        spans.push(Span::styled(" …", Style::new().yellow()));
+        text.push_str(" …");
     } else if let Some(at) = fetched_at {
-        let age = format_age(app.now.saturating_duration_since(at));
-        spans.push(Span::styled(format!(" {age}"), Style::new().gray()));
+        text.push(' ');
+        text.push_str(&format_age(app.now.saturating_duration_since(at)));
     }
     if failed && !busy {
-        spans.push(Span::styled(" ✕", Style::new().red()));
+        text.push_str(" ✕");
     }
-    spans.push(Span::raw(" "));
-    Line::from(spans)
+    text.push(' ');
+    // Leading space outside the block: a gap even when the connection text
+    // is cut off.
+    Line::from(vec![Span::raw(" "), Span::styled(text, block)])
 }
 
 /// `0s`, `12s`, `4m`, `2h`, `3d`.
