@@ -10,7 +10,7 @@ use ratatui::{
 };
 
 use crate::{
-    app::{App, ConnectionStatus, SettingsRow, SettingsState, StatusMessage, Tab, View},
+    app::{App, ConnectionStatus, SettingsRow, StatusMessage, Tab, View},
     builds::{Build, BuildLoad, BuildRef, format_duration},
     config::{DEFAULT_REFRESH_SECS, HEADERS_DOC, SettingKey, header_env_var, redact_url},
     console::ConsoleLoad,
@@ -18,6 +18,7 @@ use crate::{
     history::HistoryLoad,
     jobs::{JobStatus, JobsLoad},
     proxy::SystemProxy,
+    theme::{Appearance, Theme},
 };
 
 /// Draw the whole UI. Keep this deterministic (no clock, no randomness):
@@ -38,7 +39,7 @@ pub fn render(frame: &mut Frame, app: &App) {
         View::Builds => render_history(frame, body, app),
         View::Build => render_build(frame, body, app),
         View::Console => render_console(frame, body, app),
-        View::Settings => render_settings(frame, body, &app.settings),
+        View::Settings => render_settings(frame, body, app),
     }
     render_context_bar(frame, context_bar, app);
 
@@ -46,12 +47,13 @@ pub fn render(frame: &mut Frame, app: &App) {
         render_help(frame, body, app);
     }
     if app.confirm_quit {
-        render_confirm_quit(frame, body);
+        render_confirm_quit(frame, body, app.theme());
     }
 }
 
 /// Header: app name + the Jenkins instance we're connected to.
 fn render_header(frame: &mut Frame, area: Rect, app: &App) {
+    let t = app.theme();
     let mut spans = vec![
         Span::styled(" Leeroy ", Style::new().bold()),
         Span::raw(" "),
@@ -62,16 +64,14 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App) {
         .connection_config()
         .is_some_and(|c| c.skip_tls_verify)
     {
-        spans.push(Span::styled(
-            "⚠ TLS NOT VERIFIED",
-            Style::new().white().on_red().bold(),
-        ));
+        spans.push(Span::styled("⚠ TLS NOT VERIFIED", t.danger.bold()));
         spans.push(Span::raw(" "));
     }
-    let dim = Style::new().fg(Color::DarkGray);
+    // Secondary text on the bar, not on the terminal background.
+    let dim = Style::new().fg(t.bar_dim);
     spans.extend(match &app.connection {
         ConnectionStatus::NotConfigured => vec![
-            Span::styled("○", Style::new().red()),
+            Span::styled("○", Style::new().fg(t.error)),
             Span::raw(" not connected"),
         ],
         ConnectionStatus::Connecting { url } => vec![
@@ -81,7 +81,7 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App) {
         ],
         ConnectionStatus::Connected { url, info } => {
             let mut spans = vec![
-                Span::styled("●", Style::new().green()),
+                Span::styled("●", Style::new().fg(t.success)),
                 Span::raw(format!(" {url}")),
             ];
             if let Some(version) = &info.version {
@@ -91,17 +91,14 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App) {
             spans
         }
         ConnectionStatus::Failed { url, error } => vec![
-            Span::styled("✕", Style::new().red().bold()),
+            Span::styled("✕", Style::new().fg(t.error).bold()),
             Span::raw(format!(" {url}")),
-            Span::styled(format!(" · {error}"), Style::new().red()),
+            Span::styled(format!(" · {error}"), Style::new().fg(t.error)),
         ],
     });
     // Right end: the help hint, then the refresh status; the connection
     // info gets the rest.
-    let mut right = vec![
-        Span::styled(" h/? ", Style::new().fg(Color::White).bg(Color::Black)),
-        Span::raw(" help "),
-    ];
+    let mut right = vec![Span::styled(" h/? ", t.bar_key), Span::raw(" help ")];
     right.extend(refresh_status(app).spans);
     let status = Line::from(right);
     let [left, right] = Layout::horizontal([
@@ -109,30 +106,25 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App) {
         Constraint::Length(status.width() as u16),
     ])
     .areas(area);
-    frame.render_widget(Paragraph::new(Line::from(spans)).style(BAR), left);
-    frame.render_widget(Paragraph::new(status).style(BAR), right);
+    frame.render_widget(Paragraph::new(Line::from(spans)).style(t.bar), left);
+    frame.render_widget(Paragraph::new(status).style(t.bar), right);
 }
-
-/// Active tab and context-bar hotkeys.
-const TAB_BLUE: Color = Color::Blue;
-
-/// Header and global bar: black on white across the full width.
-const BAR: Style = Style::new().fg(Color::Black).bg(Color::White);
 
 /// Frame of the main content: a line above (with the title) and below, no
 /// side borders.
-fn view_block(title: &str) -> Block<'static> {
+fn view_block(t: &Theme, title: &str) -> Block<'static> {
     Block::new()
         .title(format!("{title} "))
         .borders(Borders::TOP | Borders::BOTTOM)
-        .border_style(Style::new().fg(Color::Blue))
+        .border_style(Style::new().fg(t.accent))
 }
 
 /// Tab bar: `1 Jobs  2 …` from the left, `0 Settings` at the far right; the
 /// active tab highlighted.
 fn render_tabs(frame: &mut Frame, area: Rect, app: &App) {
-    let active = Style::new().fg(Color::Black).bg(TAB_BLUE).bold();
-    let inactive = Style::new().fg(Color::Gray);
+    let t = app.theme();
+    let active = t.on_accent.bold();
+    let inactive = Style::new().fg(t.tab_inactive);
     let label = |tab: Tab| {
         let style = if app.tab() == Some(tab) {
             active
@@ -156,12 +148,13 @@ fn render_tabs(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn render_jobs(frame: &mut Frame, area: Rect, app: &App) {
-    let hint = Style::new().dark_gray();
+    let t = app.theme();
+    let hint = t.dim();
     let centered_message = |lines: Vec<Line<'static>>| {
         Paragraph::new(lines)
             .alignment(Alignment::Center)
             .wrap(Wrap { trim: true })
-            .block(view_block("Jobs"))
+            .block(view_block(t, "Jobs"))
     };
     let lines = match &app.connection {
         ConnectionStatus::NotConfigured => vec![
@@ -176,7 +169,7 @@ fn render_jobs(frame: &mut Frame, area: Rect, app: &App) {
         ConnectionStatus::Failed { url, error } => vec![
             Line::raw(""),
             Line::styled(format!("Cannot reach {url}"), Style::new().italic()),
-            Line::styled(error.clone(), Style::new().red()),
+            Line::styled(error.clone(), Style::new().fg(t.error)),
             Line::styled("Check the settings (s), or press r to retry", hint),
         ],
         ConnectionStatus::Connected { .. } => match &app.jobs.load {
@@ -187,7 +180,7 @@ fn render_jobs(frame: &mut Frame, area: Rect, app: &App) {
             JobsLoad::Failed(error) => vec![
                 Line::raw(""),
                 Line::styled("Could not load jobs", Style::new().italic()),
-                Line::styled(error.clone(), Style::new().red()),
+                Line::styled(error.clone(), Style::new().fg(t.error)),
                 Line::styled("Press r to retry", hint),
             ],
             JobsLoad::Loaded(_) => return render_job_list(frame, area, app),
@@ -197,6 +190,7 @@ fn render_jobs(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn render_job_list(frame: &mut Frame, area: Rect, app: &App) {
+    let t = app.theme();
     let jobs = &app.jobs;
     let visible = jobs.visible();
     let mut title = if jobs.active_filter().trim().is_empty() {
@@ -207,7 +201,7 @@ fn render_job_list(frame: &mut Frame, area: Rect, app: &App) {
     if jobs.refreshing {
         title.push_str(" · refreshing…");
     }
-    let block = view_block(&title);
+    let block = view_block(t, &title);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -219,14 +213,14 @@ fn render_job_list(frame: &mut Frame, area: Rect, app: &App) {
     ])
     .areas(inner);
     if let Some(input) = &jobs.filter_input {
-        let mut spans = vec![Span::styled(" / ", Style::new().yellow().bold())];
+        let mut spans = vec![Span::styled(" / ", Style::new().fg(t.highlight).bold())];
         let shown: Vec<char> = input.value().chars().collect();
-        spans.extend(input_spans(&shown, input.cursor()));
+        spans.extend(input_spans(t, &shown, input.cursor()));
         frame.render_widget(Paragraph::new(Line::from(spans)), filter_area);
     } else if show_filter {
         let line = Line::from(vec![
-            Span::styled(" filter: ", Style::new().dark_gray()),
-            Span::styled(jobs.filter.clone(), Style::new().yellow()),
+            Span::styled(" filter: ", t.dim()),
+            Span::styled(jobs.filter.clone(), Style::new().fg(t.highlight)),
         ]);
         frame.render_widget(Paragraph::new(line), filter_area);
     }
@@ -247,16 +241,16 @@ fn render_job_list(frame: &mut Frame, area: Rect, app: &App) {
     }
 
     let rows = visible.iter().enumerate().map(|(i, job)| {
-        let (symbol, mut color) = status_symbol(job.status);
+        let (symbol, mut color) = status_symbol(t, job.status);
         // Text in the highlight colour would vanish on the selected row.
-        if i == jobs.selected && color == SELECTED_BG {
-            color = SELECTED_FG_ON_BG;
+        if i == jobs.selected {
+            color = t.on_selected(color);
         }
         Row::new(vec![
             Cell::from(Span::styled(symbol, Style::new().fg(color))),
             Cell::from(Span::styled(job.status.label(), Style::new().fg(color))),
             Cell::from(if job.building {
-                Span::styled("⟳", Style::new().yellow().bold())
+                Span::styled("⟳", Style::new().fg(t.warning).bold())
             } else {
                 Span::raw("")
             }),
@@ -273,7 +267,7 @@ fn render_job_list(frame: &mut Frame, area: Rect, app: &App) {
         ],
     )
     .column_spacing(1)
-    .row_highlight_style(Style::new().bg(SELECTED_BG).bold())
+    .row_highlight_style(Style::new().bg(t.selected_bg).bold())
     .highlight_symbol("▶ ")
     .highlight_spacing(HighlightSpacing::Always);
     let mut state = TableState::default().with_selected(Some(jobs.selected));
@@ -282,12 +276,13 @@ fn render_job_list(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn render_history(frame: &mut Frame, area: Rect, app: &App) {
-    let hint = Style::new().fg(Color::DarkGray);
+    let t = app.theme();
+    let hint = t.dim();
     let message = |lines: Vec<Line<'static>>| {
         Paragraph::new(lines)
             .alignment(Alignment::Center)
             .wrap(Wrap { trim: true })
-            .block(view_block("Builds"))
+            .block(view_block(t, "Builds"))
     };
     let lines = match (&app.connection, &app.history.load) {
         (ConnectionStatus::Connected { .. }, HistoryLoad::Loaded) => {
@@ -296,7 +291,7 @@ fn render_history(frame: &mut Frame, area: Rect, app: &App) {
         (ConnectionStatus::Connected { .. }, HistoryLoad::Failed(error)) => vec![
             Line::raw(""),
             Line::styled("Could not load the build history", Style::new().italic()),
-            Line::styled(error.clone(), Style::new().red()),
+            Line::styled(error.clone(), Style::new().fg(t.error)),
             Line::styled("Press r to retry", hint),
         ],
         (ConnectionStatus::Connected { .. }, _) => vec![
@@ -313,6 +308,7 @@ fn render_history(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn render_history_list(frame: &mut Frame, area: Rect, app: &App) {
+    let t = app.theme();
     let history = &app.history;
     let visible = history.visible();
     let mut title = format!("Builds ({} newest", visible.len());
@@ -326,7 +322,7 @@ fn render_history_list(frame: &mut Frame, area: Rect, app: &App) {
     if history.refreshing {
         title.push_str(" · refreshing…");
     }
-    let block = view_block(&title);
+    let block = view_block(t, &title);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -338,14 +334,14 @@ fn render_history_list(frame: &mut Frame, area: Rect, app: &App) {
     .areas(inner);
     app.list_rows.set(list_area.height);
     if let Some(input) = &history.filter_input {
-        let mut spans = vec![Span::styled(" / ", Style::new().yellow().bold())];
+        let mut spans = vec![Span::styled(" / ", Style::new().fg(t.highlight).bold())];
         let shown: Vec<char> = input.value().chars().collect();
-        spans.extend(input_spans(&shown, input.cursor()));
+        spans.extend(input_spans(t, &shown, input.cursor()));
         frame.render_widget(Paragraph::new(Line::from(spans)), filter_area);
     } else if show_filter {
         let line = Line::from(vec![
-            Span::styled(" filter: ", Style::new().fg(Color::DarkGray)),
-            Span::styled(history.filter.clone(), Style::new().yellow()),
+            Span::styled(" filter: ", t.dim()),
+            Span::styled(history.filter.clone(), Style::new().fg(t.highlight)),
         ]);
         frame.render_widget(Paragraph::new(line), filter_area);
     }
@@ -368,25 +364,22 @@ fn render_history_list(frame: &mut Frame, area: Rect, app: &App) {
         return;
     }
 
-    let dim = Style::new().fg(Color::DarkGray);
     let rows = visible.iter().enumerate().map(|(i, entry)| {
         let (symbol, mut color, label) = if entry.building {
-            ("⟳", Color::Yellow, "running")
+            ("⟳", t.warning, "running")
         } else {
             let status = entry.result.unwrap_or(JobStatus::Unknown);
-            let (symbol, color) = status_symbol(status);
+            let (symbol, color) = status_symbol(t, status);
             (symbol, color, status.label())
         };
         // Text in the highlight colour would vanish on the selected row.
         let selected = i == history.selected;
-        if selected && color == SELECTED_BG {
-            color = SELECTED_FG_ON_BG;
+        let mut dim = t.dim;
+        if selected {
+            color = t.on_selected(color);
+            dim = t.on_selected(dim);
         }
-        let dim = if selected {
-            Style::new().fg(SELECTED_FG_ON_BG)
-        } else {
-            dim
-        };
+        let dim = Style::new().fg(dim);
         let age = app
             .wall_now
             .duration_since(entry.started)
@@ -418,7 +411,7 @@ fn render_history_list(frame: &mut Frame, area: Rect, app: &App) {
         ],
     )
     .column_spacing(1)
-    .row_highlight_style(Style::new().bg(SELECTED_BG).add_modifier(Modifier::BOLD))
+    .row_highlight_style(Style::new().bg(t.selected_bg).add_modifier(Modifier::BOLD))
     .highlight_symbol("▶ ")
     .highlight_spacing(HighlightSpacing::Always);
     let mut state = TableState::default().with_selected(Some(history.selected));
@@ -429,12 +422,13 @@ fn render_build(frame: &mut Frame, area: Rect, app: &App) {
     let Some(view) = &app.build else {
         return;
     };
-    let hint = Style::new().dark_gray();
+    let t = app.theme();
+    let hint = t.dim();
     let message = |lines: Vec<Line<'static>>, title: &str| {
         Paragraph::new(lines)
             .alignment(Alignment::Center)
             .wrap(Wrap { trim: true })
-            .block(view_block(title))
+            .block(view_block(t, title))
     };
     let what = match view.target {
         BuildRef::Latest => "last build".to_owned(),
@@ -452,7 +446,7 @@ fn render_build(frame: &mut Frame, area: Rect, app: &App) {
             let lines = vec![
                 Line::raw(""),
                 Line::styled(format!("Could not load the {what}"), Style::new().italic()),
-                Line::styled(error.clone(), Style::new().red()),
+                Line::styled(error.clone(), Style::new().fg(t.error)),
                 Line::styled("Press r to retry, Esc to go back", hint),
             ];
             return frame.render_widget(message(lines, &view.job), area);
@@ -488,14 +482,14 @@ fn render_build(frame: &mut Frame, area: Rect, app: &App) {
     if view.refreshing {
         title.push_str(" · refreshing…");
     }
-    let block = view_block(&title);
+    let block = view_block(t, &title);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
     let label = |text: &str| Span::styled(format!(" {text:<12}"), hint);
     let mut lines = Vec::new();
 
-    lines.push(Line::from(vec![label("Result"), result_span(build)]));
+    lines.push(Line::from(vec![label("Result"), result_span(t, build)]));
     let age = app
         .wall_now
         .duration_since(build.started)
@@ -514,7 +508,7 @@ fn render_build(frame: &mut Frame, area: Rect, app: &App) {
             Span::raw(format!("{}{estimate}", format_duration(age))),
         ]));
         if let Some(estimated) = build.estimated {
-            lines.push(Line::from(vec![label(""), progress_bar(age, estimated)]));
+            lines.push(Line::from(vec![label(""), progress_bar(t, age, estimated)]));
         }
     } else {
         lines.push(Line::from(vec![
@@ -552,7 +546,10 @@ fn render_build(frame: &mut Frame, area: Rect, app: &App) {
         for change in &build.changes {
             let mut spans = vec![Span::raw("   ")];
             if let Some(commit) = &change.commit {
-                spans.push(Span::styled(format!("{commit} "), Style::new().yellow()));
+                spans.push(Span::styled(
+                    format!("{commit} "),
+                    Style::new().fg(t.highlight),
+                ));
             }
             spans.push(Span::raw(change.message.clone()));
             if let Some(author) = &change.author {
@@ -573,7 +570,8 @@ fn render_console(frame: &mut Frame, area: Rect, app: &App) {
     let Some(console) = &app.console else {
         return;
     };
-    let hint = Style::new().dark_gray();
+    let t = app.theme();
+    let hint = t.dim();
     let mut title = format!("{} · #{} · console", console.job, console.number);
     match console.load {
         ConsoleLoad::Loaded if console.more && console.following => {
@@ -586,7 +584,7 @@ fn render_console(frame: &mut Frame, area: Rect, app: &App) {
     if console.dropped > 0 {
         title.push_str(&format!(" · last {} lines", crate::console::MAX_LINES));
     }
-    let block = view_block(&title);
+    let block = view_block(t, &title);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -607,7 +605,7 @@ fn render_console(frame: &mut Frame, area: Rect, app: &App) {
             let lines = vec![
                 Line::raw(""),
                 Line::styled("Could not load the console output", Style::new().italic()),
-                Line::styled(error.clone(), Style::new().red()),
+                Line::styled(error.clone(), Style::new().fg(t.error)),
                 Line::styled("Press r to retry, Esc to go back", hint),
             ];
             return frame.render_widget(message(lines), inner);
@@ -643,61 +641,62 @@ fn render_console(frame: &mut Frame, area: Rect, app: &App) {
     );
 }
 
-fn result_span(build: &Build) -> Span<'static> {
+fn result_span(t: &Theme, build: &Build) -> Span<'static> {
     if build.building {
-        return Span::styled("⟳ running", Style::new().yellow().bold());
+        return Span::styled("⟳ running", Style::new().fg(t.warning).bold());
     }
     match build.result {
         Some(status) => {
-            let (symbol, color) = status_symbol(status);
+            let (symbol, color) = status_symbol(t, status);
             Span::styled(
                 format!("{symbol} {}", status.label()),
                 Style::new().fg(color),
             )
         }
-        None => Span::styled("unknown", Style::new().dark_gray()),
+        None => Span::styled("unknown", t.dim()),
     }
 }
 
 /// `████████░░░░░░░░ 50%`, or full and red once past the estimate.
-fn progress_bar(elapsed: std::time::Duration, estimated: std::time::Duration) -> Span<'static> {
+fn progress_bar(
+    t: &Theme,
+    elapsed: std::time::Duration,
+    estimated: std::time::Duration,
+) -> Span<'static> {
     const WIDTH: usize = 30;
     let ratio = elapsed.as_secs_f64() / estimated.as_secs_f64().max(1.0);
     let filled = ((ratio.min(1.0)) * WIDTH as f64).round() as usize;
     let bar = format!("{}{}", "█".repeat(filled), "░".repeat(WIDTH - filled));
     if ratio > 1.0 {
-        Span::styled(format!("{bar} longer than usual"), Style::new().red())
+        Span::styled(format!("{bar} longer than usual"), Style::new().fg(t.error))
     } else {
         Span::styled(
             format!("{bar} {:>3.0}%", ratio * 100.0),
-            Style::new().yellow(),
+            Style::new().fg(t.warning),
         )
     }
 }
 
-/// Background of the selected job row.
-const SELECTED_BG: Color = Color::DarkGray;
-/// Replaces status colours equal to [`SELECTED_BG`] on the selected row.
-const SELECTED_FG_ON_BG: Color = Color::Gray;
-
 /// Symbol + color per status; the status word is shown too (not color alone).
-fn status_symbol(status: JobStatus) -> (&'static str, Color) {
+fn status_symbol(t: &Theme, status: JobStatus) -> (&'static str, Color) {
     match status {
-        JobStatus::Success => ("●", Color::Green),
-        JobStatus::Unstable => ("●", Color::Yellow),
-        JobStatus::Failed => ("●", Color::Red),
-        JobStatus::Aborted => ("●", Color::Gray),
-        JobStatus::NotBuilt => ("○", Color::DarkGray),
-        JobStatus::Disabled => ("⊘", Color::DarkGray),
-        JobStatus::Unknown => ("?", Color::DarkGray),
+        JobStatus::Success => ("●", t.success),
+        JobStatus::Unstable => ("●", t.warning),
+        JobStatus::Failed => ("●", t.error),
+        JobStatus::Aborted => ("●", t.neutral),
+        JobStatus::NotBuilt => ("○", t.dim),
+        JobStatus::Disabled => ("⊘", t.dim),
+        JobStatus::Unknown => ("?", t.dim),
     }
 }
 
 const SECRET_MASK: &str = "••••••••";
 const LABEL_WIDTH: usize = 16;
 
-fn render_settings(frame: &mut Frame, area: Rect, s: &SettingsState) {
-    let dim = Style::new().dark_gray();
+fn render_settings(frame: &mut Frame, area: Rect, app: &App) {
+    let s = &app.settings;
+    let t = app.theme();
+    let dim = t.dim();
     let mut lines = vec![
         Line::from(vec![
             Span::styled(format!("   {:<LABEL_WIDTH$}", "Config file"), dim),
@@ -718,7 +717,7 @@ fn render_settings(frame: &mut Frame, area: Rect, s: &SettingsState) {
             }
             lines.push(Line::styled(
                 format!(" {}", row.section().title()),
-                Style::new().fg(TAB_BLUE).bold(),
+                Style::new().fg(t.accent).bold(),
             ));
         }
         // Headers sub-heading, within the Jenkins section.
@@ -731,7 +730,7 @@ fn render_settings(frame: &mut Frame, area: Rect, s: &SettingsState) {
         let selected = i == selected_index;
         let marker = if selected { "▶" } else { " " };
         let label_style = if selected {
-            Style::new().yellow().bold()
+            Style::new().fg(t.highlight).bold()
         } else {
             Style::new()
         };
@@ -749,7 +748,7 @@ fn render_settings(frame: &mut Frame, area: Rect, s: &SettingsState) {
             // Shown as typed: masking only applies when not editing.
             let shown: Vec<char> = input.value().chars().collect();
             spans.push(Span::raw("  "));
-            spans.extend(input_spans(&shown, input.cursor()));
+            spans.extend(input_spans(t, &shown, input.cursor()));
             lines.push(Line::from(spans));
             continue;
         }
@@ -761,11 +760,14 @@ fn render_settings(frame: &mut Frame, area: Rect, s: &SettingsState) {
                 spans.push(match effective.get(key) {
                     _ if key.is_bool() => match effective.is_on(key) {
                         true if key == SettingKey::JenkinsSkipTlsVerify => {
-                            Span::styled("on (insecure)", Style::new().red().bold())
+                            Span::styled("on (insecure)", Style::new().fg(t.error).bold())
                         }
                         true => Span::raw("on"),
                         false => Span::raw("off"),
                     },
+                    None if key == SettingKey::Theme => {
+                        Span::styled(auto_theme_note(app.terminal_appearance), dim)
+                    }
                     None if key == SettingKey::RefreshInterval => {
                         Span::styled(format!("{} s (default)", DEFAULT_REFRESH_SECS), dim)
                     }
@@ -795,7 +797,7 @@ fn render_settings(frame: &mut Frame, area: Rect, s: &SettingsState) {
         lines.push(Line::from(spans));
     }
 
-    let block = view_block("Settings");
+    let block = view_block(t, "Settings");
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let [top, _, docs] = Layout::vertical([
@@ -812,8 +814,8 @@ fn render_settings(frame: &mut Frame, area: Rect, s: &SettingsState) {
     let mut bottom_lines = Vec::new();
     if let Some(message) = &s.message {
         bottom_lines.push(match message {
-            StatusMessage::Info(text) => Line::styled(text.as_str(), Style::new().green()),
-            StatusMessage::Error(text) => Line::styled(text.as_str(), Style::new().red()),
+            StatusMessage::Info(text) => Line::styled(text.as_str(), Style::new().fg(t.success)),
+            StatusMessage::Error(text) => Line::styled(text.as_str(), Style::new().fg(t.error)),
         });
         bottom_lines.push(Line::raw(""));
     }
@@ -829,21 +831,28 @@ fn render_settings(frame: &mut Frame, area: Rect, s: &SettingsState) {
 }
 
 /// An input's text with the cursor: highlighted char, or a block at the end.
-fn input_spans(shown: &[char], cursor: usize) -> Vec<Span<'static>> {
+fn input_spans(t: &Theme, shown: &[char], cursor: usize) -> Vec<Span<'static>> {
     let (before, after) = shown.split_at(cursor.min(shown.len()));
-    let text = Style::new().yellow().underlined();
+    let text = Style::new().fg(t.highlight).underlined();
     let mut spans = vec![Span::styled(before.iter().collect::<String>(), text)];
     match after.split_first() {
         Some((under, rest)) => {
-            spans.push(Span::styled(
-                under.to_string(),
-                Style::new().black().on_yellow(),
-            ));
+            spans.push(Span::styled(under.to_string(), t.cursor));
             spans.push(Span::styled(rest.iter().collect::<String>(), text));
         }
-        None => spans.push(Span::styled("█", Style::new().yellow())),
+        None => spans.push(Span::styled("█", Style::new().fg(t.highlight))),
     }
     spans
+}
+
+/// The unset theme setting: `auto`, and what it picked.
+fn auto_theme_note(detected: Option<Appearance>) -> String {
+    let picked = match detected {
+        Some(Appearance::Dark) => "dark terminal detected",
+        Some(Appearance::Light) => "light terminal detected",
+        None => "terminal didn't say: dark",
+    };
+    format!("auto (default; {picked})")
 }
 
 fn system_proxy_note(system: &SystemProxy) -> String {
@@ -869,15 +878,10 @@ fn binding_spans(bindings: &[Binding], key_style: Style) -> Vec<Span<'static>> {
 
 /// Context bar: what has focus + the keys that only work there.
 fn render_context_bar(frame: &mut Frame, area: Rect, app: &App) {
-    // The selection gray as background, hotkeys in the active tab's blue.
-    let spans = binding_spans(
-        context_bindings(app.context()),
-        Style::new().fg(Color::Black).bg(TAB_BLUE),
-    );
-    frame.render_widget(
-        Paragraph::new(Line::from(spans)).style(Style::new().fg(Color::White).bg(SELECTED_BG)),
-        area,
-    );
+    // The selection gray as background, hotkeys in the active tab's colour.
+    let t = app.theme();
+    let spans = binding_spans(context_bindings(app.context()), t.on_accent);
+    frame.render_widget(Paragraph::new(Line::from(spans)).style(t.context_bar), area);
 }
 
 /// `⟳ 4s`: how old the data is; the icon is green while auto-refresh is on,
@@ -889,10 +893,11 @@ fn refresh_status(app: &App) -> Line<'static> {
     }
     // One block, coloured as a whole: green while auto-refresh is on, gray
     // while it's off (a coloured icon alone doesn't show up on the white bar).
+    let t = app.theme();
     let block = if app.auto_refresh {
-        Style::new().fg(Color::Black).bg(Color::Green)
+        t.refresh_on
     } else {
-        Style::new().fg(Color::White).bg(Color::DarkGray)
+        t.refresh_off
     };
     // The data on screen: the open build, or the job list.
     let (busy, fetched_at, failed) = match (&app.view, &app.build) {
@@ -946,7 +951,7 @@ fn format_age(age: std::time::Duration) -> String {
     }
 }
 
-fn render_confirm_quit(frame: &mut Frame, area: Rect) {
+fn render_confirm_quit(frame: &mut Frame, area: Rect, t: &Theme) {
     let key = Style::new().bold();
     let lines = vec![
         Line::raw(""),
@@ -966,14 +971,16 @@ fn render_confirm_quit(frame: &mut Frame, area: Rect) {
     let block = Block::bordered()
         .title(" Quit Leeroy? ")
         .border_type(BorderType::Double)
-        .border_style(Style::new().fg(Color::Red));
+        .border_style(Style::new().fg(t.error));
     frame.render_widget(Clear, popup);
     frame.render_widget(Paragraph::new(lines).block(block), popup);
 }
 
 fn render_help(frame: &mut Frame, area: Rect, app: &App) {
+    let t = app.theme();
     let key_style = Style::new().add_modifier(Modifier::BOLD);
-    let section = |title: &str| Line::styled(format!(" {title}"), Style::new().yellow().bold());
+    let section =
+        |title: &str| Line::styled(format!(" {title}"), Style::new().fg(t.highlight).bold());
     let rows = |bindings: &[Binding]| -> Vec<Line<'static>> {
         bindings
             .iter()
@@ -1011,7 +1018,7 @@ fn render_help(frame: &mut Frame, area: Rect, app: &App) {
     let block = Block::bordered()
         .title(" Help ")
         .border_type(BorderType::Double)
-        .border_style(Style::new().fg(Color::Yellow));
+        .border_style(Style::new().fg(t.highlight));
     frame.render_widget(Clear, popup);
     frame.render_widget(Paragraph::new(lines).block(block), popup);
 }

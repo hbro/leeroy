@@ -1,10 +1,4 @@
-# Shared settings, included by every tape. Fixed values keep screenshots comparable.
-Set Shell "bash"
-Set FontSize 16
-Set Width 1200
-Set Height 720
-Set Padding 10
+# Shared settings, included by every tape: a dark terminal scheme plus
+# _common.tape. For another scheme, set it and source _common.tape instead.
 Set Theme "Catppuccin Mocha"
-Set TypingSpeed 0
-Env LEEROY_LOG "target/vhs.log"
-Env LEEROY_CONFIG "target/vhs/config.toml"
+Source tapes/_common.tape

@@ -12,6 +12,7 @@ use crate::{
     jenkins::{ConnectionConfig, ServerInfo},
     jobs::{Job, JobsLoad, JobsState},
     proxy::{ProxyEnv, SystemProxy},
+    theme::{Appearance, Theme},
 };
 
 /// Everything that can change application state.
@@ -483,6 +484,9 @@ pub struct App {
     pub wall_now: SystemTime,
     /// Auto-refresh for this session; starts from the `refresh.auto` setting.
     pub auto_refresh: bool,
+    /// Terminal background as reported at startup (`None`: unknown); picks
+    /// the theme when `ui.theme` is `auto`.
+    pub terminal_appearance: Option<Appearance>,
 }
 
 impl Default for App {
@@ -513,7 +517,18 @@ impl App {
             console: None,
             now: Instant::now(),
             wall_now: SystemTime::now(),
+            terminal_appearance: None,
         }
+    }
+
+    /// The colours to draw with: the `ui.theme` setting, `auto` resolved
+    /// against the detected terminal background. Read on every frame, so a
+    /// changed setting shows right away.
+    pub fn theme(&self) -> &'static Theme {
+        self.settings
+            .effective()
+            .theme()
+            .resolve(self.terminal_appearance)
     }
 
     /// Effects to run once at startup: connect if configured.
@@ -818,6 +833,15 @@ impl App {
                 match s.selected_row() {
                     SettingsRow::Setting(key) if s.is_overridden(key) => {
                         s.message = Some(read_only(key.label(), key.env_var()));
+                    }
+                    SettingsRow::Setting(key) if key.choices().is_some() => {
+                        // Next value, wrapping; the first (default) = unset.
+                        let choices = key.choices().expect("checked");
+                        let current = s.file.get(key).unwrap_or(choices[0]);
+                        let i = choices.iter().position(|c| *c == current).unwrap_or(0);
+                        let next = choices[(i + 1) % choices.len()];
+                        let value = (next != choices[0]).then(|| next.to_owned());
+                        return self.commit(|settings| settings.set(key, value));
                     }
                     SettingsRow::Setting(key) if key.is_bool() => {
                         // On/off settings toggle directly. Back to the default =
@@ -1423,7 +1447,7 @@ mod tests {
         app.update(Action::SelectPrev);
         assert_eq!(
             app.settings.selected_row(),
-            SettingsRow::Setting(SettingKey::ConfirmQuit),
+            SettingsRow::Setting(SettingKey::Theme),
             "last row: the Application section follows the headers"
         );
         app.update(Action::SelectNext);
@@ -2530,6 +2554,44 @@ mod tests {
             app.settings.file.get(SettingKey::ConfirmQuit),
             Some("false")
         );
+    }
+
+    #[test]
+    fn theme_setting_cycles_and_applies_right_away() {
+        let mut app = settings_app();
+        app.terminal_appearance = Some(Appearance::Light);
+        assert_eq!(app.theme().name, "light", "auto follows the terminal");
+        select(&mut app, SettingsRow::Setting(SettingKey::Theme));
+
+        let mut seen = Vec::new();
+        for _ in 0..3 {
+            let effects = app.update(Action::StartEdit);
+            assert!(
+                effects
+                    .iter()
+                    .any(|e| matches!(e, Effect::SaveSettings { .. })),
+                "each change is saved"
+            );
+            seen.push((
+                app.settings.file.get(SettingKey::Theme).map(str::to_owned),
+                app.theme().name,
+            ));
+        }
+        assert_eq!(
+            seen,
+            [
+                (Some("dark".into()), "dark"),
+                (Some("light".into()), "light"),
+                (None, "light"), // back to auto = unset
+            ]
+        );
+    }
+
+    #[test]
+    fn auto_theme_is_dark_when_the_terminal_did_not_say() {
+        let app = App::default();
+        assert_eq!(app.terminal_appearance, None);
+        assert_eq!(app.theme().name, "dark");
     }
 
     use crate::console::ConsoleChunk;

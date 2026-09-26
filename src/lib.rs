@@ -18,4 +18,5 @@ pub mod input;
 pub mod jenkins;
 pub mod jobs;
 pub mod proxy;
+pub mod theme;
 pub mod ui;

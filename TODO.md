@@ -1,6 +1,6 @@
 # TODO
 
-- [ ] **Theming support**
+- [x] **Theming support**
   - Convert the existing colors to variables that a theme defines.
   - Create a dark and a light theme based on the current colors.
   - Make the theme selectable in the settings.

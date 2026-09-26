@@ -10,6 +10,12 @@ A release's section is used as its GitHub release notes.
 
 ## [Unreleased]
 
+### Added
+
+- Light theme, and an `auto` theme (the default) that picks dark or light from
+  the terminal's background colour. Setting `ui.theme` (`LEEROY_UI_THEME`),
+  switchable live in the settings view.
+
 ## [0.1.1] - 2026-09-26
 
 ### Added

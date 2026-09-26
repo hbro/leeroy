@@ -59,6 +59,7 @@ interval = 10  # default; seconds between automatic refreshes, minimum 1
 
 [ui]
 confirm_quit = true  # default: ask before quitting with q
+theme = "auto"       # default; or "dark" / "light", see "Colours" below
 ```
 
 Every setting can be overridden by an env var, which wins over the file (and
@@ -152,9 +153,6 @@ Credentials embedded in the Jenkins URL (`https://user:pass@host`) also work, bu
 end up in the config file; they are masked wherever the URL is shown, except
 while you edit it.
 
-The old `jenkins.username` / `jenkins.token` settings were replaced by headers;
-Leeroy refuses to start while they are still set and explains the replacement.
-
 ### TLS
 
 Certificates are checked against the operating system's trust store, so a
@@ -163,6 +161,16 @@ invalid certificates, `skip_tls_verify = true` (toggle "Skip TLS verify" in the
 settings) disables verification. **This is insecure**: anyone between you and
 Jenkins can read your credentials. It's off by default, and while it's on the
 header shows `⚠ TLS NOT VERIFIED`.
+
+### Colours
+
+Leeroy keeps your terminal's own background and colour scheme; the theme only
+picks which of its colours go where. `dark` suits dark terminal backgrounds,
+`light` light ones (inverted bars, a light selection, darker yellow and green).
+The default, `auto`, asks the terminal for its background colour at startup and
+picks accordingly; terminals that don't answer (tmux, for one) get `dark`. The
+settings view shows what was detected. Change it with Enter on "Theme" in the
+settings (it applies right away), `ui.theme` in the file, or `LEEROY_UI_THEME`.
 
 ## Using Leeroy
 

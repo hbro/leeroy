@@ -13,9 +13,11 @@ use leeroy::{
     event::map_key,
     jenkins,
     proxy::ProxyEnv,
+    theme::Appearance,
     ui,
 };
 use ratatui::DefaultTerminal;
+use terminal_colorsaurus::{QueryOptions, ThemeMode};
 use tokio::{
     sync::mpsc::{self, UnboundedSender},
     task::AbortHandle,
@@ -81,7 +83,8 @@ async fn main() -> Result<()> {
     })?;
     let mut settings = SettingsState::new(path, file, env);
     settings.proxy_env = ProxyEnv::from_env(|name| std::env::var_os(name));
-    let app = App::new(settings);
+    let mut app = App::new(settings);
+    app.terminal_appearance = detect_appearance();
 
     // ratatui::init enters raw mode + alternate screen and installs a panic
     // hook that restores the terminal before the panic message is printed.
@@ -286,6 +289,24 @@ impl Executor {
             }
         }
     }
+}
+
+/// The terminal's background brightness, for the `auto` theme. Asked before
+/// raw mode and the event stream start: the answer arrives on stdin. Terminals
+/// that don't support the query are recognised quickly; the timeout only
+/// covers ones that don't answer at all.
+fn detect_appearance() -> Option<Appearance> {
+    let mut options = QueryOptions::default();
+    options.timeout = Duration::from_millis(500);
+    match terminal_colorsaurus::theme_mode(options) {
+        Ok(ThemeMode::Dark) => Some(Appearance::Dark),
+        Ok(ThemeMode::Light) => Some(Appearance::Light),
+        Err(err) => {
+            tracing::info!(%err, "terminal background unknown");
+            None
+        }
+    }
+    .inspect(|appearance| tracing::info!(?appearance, "terminal background detected"))
 }
 
 /// Log to a file: stdout belongs to the TUI. Location: see

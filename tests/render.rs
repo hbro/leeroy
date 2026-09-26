@@ -9,9 +9,10 @@ use leeroy::{
     history::HistoryEntry,
     jenkins::ServerInfo,
     jobs::{Job, JobStatus},
+    theme::Appearance,
     ui,
 };
-use ratatui::{Terminal, backend::TestBackend};
+use ratatui::{Terminal, backend::TestBackend, style::Color};
 
 const WIDTH: u16 = 80;
 const HEIGHT: u16 = 24;
@@ -87,6 +88,32 @@ fn header_shows_connected_instance() {
 #[test]
 fn settings_empty() {
     insta::assert_snapshot!(render_after(&[Action::OpenSettings]).backend());
+}
+
+#[test]
+fn settings_theme_selected() {
+    let mut app = test_app();
+    app.terminal_appearance = Some(Appearance::Light);
+    // The last row: Theme, with its docs below.
+    apply(&mut app, &[Action::OpenSettings, Action::SelectPrev]);
+    let screen = format!("{}", render(&app).backend());
+    assert!(
+        screen.contains("auto (default; light terminal detected)"),
+        "{screen}"
+    );
+    insta::assert_snapshot!(screen);
+}
+
+#[test]
+fn switching_theme_recolours_right_away() {
+    let bar_bg = |app: &App| render(app).backend().buffer()[(0, 0)].bg;
+    let mut app = test_app();
+    app.terminal_appearance = Some(Appearance::Dark);
+    apply(&mut app, &[Action::OpenSettings, Action::SelectPrev]);
+    assert_eq!(bar_bg(&app), Color::White, "auto on a dark terminal");
+    apply(&mut app, &[Action::StartEdit, Action::StartEdit]); // auto → dark → light
+    assert_eq!(app.settings.file.get(SettingKey::Theme), Some("light"));
+    assert_eq!(bar_bg(&app), Color::Black);
 }
 
 #[test]
@@ -419,15 +446,25 @@ fn refresh_status_in_header() {
 /// equal the highlight background (dark-gray statuses used to vanish there).
 #[test]
 fn selected_row_status_stays_readable() {
-    let mut app = app_with_jobs();
+    for theme in ["dark", "light"] {
+        let mut app = app_with_jobs();
+        app.settings
+            .file
+            .set(SettingKey::Theme, Some(theme.to_owned()));
+        assert_eq!(app.theme().name, theme);
+        selected_rows_readable(&mut app);
+    }
+}
+
+fn selected_rows_readable(app: &mut App) {
     let rows = app.jobs.visible().len();
     for row in 0..rows {
-        apply(&mut app, &[Action::SelectFirst]);
+        apply(app, &[Action::SelectFirst]);
         for _ in 0..row {
-            apply(&mut app, &[Action::SelectNext]);
+            apply(app, &[Action::SelectNext]);
         }
         let label = app.jobs.visible()[row].status.label();
-        let terminal = render(&app);
+        let terminal = render(app);
         let buffer = terminal.backend().buffer();
         // The selected row is marked with "▶"; check its status cells.
         let y = (0..HEIGHT)
@@ -439,8 +476,10 @@ fn selected_row_status_stays_readable() {
         for dx in 0..label.chars().count() as u16 {
             let cell = &buffer[(x + dx, y)];
             assert_ne!(
-                cell.fg, cell.bg,
-                "{label:?} unreadable on the selected row (fg == bg == {:?})",
+                cell.fg,
+                cell.bg,
+                "{}: {label:?} unreadable on the selected row (fg == bg == {:?})",
+                app.theme().name,
                 cell.bg
             );
         }

@@ -54,9 +54,17 @@ Rules:
   Settings `0`, right-aligned in the tab bar. New content = new `Tab` + `View`
   variant. Tab keys work everywhere except text input (digits are typed there).
   Tabs aren't closable: `Esc` doesn't leave them.
-- Selected rows use `SELECTED_BG` (dark gray); a cell colour equal to it is
-  swapped to `SELECTED_FG_ON_BG` on that row. Test
-  `selected_row_status_stays_readable` checks every status stays fg != bg.
+- Colours: never hard-code a `Color` in `ui.rs`; use a role of `theme::Theme`
+  (`let t = app.theme();`, re-resolved every frame, so switching is live). A new
+  role goes in both `DARK` (the original look, keep it) and `LIGHT`. Themes never
+  paint the background: they use the terminal's own, plus its 16 colours
+  (`LIGHT` adds two from the 256-colour cube where ANSI yellow/green are
+  unreadable on white). `ui.theme` = auto|dark|light (`SettingKey::choices`:
+  Enter cycles, first = default = unset); auto resolves against
+  `App::terminal_appearance`, detected in `main.rs` before raw mode
+  (terminal-colorsaurus; `None` = dark). Selected rows use `t.selected_bg`;
+  text colours go through `t.on_selected()` there. Tests in `theme.rs` check
+  every theme for fg != bg; `selected_row_status_stays_readable` renders both.
 - Global keys (`GLOBAL_BINDINGS`; no bottom bar, listed in the help popup, the
   header shows an `h/?` hint): q, s, h/?, r (refresh), R (toggle auto-refresh). The refresh status is a compact `⟳ 4s` at the right end of the
   header (icon green = auto-refresh on, gray = off; `…` fetching, `✕` failed).
@@ -203,7 +211,9 @@ Run all three layers for UI changes; layer 1 is mandatory for every change.
    scripts/screenshot.sh          # all tapes/*.tape; or: scripts/screenshot.sh help
    ```
    Then view `target/screenshots/<name>.png` with the Read tool. Add a tape per new
-   screen; start it with `Source tapes/_settings.tape`, keep the app launch `Hide`n,
+   screen; start it with `Source tapes/_settings.tape` (dark scheme; for another
+   scheme `Set Theme` first, then `Source tapes/_common.tape`, as `light.tape`
+   does: a second `Set Theme` is ignored), keep the app launch `Hide`n,
    and add a `Sleep` after `Screenshot` (a tape with zero shown frames fails).
    VHS 0.11 has no `Home`/`End` commands (they get typed as text): use `Left N`.
    VHS is pinned to 0.11.0 in `flake.nix`: 0.12.0 silently writes nothing

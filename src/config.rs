@@ -56,16 +56,18 @@ pub enum SettingKey {
     RefreshAuto,
     RefreshInterval,
     ConfirmQuit,
+    Theme,
 }
 
 impl SettingKey {
-    pub const ALL: [SettingKey; 6] = [
+    pub const ALL: [SettingKey; 7] = [
         SettingKey::JenkinsUrl,
         SettingKey::JenkinsSkipTlsVerify,
         SettingKey::ProxyUrl,
         SettingKey::RefreshAuto,
         SettingKey::RefreshInterval,
         SettingKey::ConfirmQuit,
+        SettingKey::Theme,
     ];
 
     pub fn label(self) -> &'static str {
@@ -76,6 +78,7 @@ impl SettingKey {
             SettingKey::RefreshAuto => "Auto-refresh",
             SettingKey::RefreshInterval => "Refresh every",
             SettingKey::ConfirmQuit => "Confirm quit",
+            SettingKey::Theme => "Theme",
         }
     }
 
@@ -88,6 +91,7 @@ impl SettingKey {
             SettingKey::RefreshAuto => ("refresh", "auto"),
             SettingKey::RefreshInterval => ("refresh", "interval"),
             SettingKey::ConfirmQuit => ("ui", "confirm_quit"),
+            SettingKey::Theme => ("ui", "theme"),
         }
     }
 
@@ -100,6 +104,7 @@ impl SettingKey {
             SettingKey::RefreshAuto => "LEEROY_REFRESH_AUTO",
             SettingKey::RefreshInterval => "LEEROY_REFRESH_INTERVAL",
             SettingKey::ConfirmQuit => "LEEROY_UI_CONFIRM_QUIT",
+            SettingKey::Theme => "LEEROY_UI_THEME",
         }
     }
 
@@ -109,9 +114,10 @@ impl SettingKey {
             SettingKey::JenkinsUrl | SettingKey::JenkinsSkipTlsVerify | SettingKey::ProxyUrl => {
                 Section::Jenkins
             }
-            SettingKey::RefreshAuto | SettingKey::RefreshInterval | SettingKey::ConfirmQuit => {
-                Section::Application
-            }
+            SettingKey::RefreshAuto
+            | SettingKey::RefreshInterval
+            | SettingKey::ConfirmQuit
+            | SettingKey::Theme => Section::Application,
         }
     }
 
@@ -127,6 +133,15 @@ impl SettingKey {
     /// Value of an on/off setting when it isn't set.
     pub fn default_on(self) -> bool {
         matches!(self, SettingKey::RefreshAuto | SettingKey::ConfirmQuit)
+    }
+
+    /// Settings with a fixed set of values: Enter cycles through them (the
+    /// first is the default, stored as the key being absent).
+    pub fn choices(self) -> Option<&'static [&'static str]> {
+        match self {
+            SettingKey::Theme => Some(&crate::theme::ThemeChoice::VALUES),
+            _ => None,
+        }
     }
 
     /// Whole seconds, stored as a TOML integer.
@@ -166,6 +181,11 @@ impl SettingKey {
                 "Ask before quitting with q (the default): y, Enter or q again quits, n or Esc stays.\n",
                 "Ctrl-C always quits right away.",
             ),
+            SettingKey::Theme => concat!(
+                "Colours: auto (the default), dark or light. Leeroy keeps the terminal's own\n",
+                "background; dark suits dark terminals, light suits light ones. auto picks one\n",
+                "from the background colour the terminal reports (dark if it doesn't answer).",
+            ),
         }
     }
 
@@ -202,6 +222,14 @@ impl SettingKey {
                     "expected whole seconds between {MIN_REFRESH_SECS} and {MAX_REFRESH_SECS}, got {value:?}"
                 )),
             },
+            SettingKey::Theme => crate::theme::ThemeChoice::parse(value)
+                .map(|_| value.to_ascii_lowercase())
+                .ok_or_else(|| {
+                    format!(
+                        "expected one of {}, got {value:?}",
+                        crate::theme::ThemeChoice::VALUES.join(", ")
+                    )
+                }),
             SettingKey::JenkinsSkipTlsVerify
             | SettingKey::RefreshAuto
             | SettingKey::ConfirmQuit => parse_bool(value)
@@ -384,6 +412,7 @@ pub struct Settings {
 #[serde(default)]
 pub struct UiSettings {
     pub confirm_quit: Option<bool>,
+    pub theme: Option<String>,
 }
 
 pub const DEFAULT_REFRESH_SECS: u64 = 10;
@@ -456,7 +485,15 @@ impl Settings {
                 .ui
                 .confirm_quit
                 .map(|b| if b { "true" } else { "false" }),
+            SettingKey::Theme => self.ui.theme.as_deref(),
         }
+    }
+
+    /// The `ui.theme` setting (`auto` when unset or, defensively, invalid).
+    pub fn theme(&self) -> crate::theme::ThemeChoice {
+        self.get(SettingKey::Theme)
+            .and_then(crate::theme::ThemeChoice::parse)
+            .unwrap_or(crate::theme::ThemeChoice::Auto)
     }
 
     /// Effective auto-refresh interval (the default when unset).
@@ -488,6 +525,7 @@ impl Settings {
                 self.ui.confirm_quit = value.as_deref().and_then(parse_bool);
                 return;
             }
+            SettingKey::Theme => &mut self.ui.theme,
         };
         *slot = value;
     }
@@ -1054,6 +1092,29 @@ mod tests {
             let expected = format!("LEEROY_{table}_{name}").to_uppercase();
             assert_eq!(key.env_var(), expected);
         }
+    }
+
+    #[test]
+    fn theme_from_env() {
+        let settings = Settings::from_env(vars(&[("LEEROY_UI_THEME", " Light ")])).unwrap();
+        assert_eq!(settings.get(SettingKey::Theme), Some("light"));
+        assert_eq!(settings.theme(), crate::theme::ThemeChoice::Light);
+        let err = Settings::from_env(vars(&[("LEEROY_UI_THEME", "solarized")])).unwrap_err();
+        assert!(err.to_string().contains("LEEROY_UI_THEME"), "{err}");
+        assert_eq!(Settings::default().theme(), crate::theme::ThemeChoice::Auto);
+    }
+
+    #[test]
+    fn theme_is_saved_as_a_string() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(FILE_NAME);
+        let mut settings = Settings::default();
+        settings.set(SettingKey::Theme, Some("light".into()));
+        save(&path, &settings).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.contains("[ui]"), "{text}");
+        assert!(text.contains("theme = \"light\""), "{text}");
+        assert_eq!(load(&path).unwrap(), settings);
     }
 
     #[test]
