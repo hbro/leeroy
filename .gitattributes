@@ -1,0 +1,2 @@
+# LF everywhere, also on Windows checkouts: snapshot tests compare exact text.
+* text=auto eol=lf

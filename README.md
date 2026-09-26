@@ -1,6 +1,26 @@
 # Leeroy
 Jenkins TUI
 
+## Installing
+
+Download the archive for your platform from the
+[releases](https://github.com/hbro/leeroy/releases) (`SHA256SUMS` lists the
+checksums) and put the `leeroy` binary on your `PATH`:
+
+| Platform | Archive |
+| --- | --- |
+| Linux x86_64 | `leeroy-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz` |
+| Linux ARM64 | `leeroy-vX.Y.Z-aarch64-unknown-linux-gnu.tar.gz` |
+| macOS Apple Silicon | `leeroy-vX.Y.Z-aarch64-apple-darwin.tar.gz` |
+| macOS Intel | `leeroy-vX.Y.Z-x86_64-apple-darwin.tar.gz` |
+| Windows x86_64 | `leeroy-vX.Y.Z-x86_64-pc-windows-msvc.zip` |
+
+The Linux binaries need glibc 2.35 or newer. macOS binaries aren't signed:
+clear the quarantine flag with `xattr -d com.apple.quarantine leeroy`.
+
+Or build from source: `cargo install --git https://github.com/hbro/leeroy`.
+`leeroy --version` prints the version.
+
 ## Configuration
 
 Settings can be edited in the TUI (Settings tab: `0`, or `s`) and are saved to a TOML file:
@@ -234,3 +254,30 @@ the number of rows that fit on your screen, and merges them. That's exact for th
 *N* rows shown. Moving down past the last row loads the next screenful (again one
 request). Filtering by job name or `#number` is complete without extra requests;
 filtering by result (e.g. "failed") only searches what's loaded.
+
+## Development
+
+`CLAUDE.md` describes the architecture and how to verify changes (tests,
+snapshots, tmux, screenshots). CI (`.github/workflows/ci.yml`) runs rustfmt and
+clippy, and the tests on Linux x86_64/ARM64, macOS and Windows, for every push
+to `main` and every pull request.
+
+### Releasing
+
+Leeroy follows [semantic versioning](https://semver.org); the version in
+`Cargo.toml` is the only source of truth. Record changes under
+`## [Unreleased]` in `CHANGELOG.md` as you go. To release:
+
+```sh
+scripts/release.sh 0.2.0    # sets the version, dates the changelog, runs the checks
+git commit -am "Release v0.2.0"
+git tag -a v0.2.0 -m "Leeroy v0.2.0"
+git push origin main v0.2.0
+```
+
+The tag triggers `.github/workflows/release.yml`: it fails if the tag doesn't
+match `Cargo.toml`, builds the five targets, and publishes a GitHub release with
+the archives, `SHA256SUMS` and the changelog section as release notes (a
+version with a `-suffix` becomes a pre-release). Running the workflow by hand
+(Actions → Release → Run workflow) is a dry run: it builds and uploads the
+archives as workflow artifacts but publishes nothing.

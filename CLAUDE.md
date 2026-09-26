@@ -149,6 +149,18 @@ Rules:
 - Never print to stdout/stderr while the TUI runs; use `tracing` (logs go to
   `$LEEROY_LOG`, default `~/.local/state/leeroy/leeroy.log`; level via `RUST_LOG`).
 
+## Versioning and CI
+
+- SemVer; `Cargo.toml` `version` is the single source. User-visible changes get
+  a line under `## [Unreleased]` in `CHANGELOG.md` (Keep a Changelog). Releases:
+  `scripts/release.sh X.Y.Z`, then commit + tag `vX.Y.Z` + push; the tag must
+  match `Cargo.toml` (release workflow checks).
+- CI runs tests on Linux, macOS and Windows: keep tests platform-neutral (build
+  expected paths with `Path::join`, `#[cfg(unix)]` only for truly Unix-only
+  behaviour like file modes/symlinks). `.gitattributes` forces LF so snapshots
+  match on Windows. Validate workflow edits with
+  `nix shell nixpkgs#actionlint nixpkgs#shellcheck -c actionlint`.
+
 ## Verifying changes
 
 Run all three layers for UI changes; layer 1 is mandatory for every change.

@@ -2,6 +2,12 @@
 name = "leeroy"
 version = "0.1.0"
 edition = "2024"
+description = "Terminal UI for Jenkins"
+license = "MIT"
+repository = "https://github.com/hbro/leeroy"
+readme = "README.md"
+keywords = ["jenkins", "tui", "ci", "terminal"]
+categories = ["command-line-utilities"]
 
 [dependencies]
 base64 = "0.23.1"

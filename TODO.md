@@ -6,9 +6,9 @@
   - Make the theme selectable in the settings.
   - Redraw the UI live when switching themes.
 
-- [ ] **Semantic versioning** of the application.
+- [x] **Semantic versioning** of the application.
 
-- [ ] **GitHub Actions build pipeline** that builds automatically for several
+- [x] **GitHub Actions build pipeline** that builds automatically for several
   platforms, starting with:
   - Linux x86_64
   - Linux ARM
