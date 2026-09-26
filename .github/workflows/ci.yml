@@ -12,13 +12,16 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # aws-lc (rustls' crypto) needs NASM for Windows x86_64; use the objects
+  # prebuilt in the aws-lc-sys crate instead of installing it.
+  AWS_LC_SYS_PREBUILT_NASM: 1
 
 jobs:
   lint:
     name: Format & clippy
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -33,7 +36,7 @@ jobs:
       matrix:
         include:
           - name: Linux x86_64
-            os: ubuntu-latest
+            os: ubuntu-24.04
           - name: Linux ARM64
             os: ubuntu-24.04-arm
           - name: macOS
@@ -42,11 +45,8 @@ jobs:
             os: windows-latest
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
-      # aws-lc (rustls' crypto) may need NASM on Windows.
-      - if: runner.os == 'Windows'
-        uses: ilammy/setup-nasm@v1
       - uses: Swatinem/rust-cache@v2
       # CI=true (set by GitHub) makes insta fail on snapshot changes instead
       # of writing .snap.new files.
@@ -54,11 +54,11 @@ jobs:
 
   musl:
     name: Test (Linux x86_64 musl)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       CC_x86_64_unknown_linux_musl: musl-gcc
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-unknown-linux-musl

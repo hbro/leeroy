@@ -13,15 +13,18 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # aws-lc (rustls' crypto) needs NASM for Windows x86_64; use the objects
+  # prebuilt in the aws-lc-sys crate instead of installing it.
+  AWS_LC_SYS_PREBUILT_NASM: 1
 
 jobs:
   version:
     name: Check version
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - id: version
         shell: bash
         run: |
@@ -60,7 +63,7 @@ jobs:
             os: ubuntu-22.04-arm
           - target: x86_64-unknown-linux-musl
             name: x86_64-linux-musl
-            os: ubuntu-latest
+            os: ubuntu-24.04
           - target: aarch64-unknown-linux-musl
             name: aarch64-linux-musl
             os: ubuntu-24.04-arm
@@ -75,12 +78,10 @@ jobs:
             os: windows-latest
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      - if: runner.os == 'Windows'
-        uses: ilammy/setup-nasm@v1
       # C dependencies (ring, aws-lc) must be compiled against musl too.
       - if: endsWith(matrix.target, '-musl')
         shell: bash
@@ -123,7 +124,7 @@ jobs:
             tar -C dist -czf "dist/$name.tar.gz" "$name"
           fi
           rm -rf "dist/$name"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: leeroy-${{ matrix.name }}
           path: dist/*
@@ -133,12 +134,12 @@ jobs:
     name: Publish release
     needs: [version, build]
     if: github.ref_type == 'tag'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
@@ -156,7 +157,7 @@ jobs:
             echo "::error::CHANGELOG.md has no section for ${{ needs.version.outputs.version }}"
             exit 1
           fi
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           name: Leeroy v${{ needs.version.outputs.version }}
           body_path: notes.md
