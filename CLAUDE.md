@@ -12,9 +12,13 @@ enter the devShell by themselves when needed.
 
 Elm-style: pure core, thin IO shell.
 
-- `src/app.rs` — `App` state + `Action` enum + `App::update(Action) -> Option<Effect>`.
-  **No IO**: side effects (e.g. saving config) are returned as an `Effect`, which
-  `main.rs` runs and answers with an `Action` (e.g. `SettingsSaved`).
+- `src/app.rs` — `App` state + `Action` enum + `App::update(Action) -> Vec<Effect>`.
+  **No IO**: side effects (saving config, connecting) are returned as `Effect`s, which
+  `main.rs`'s `Executor` runs and answers with an `Action` (`SettingsSaved`,
+  `ConnectFinished`). `App::start()` returns the startup effects.
+- `src/jenkins.rs` — reqwest client + `check()` (`GET whoAmI/api/json`). Proxy is
+  always passed in explicitly (`.no_proxy()` on the builder), so behaviour matches
+  what the settings view shows.
 - `src/config.rs` — config file location, load/save, env var overrides. Takes the
   environment as a parameter (never reads `std::env` itself) so it's testable.
 - `src/event.rs` — `map_key(&App, KeyEvent) -> Option<Action>`.
@@ -35,15 +39,32 @@ Rules:
 - `Esc` = `Action::Back`: closes the current context (popup, sub-view) and is
   only mapped where `Context::closable()`. It must never quit the app.
 - Text input contexts (`Context::captures_input()`) receive every key except
-  `Ctrl-C`; global keys are off there and the global bar is dimmed.
+  `Ctrl-C`; global keys are off there and the global bar is dimmed. Editing uses
+  `input::TextInput` (char-indexed cursor): ←/→, Home/End, Ctrl-A/E, Backspace,
+  Delete, Ctrl-U. ↑/↓ while editing = save the field (if valid) and move. What's
+  rendered must keep one char per input char so the cursor lines up (secrets as
+  `•` per char, proxy passwords via `config::mask_url_password`).
 - Settings: add a `SettingKey` variant (label, TOML path, env var
-  `LEEROY_<TABLE>_<KEY>`, secret?) plus a field in `Settings`. Precedence: env var >
+  `LEEROY_<TABLE>_<KEY>`, secret?, `doc`, `validate`, `display`) plus a field in
+  `Settings`. `doc` is shown in the settings view and written as a TOML comment
+  when the key is first saved. Invalid values keep the edit open; invalid file/env
+  values fail at startup. Precedence: env var >
   config file; env-set values are read-only in the TUI and never written to the file.
   Config path: `--config` > `$LEEROY_CONFIG` > `$XDG_CONFIG_HOME/leeroy/config.toml`
   (default `~/.config/...`); legacy `~/.leeroy/config.toml` only if it exists and
   the XDG file doesn't. Empty env values count as unset.
 - Secrets (API token) are masked in the UI, redacted in `Debug`, and `Input` actions
-  are never logged. Keep it that way.
+  are never logged. Proxy URL passwords go through `config::redact_url` everywhere
+  they're shown. Keep it that way.
+- Connection: every attempt bumps `App::connection_generation`; `ConnectFinished`
+  for an older generation is ignored and the executor aborts the previous task.
+  Reconnect happens only when `SettingsState::connection_config()` changes.
+- Bool settings (`SettingKey::is_bool`): Enter toggles, off = key removed, stored
+  as TOML bool, env accepts true/false/1/0/yes/no/on/off. `skip_tls_verify` must
+  stay off by default and show the header warning when on.
+- Proxy: `proxy.url`, scheme decides type/DNS (`socks5h`/`socks4a` = remote DNS).
+  Unset → `src/proxy.rs` picks the conventional `*_proxy` env var (curl rules, incl.
+  `NO_PROXY`) from a `ProxyEnv` snapshot taken at startup.
 - "Leeroy" is capitalized in all prose/UI text; only the crate/binary name,
   paths, env vars and tmux ids stay lowercase `leeroy`.
 - Import crossterm types via `ratatui::crossterm` (EventStream is the exception:
@@ -76,7 +97,11 @@ Run all three layers for UI changes; layer 1 is mandatory for every change.
    ```
    Gotcha: `Esc` is NOT a tmux key name (it types E, s, c) — use `Escape`.
    App log for the run: `target/tui.log` (RUST_LOG=debug).
-   Isolation: all `LEEROY_*` vars from your shell are cleared and the config is a
+   Fake Jenkins for connection tests: `scripts/fake-jenkins.py [--port 8099]
+   [--auth USER:TOKEN] [--delay SECS] [--status CODE] [--tls]` (self-signed HTTPS).
+   Run it in the background with its own process group; don't `pkill -f` it (the
+   pattern can match unrelated shells).
+   Isolation: all `LEEROY_*` and `*_proxy` vars from your shell are cleared and the config is a
    fresh `target/tui/config.toml` per start. Test env overrides with `-e`, a
    prepared config with `-- --config FILE`.
 
@@ -87,6 +112,9 @@ Run all three layers for UI changes; layer 1 is mandatory for every change.
    Then view `target/screenshots/<name>.png` with the Read tool. Add a tape per new
    screen; start it with `Source tapes/_settings.tape`, keep the app launch `Hide`n,
    and add a `Sleep` after `Screenshot` (a tape with zero shown frames fails).
+   VHS 0.11 has no `Home`/`End` commands (they get typed as text): use `Left N`.
    VHS is pinned to 0.11.0 in `flake.nix`: 0.12.0 silently writes nothing
    (charmbracelet/vhs#787). The script checks that screenshots were produced.
-   Tapes run with a fresh `target/vhs/config.toml` and no `LEEROY_*` vars.
+   Tapes run with a fresh `target/vhs/config.toml` and no `LEEROY_*`/`*_proxy` vars,
+   against a fake Jenkins on http://127.0.0.1:8099 started by the script (never
+   the real network).

@@ -3,13 +3,14 @@ use ratatui::{
     layout::{Alignment, Constraint, Flex, Layout, Rect},
     style::{Color, Modifier, Style, Stylize},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Clear, Paragraph},
+    widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap},
 };
 
 use crate::{
     app::{App, ConnectionStatus, SettingsState, StatusMessage, View},
-    config::SettingKey,
+    config::{SettingKey, mask_url_password, redact_url},
     event::{Binding, GLOBAL_BINDINGS, context_bindings},
+    proxy::SystemProxy,
 };
 
 /// Draw the whole UI. Keep this deterministic (no clock, no randomness):
@@ -42,14 +43,44 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App) {
         Span::styled(" Leeroy ", Style::new().black().on_yellow().bold()),
         Span::raw(" "),
     ];
+    // First, so it's never cut off on narrow terminals.
+    if app
+        .settings
+        .connection_config()
+        .is_some_and(|c| c.skip_tls_verify)
+    {
+        spans.push(Span::styled(
+            "⚠ TLS NOT VERIFIED",
+            Style::new().white().on_red().bold(),
+        ));
+        spans.push(Span::raw(" "));
+    }
+    let dim = Style::new().gray();
     spans.extend(match &app.connection {
-        ConnectionStatus::NotConfigured => [
+        ConnectionStatus::NotConfigured => vec![
             Span::styled("○", Style::new().red()),
             Span::raw(" not connected"),
         ],
-        ConnectionStatus::Connected { url } => [
-            Span::styled("●", Style::new().green()),
+        ConnectionStatus::Connecting { url } => vec![
+            Span::styled("◌", Style::new().yellow()),
             Span::raw(format!(" {url}")),
+            Span::styled(" · connecting…", dim),
+        ],
+        ConnectionStatus::Connected { url, info } => {
+            let mut spans = vec![
+                Span::styled("●", Style::new().green()),
+                Span::raw(format!(" {url}")),
+            ];
+            if let Some(version) = &info.version {
+                spans.push(Span::styled(format!(" · Jenkins {version}"), dim));
+            }
+            spans.push(Span::styled(format!(" · {}", info.user), dim));
+            spans
+        }
+        ConnectionStatus::Failed { url, error } => vec![
+            Span::styled("✕", Style::new().red().bold()),
+            Span::raw(format!(" {url}")),
+            Span::styled(format!(" · {error}"), Style::new().red()),
         ],
     });
     frame.render_widget(Paragraph::new(Line::from(spans)).on_dark_gray(), area);
@@ -64,29 +95,51 @@ fn view_block(title: &str) -> Block<'_> {
 }
 
 fn render_jobs(frame: &mut Frame, area: Rect, app: &App) {
-    let lines = match app.settings.effective().get(SettingKey::JenkinsUrl) {
-        None => vec![
+    let hint = Style::new().dark_gray();
+    let lines = match &app.connection {
+        ConnectionStatus::NotConfigured => vec![
             Line::raw(""),
             Line::styled("No Jenkins instance configured", Style::new().italic()),
-            Line::styled("Press s to open settings", Style::new().dark_gray()),
+            Line::styled("Press s to open settings", hint),
         ],
-        Some(url) => vec![
+        ConnectionStatus::Connecting { url } => vec![
             Line::raw(""),
-            Line::styled(format!("Jenkins instance: {url}"), Style::new().italic()),
-            Line::styled(
-                "Connecting is not implemented yet",
-                Style::new().dark_gray(),
-            ),
+            Line::styled(format!("Connecting to {url}…"), Style::new().italic()),
+        ],
+        ConnectionStatus::Connected { info, .. } => {
+            let mut lines = vec![
+                Line::raw(""),
+                Line::styled(format!("Connected as {}", info.user), Style::new().italic()),
+            ];
+            if app
+                .settings
+                .connection_config()
+                .is_some_and(|c| c.credentials.is_none())
+            {
+                lines.push(Line::styled(
+                    "Set a username and API token in settings (s) to log in",
+                    hint,
+                ));
+            }
+            lines.push(Line::styled("Job list is not implemented yet", hint));
+            lines
+        }
+        ConnectionStatus::Failed { url, error } => vec![
+            Line::raw(""),
+            Line::styled(format!("Cannot reach {url}"), Style::new().italic()),
+            Line::styled(error.as_str(), Style::new().red()),
+            Line::styled("Check the settings (s)", hint),
         ],
     };
     let placeholder = Paragraph::new(lines)
         .alignment(Alignment::Center)
+        .wrap(Wrap { trim: true })
         .block(view_block("Jobs"));
     frame.render_widget(placeholder, area);
 }
 
 const SECRET_MASK: &str = "••••••••";
-const LABEL_WIDTH: usize = 14;
+const LABEL_WIDTH: usize = 16;
 
 fn render_settings(frame: &mut Frame, area: Rect, s: &SettingsState) {
     let dim = Style::new().dark_gray();
@@ -113,24 +166,48 @@ fn render_settings(frame: &mut Frame, area: Rect, s: &SettingsState) {
         )];
 
         match (&s.editing, selected) {
-            (Some(buf), true) => {
-                // While typing a secret, show one bullet per char so progress is visible.
-                let shown = if key.is_secret() {
-                    "•".repeat(buf.chars().count())
+            (Some(input), true) => {
+                // Shown text keeps one char per input char, so the cursor lines
+                // up: secrets as bullets, proxy passwords masked in place.
+                let shown: Vec<char> = if key.is_secret() {
+                    vec!['•'; input.value().chars().count()]
+                } else if key == SettingKey::ProxyUrl {
+                    mask_url_password(input.value()).chars().collect()
                 } else {
-                    buf.clone()
+                    input.value().chars().collect()
                 };
+                let (before, after) = shown.split_at(input.cursor());
+                let text = Style::new().yellow().underlined();
                 row.push(Span::raw("  "));
-                row.push(Span::styled(shown, Style::new().yellow().underlined()));
-                row.push(Span::styled("█", Style::new().yellow()));
+                row.push(Span::styled(before.iter().collect::<String>(), text));
+                match after.split_first() {
+                    Some((under, rest)) => {
+                        row.push(Span::styled(
+                            under.to_string(),
+                            Style::new().black().on_yellow(),
+                        ));
+                        row.push(Span::styled(rest.iter().collect::<String>(), text));
+                    }
+                    None => row.push(Span::styled("█", Style::new().yellow())),
+                }
             }
             _ => {
                 row.push(Span::raw("  "));
                 row.push(match effective.get(key) {
+                    _ if key.is_bool() => {
+                        if effective.is_on(key) {
+                            Span::styled("on (insecure)", Style::new().red().bold())
+                        } else {
+                            Span::raw("off")
+                        }
+                    }
+                    None if key == SettingKey::ProxyUrl => {
+                        Span::styled(system_proxy_note(&s.system_proxy()), dim)
+                    }
                     None => Span::styled("(not set)", dim),
                     // Fixed-width mask: doesn't leak the secret's length.
                     Some(_) if key.is_secret() => Span::raw(SECRET_MASK),
-                    Some(value) => Span::raw(value.to_owned()),
+                    Some(value) => Span::raw(key.display(value)),
                 });
             }
         }
@@ -140,15 +217,46 @@ fn render_settings(frame: &mut Frame, area: Rect, s: &SettingsState) {
         lines.push(Line::from(row));
     }
 
-    if let Some(message) = &s.message {
-        lines.push(Line::raw(""));
-        lines.push(match message {
-            StatusMessage::Info(text) => Line::styled(format!("   {text}"), Style::new().green()),
-            StatusMessage::Error(text) => Line::styled(format!("   {text}"), Style::new().red()),
-        });
-    }
+    let block = view_block("Settings");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let [top, _, docs] = Layout::vertical([
+        Constraint::Length(lines.len() as u16),
+        Constraint::Length(1),
+        Constraint::Min(0),
+    ])
+    .areas(inner);
+    frame.render_widget(Paragraph::new(lines), top);
 
-    frame.render_widget(Paragraph::new(lines).block(view_block("Settings")), area);
+    // Status message + docs for the selected setting, in their own inset
+    // area so wrapped lines keep the indent.
+    let [_, bottom] = Layout::horizontal([Constraint::Length(3), Constraint::Min(0)]).areas(docs);
+    let mut bottom_lines = Vec::new();
+    if let Some(message) = &s.message {
+        bottom_lines.push(match message {
+            StatusMessage::Info(text) => Line::styled(text.as_str(), Style::new().green()),
+            StatusMessage::Error(text) => Line::styled(text.as_str(), Style::new().red()),
+        });
+        bottom_lines.push(Line::raw(""));
+    }
+    bottom_lines.extend(
+        s.selected_key()
+            .doc()
+            .lines()
+            .map(|line| Line::styled(line, dim)),
+    );
+    frame.render_widget(
+        Paragraph::new(bottom_lines).wrap(Wrap { trim: false }),
+        bottom,
+    );
+}
+
+fn system_proxy_note(system: &SystemProxy) -> String {
+    match system {
+        SystemProxy::Proxy { var, url } => format!("(not set; ${var}: {})", redact_url(url)),
+        SystemProxy::Bypassed { var } => format!("(not set; ${var} bypasses the proxy)"),
+        SystemProxy::None => "(not set; direct connection)".into(),
+    }
 }
 
 /// Keybindings as `key desc` pairs, keys highlighted with `key_style`.

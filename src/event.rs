@@ -23,12 +23,14 @@ pub fn context_bindings(context: Context) -> &'static [Binding] {
     const JOBS: &[Binding] = &[];
     const SETTINGS: &[Binding] = &[
         bind("↑/↓", "select"),
-        bind("Enter", "edit"),
+        bind("Enter", "edit/toggle"),
         bind("Esc", "back"),
     ];
     const EDIT: &[Binding] = &[
         bind("Enter", "save"),
         bind("Esc", "cancel"),
+        bind("↑/↓", "save & move"),
+        bind("←/→", "cursor"),
         bind("C-u", "clear"),
     ];
     const HELP: &[Binding] = &[bind("Esc", "close")];
@@ -57,7 +59,16 @@ pub fn map_key(app: &App, key: KeyEvent) -> Option<Action> {
         return match key.code {
             KeyCode::Enter => Some(Action::ConfirmEdit),
             KeyCode::Esc => Some(Action::Back),
+            KeyCode::Up => Some(Action::SelectPrev),
+            KeyCode::Down => Some(Action::SelectNext),
+            KeyCode::Left => Some(Action::CursorLeft),
+            KeyCode::Right => Some(Action::CursorRight),
+            KeyCode::Home => Some(Action::CursorHome),
+            KeyCode::End => Some(Action::CursorEnd),
             KeyCode::Backspace => Some(Action::DeleteChar),
+            KeyCode::Delete => Some(Action::DeleteForward),
+            KeyCode::Char('a') if ctrl => Some(Action::CursorHome),
+            KeyCode::Char('e') if ctrl => Some(Action::CursorEnd),
             KeyCode::Char('u') if ctrl => Some(Action::ClearInput),
             KeyCode::Char(c) if !ctrl && !key.modifiers.contains(KeyModifiers::ALT) => {
                 Some(Action::Input(c))
@@ -109,7 +120,7 @@ mod tests {
             Context::Settings => app.view = View::Settings,
             Context::EditSetting => {
                 app.view = View::Settings;
-                app.settings.editing = Some(String::new());
+                app.settings.editing = Some(Default::default());
             }
             Context::Help => app.show_help = true,
         }
@@ -126,6 +137,8 @@ mod tests {
                 "Enter" => key(KeyCode::Enter),
                 "↑" => key(KeyCode::Up),
                 "↓" => key(KeyCode::Down),
+                "←" => key(KeyCode::Left),
+                "→" => key(KeyCode::Right),
                 s if s.starts_with("C-") && s.chars().count() == 3 => {
                     ctrl(s.chars().nth(2).unwrap())
                 }
@@ -133,6 +146,24 @@ mod tests {
                 other => panic!("unknown key label {other:?}; extend keys_of"),
             })
             .collect()
+    }
+
+    #[test]
+    fn editing_keys() {
+        let app = app_in(Context::EditSetting);
+        for (code, action) in [
+            (KeyCode::Left, Action::CursorLeft),
+            (KeyCode::Right, Action::CursorRight),
+            (KeyCode::Home, Action::CursorHome),
+            (KeyCode::End, Action::CursorEnd),
+            (KeyCode::Delete, Action::DeleteForward),
+            (KeyCode::Up, Action::SelectPrev),
+            (KeyCode::Down, Action::SelectNext),
+        ] {
+            assert_eq!(map_key(&app, key(code)), Some(action), "{code:?}");
+        }
+        assert_eq!(map_key(&app, ctrl('a')), Some(Action::CursorHome));
+        assert_eq!(map_key(&app, ctrl('e')), Some(Action::CursorEnd));
     }
 
     #[test]

@@ -1,18 +1,18 @@
 ---
 source: tests/render.rs
-expression: screen
+expression: render(&app).backend()
 ---
-" Leeroy  ○ not connected                                                        "
-"╭ Settings ────────────────────────────────────────────────────────────────────╮"
-"│   Config file       /home/user/.config/leeroy/config.toml                    │"
+" Leeroy  ⚠ TLS NOT VERIFIED ● https://ci.example.com · Jenkins 2.504.1 · anonymo"
+"╭ Jobs ────────────────────────────────────────────────────────────────────────╮"
 "│                                                                              │"
-"│   Jenkins URL       (not set)                                                │"
-"│   Username          (not set)                                                │"
-"│ ▶ API token         ••••••█                                                  │"
-"│   Skip TLS verify   off                                                      │"
-"│   Proxy URL         (not set; direct connection)                             │"
+"│                            Connected as anonymous                            │"
+"│            Set a username and API token in settings (s) to log in            │"
+"│                        Job list is not implemented yet                       │"
 "│                                                                              │"
-"│   Jenkins API token (Jenkins: your user > Security > API Token)              │"
+"│                                                                              │"
+"│                                                                              │"
+"│                                                                              │"
+"│                                                                              │"
 "│                                                                              │"
 "│                                                                              │"
 "│                                                                              │"
@@ -24,5 +24,5 @@ expression: screen
 "│                                                                              │"
 "│                                                                              │"
 "╰──────────────────────────────────────────────────────────────────────────────╯"
-" Edit   Enter  save   Esc  cancel   ↑/↓  save & move   ←/→  cursor   C-u  clear "
+" Jobs                                                                           "
 " q  quit   s  settings   ?  help                                                "

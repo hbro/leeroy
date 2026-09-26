@@ -1,6 +1,6 @@
 ---
 source: tests/render.rs
-expression: screen
+expression: render_after(&actions).backend()
 ---
 " Leeroy  ○ not connected                                                        "
 "╭ Settings ────────────────────────────────────────────────────────────────────╮"
@@ -8,19 +8,19 @@ expression: screen
 "│                                                                              │"
 "│   Jenkins URL       (not set)                                                │"
 "│   Username          (not set)                                                │"
-"│ ▶ API token         ••••••█                                                  │"
+"│   API token         (not set)                                                │"
 "│   Skip TLS verify   off                                                      │"
-"│   Proxy URL         (not set; direct connection)                             │"
+"│ ▶ Proxy URL         ftp://proxy:21█                                          │"
 "│                                                                              │"
-"│   Jenkins API token (Jenkins: your user > Security > API Token)              │"
+"│   unsupported scheme "ftp": use one of http, https, socks4, socks4a, socks5, │"
+"│   socks5h                                                                    │"
 "│                                                                              │"
-"│                                                                              │"
-"│                                                                              │"
-"│                                                                              │"
-"│                                                                              │"
-"│                                                                              │"
-"│                                                                              │"
-"│                                                                              │"
+"│   Proxy for reaching Jenkins: scheme://[user:pass@]host:port                 │"
+"│   Schemes: http, https, socks4, socks4a, socks5, socks5h.                    │"
+"│   SOCKS: socks5h:// or socks4a:// resolve DNS on the proxy (remote DNS);     │"
+"│   socks5:// and socks4:// resolve DNS locally. HTTP(S) proxies always resolve│"
+"│   remotely.                                                                  │"
+"│   Unset: HTTPS_PROXY / HTTP_PROXY / ALL_PROXY / NO_PROXY are used.           │"
 "│                                                                              │"
 "│                                                                              │"
 "╰──────────────────────────────────────────────────────────────────────────────╯"

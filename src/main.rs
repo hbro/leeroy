@@ -11,10 +11,15 @@ use leeroy::{
     app::{Action, App, Effect, SettingsState},
     config::{self, Settings},
     event::map_key,
+    jenkins,
+    proxy::ProxyEnv,
     ui,
 };
 use ratatui::DefaultTerminal;
-use tokio::sync::mpsc::{self, UnboundedSender};
+use tokio::{
+    sync::mpsc::{self, UnboundedSender},
+    task::AbortHandle,
+};
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::EnvFilter;
 
@@ -24,7 +29,8 @@ const TICK_RATE: Duration = Duration::from_millis(250);
 ///
 /// Every setting can also be set with an env var, which takes precedence over
 /// the config file: LEEROY_JENKINS_URL, LEEROY_JENKINS_USERNAME,
-/// LEEROY_JENKINS_TOKEN.
+/// LEEROY_JENKINS_TOKEN, LEEROY_PROXY_URL. Without a proxy setting, the usual
+/// HTTPS_PROXY / HTTP_PROXY / ALL_PROXY / NO_PROXY env vars apply.
 #[derive(Debug, Parser)]
 #[command(version)]
 struct Cli {
@@ -62,9 +68,15 @@ async fn main() -> Result<()> {
     }
     let path = location.path;
     let file = config::load(&path)?;
-    let env = Settings::from_env(|name| std::env::var_os(name));
+    let env = Settings::from_env(|name| std::env::var_os(name))?;
     tracing::info!(path = %path.display(), "loaded config");
-    let app = App::new(SettingsState::new(path, file, env));
+    file.validate(|key| {
+        let (table, name) = key.toml_path();
+        format!("{table}.{name} in {}", path.display())
+    })?;
+    let mut settings = SettingsState::new(path, file, env);
+    settings.proxy_env = ProxyEnv::from_env(|name| std::env::var_os(name));
+    let app = App::new(settings);
 
     // ratatui::init enters raw mode + alternate screen and installs a panic
     // hook that restores the terminal before the panic message is printed.
@@ -79,6 +91,13 @@ async fn run(mut terminal: DefaultTerminal, mut app: App) -> Result<()> {
     let mut tick = tokio::time::interval(TICK_RATE);
     // Background tasks (e.g. Jenkins API calls) send their results here.
     let (action_tx, mut action_rx) = mpsc::unbounded_channel::<Action>();
+    let mut executor = Executor {
+        tx: action_tx,
+        connect_task: None,
+    };
+    for effect in app.start() {
+        executor.run(effect);
+    }
 
     while app.running {
         terminal.draw(|frame| ui::render(frame, &app))?;
@@ -100,8 +119,8 @@ async fn run(mut terminal: DefaultTerminal, mut app: App) -> Result<()> {
             if !matches!(action, Action::Tick | Action::Input(_)) {
                 tracing::debug!(?action, "update");
             }
-            if let Some(effect) = app.update(action) {
-                execute(effect, &action_tx);
+            for effect in app.update(action) {
+                executor.run(effect);
             }
         }
     }
@@ -109,18 +128,43 @@ async fn run(mut terminal: DefaultTerminal, mut app: App) -> Result<()> {
     Ok(())
 }
 
-/// Run a side effect requested by `App::update`; report back via `tx`.
-fn execute(effect: Effect, tx: &UnboundedSender<Action>) {
-    match effect {
-        Effect::SaveSettings { path, settings } => {
-            // Inline on purpose: a tiny local write, and running saves in
-            // order means an older save can never overwrite a newer one.
-            let result = config::save(&path, &settings).map_err(|err| format!("{err:#}"));
-            match &result {
-                Ok(()) => tracing::info!(path = %path.display(), "saved config"),
-                Err(err) => tracing::error!(%err, "saving config failed"),
+/// Runs side effects requested by `App::update`, reporting back via `tx`.
+struct Executor {
+    tx: UnboundedSender<Action>,
+    /// The in-flight connection check, aborted when a newer one starts.
+    connect_task: Option<AbortHandle>,
+}
+
+impl Executor {
+    fn run(&mut self, effect: Effect) {
+        let tx = &self.tx;
+        match effect {
+            Effect::SaveSettings { path, settings } => {
+                // Inline on purpose: a tiny local write, and running saves in
+                // order means an older save can never overwrite a newer one.
+                let result = config::save(&path, &settings).map_err(|err| format!("{err:#}"));
+                match &result {
+                    Ok(()) => tracing::info!(path = %path.display(), "saved config"),
+                    Err(err) => tracing::error!(%err, "saving config failed"),
+                }
+                let _ = tx.send(Action::SettingsSaved(result));
             }
-            let _ = tx.send(Action::SettingsSaved(result));
+            Effect::Connect { generation, config } => {
+                if let Some(previous) = self.connect_task.take() {
+                    previous.abort();
+                }
+                tracing::info!(?config, generation, "connecting");
+                let tx = tx.clone();
+                let task = tokio::spawn(async move {
+                    let result = jenkins::check(&config).await;
+                    match &result {
+                        Ok(info) => tracing::info!(?info, generation, "connected"),
+                        Err(err) => tracing::warn!(%err, generation, "connection failed"),
+                    }
+                    let _ = tx.send(Action::ConnectFinished { generation, result });
+                });
+                self.connect_task = Some(task.abort_handle());
+            }
         }
     }
 }

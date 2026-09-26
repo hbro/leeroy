@@ -4,6 +4,7 @@
 use leeroy::{
     app::{Action, App, ConnectionStatus, SettingsState},
     config::{SettingKey, Settings},
+    jenkins::ServerInfo,
     ui,
 };
 use ratatui::{Terminal, backend::TestBackend};
@@ -66,13 +67,17 @@ fn header_shows_connected_instance() {
     let mut app = test_app();
     app.connection = ConnectionStatus::Connected {
         url: "https://jenkins.example.com".into(),
+        info: ServerInfo {
+            version: Some("2.504.1".into()),
+            user: "hbro".into(),
+        },
     };
     let terminal = render(&app);
     let header: String = terminal.backend().buffer().content()[..WIDTH as usize]
         .iter()
         .map(|cell| cell.symbol())
         .collect();
-    insta::assert_snapshot!(header.trim_end(), @" Leeroy  ● https://jenkins.example.com");
+    insta::assert_snapshot!(header.trim_end(), @" Leeroy  ● https://jenkins.example.com · Jenkins 2.504.1 · hbro");
 }
 
 #[test]
@@ -84,7 +89,8 @@ fn settings_empty() {
 fn settings_editing_token() {
     let mut actions = vec![
         Action::OpenSettings,
-        Action::SelectPrev, // wraps to the token
+        Action::SelectNext,
+        Action::SelectNext, // the token
         Action::StartEdit,
     ];
     actions.extend(type_str("s3cret"));
@@ -115,12 +121,88 @@ fn settings_saved_with_env_override() {
 }
 
 #[test]
-fn jobs_shows_configured_instance() {
+fn jobs_connecting() {
     let mut app = test_app();
     app.settings.file.set(
         SettingKey::JenkinsUrl,
         Some("https://ci.example.com".into()),
     );
+    app.start();
+    insta::assert_snapshot!(render(&app).backend());
+}
+
+#[test]
+fn jobs_connection_failed() {
+    let mut app = test_app();
+    app.settings.file.set(
+        SettingKey::JenkinsUrl,
+        Some("https://ci.example.com".into()),
+    );
+    app.start();
+    app.update(Action::ConnectFinished {
+        generation: app.connection_generation,
+        result: Err("cannot connect: dns error: failed to lookup address information".into()),
+    });
+    insta::assert_snapshot!(render(&app).backend());
+}
+
+#[test]
+fn jobs_connected_anonymously_with_tls_unverified() {
+    let mut app = test_app();
+    app.settings.file.set(
+        SettingKey::JenkinsUrl,
+        Some("https://ci.example.com".into()),
+    );
+    app.settings
+        .file
+        .set(SettingKey::JenkinsSkipTlsVerify, Some("true".into()));
+    app.start();
+    app.update(Action::ConnectFinished {
+        generation: app.connection_generation,
+        result: Ok(ServerInfo {
+            version: Some("2.504.1".into()),
+            user: "anonymous".into(),
+        }),
+    });
+    insta::assert_snapshot!(render(&app).backend());
+}
+
+#[test]
+fn settings_proxy_selected_with_system_fallback() {
+    let mut app = test_app();
+    app.settings.proxy_env = leeroy::proxy::ProxyEnv::from_env(|name| {
+        (name == "HTTPS_PROXY").then(|| "http://me:hunter2@corp-proxy:3128".into())
+    });
+    apply(&mut app, &[Action::OpenSettings, Action::SelectPrev]);
     let screen = format!("{}", render(&app).backend());
-    assert!(screen.contains("Jenkins instance: https://ci.example.com"));
+    assert!(!screen.contains("hunter2"), "proxy password shown");
+    insta::assert_snapshot!(screen);
+}
+
+#[test]
+fn settings_invalid_proxy() {
+    let mut actions = vec![Action::OpenSettings, Action::SelectPrev, Action::StartEdit];
+    actions.extend(type_str("ftp://proxy:21"));
+    actions.push(Action::ConfirmEdit);
+    insta::assert_snapshot!(render_after(&actions).backend());
+}
+
+#[test]
+fn settings_editing_proxy_cursor_mid_text() {
+    let mut actions = vec![Action::OpenSettings, Action::SelectPrev, Action::StartEdit];
+    actions.extend(type_str("socks5h://me:hunter2@bastion:1080"));
+    actions.extend([Action::CursorHome, Action::CursorRight, Action::CursorRight]);
+    let screen = format!("{}", render_after(&actions).backend());
+    assert!(
+        !screen.contains("hunter2"),
+        "proxy password shown while editing"
+    );
+    assert!(
+        screen.contains("socks5h://me:•••••••@bastion:1080"),
+        "{screen}"
+    );
+    assert!(
+        !screen.contains('█'),
+        "cursor block shown although cursor is mid-text"
+    );
 }

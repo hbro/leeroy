@@ -10,14 +10,14 @@
 #   scripts/tui.sh status                     running | exited (<code>) | stopped
 #   scripts/tui.sh stop                       kill session
 #
-# Runs are isolated from your own setup: every LEEROY_* env var is cleared and
+# Runs are isolated from your own setup: every LEEROY_* and *_PROXY env var is cleared and
 # the config file is target/tui/config.toml, wiped on each start. Pass env vars
 # for a run with -e (e.g. -e LEEROY_JENKINS_URL=https://ci), or a config with
 # -- --config FILE. Logs of the run go to target/tui.log.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-while read -r var; do unset "$var"; done < <(compgen -e | grep '^LEEROY_' || true)
+while read -r var; do unset "$var"; done < <(compgen -e | grep -Ei '^(LEEROY_|(https?|all|no)_proxy$)' || true)
 SOCKET=leeroy-agent
 SESSION=leeroy
 BIN=target/debug/leeroy

@@ -36,6 +36,8 @@
             tmux
             ttyd
             ffmpeg
+            python3
+            openssl
           ]);
           RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
         };

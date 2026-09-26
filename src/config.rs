@@ -31,13 +31,17 @@ pub enum SettingKey {
     JenkinsUrl,
     JenkinsUsername,
     JenkinsToken,
+    JenkinsSkipTlsVerify,
+    ProxyUrl,
 }
 
 impl SettingKey {
-    pub const ALL: [SettingKey; 3] = [
+    pub const ALL: [SettingKey; 5] = [
         SettingKey::JenkinsUrl,
         SettingKey::JenkinsUsername,
         SettingKey::JenkinsToken,
+        SettingKey::JenkinsSkipTlsVerify,
+        SettingKey::ProxyUrl,
     ];
 
     pub fn label(self) -> &'static str {
@@ -45,6 +49,8 @@ impl SettingKey {
             SettingKey::JenkinsUrl => "Jenkins URL",
             SettingKey::JenkinsUsername => "Username",
             SettingKey::JenkinsToken => "API token",
+            SettingKey::JenkinsSkipTlsVerify => "Skip TLS verify",
+            SettingKey::ProxyUrl => "Proxy URL",
         }
     }
 
@@ -54,6 +60,8 @@ impl SettingKey {
             SettingKey::JenkinsUrl => ("jenkins", "url"),
             SettingKey::JenkinsUsername => ("jenkins", "username"),
             SettingKey::JenkinsToken => ("jenkins", "token"),
+            SettingKey::JenkinsSkipTlsVerify => ("jenkins", "skip_tls_verify"),
+            SettingKey::ProxyUrl => ("proxy", "url"),
         }
     }
 
@@ -63,6 +71,8 @@ impl SettingKey {
             SettingKey::JenkinsUrl => "LEEROY_JENKINS_URL",
             SettingKey::JenkinsUsername => "LEEROY_JENKINS_USERNAME",
             SettingKey::JenkinsToken => "LEEROY_JENKINS_TOKEN",
+            SettingKey::JenkinsSkipTlsVerify => "LEEROY_JENKINS_SKIP_TLS_VERIFY",
+            SettingKey::ProxyUrl => "LEEROY_PROXY_URL",
         }
     }
 
@@ -70,12 +80,155 @@ impl SettingKey {
     pub fn is_secret(self) -> bool {
         matches!(self, SettingKey::JenkinsToken)
     }
+
+    /// On/off settings: toggled instead of edited, stored as TOML booleans,
+    /// and exposed through [`Settings::get`] as `"true"` / `"false"`.
+    pub fn is_bool(self) -> bool {
+        matches!(self, SettingKey::JenkinsSkipTlsVerify)
+    }
+
+    /// User-facing documentation, one line per `\n`. Shown in the settings
+    /// view and written as a comment above the key when it's first saved.
+    pub fn doc(self) -> &'static str {
+        match self {
+            SettingKey::JenkinsUrl => {
+                "Base URL of the Jenkins instance, e.g. https://jenkins.example.com"
+            }
+            SettingKey::JenkinsUsername => "Jenkins user name for API authentication",
+            SettingKey::JenkinsToken => {
+                "Jenkins API token (Jenkins: your user > Security > API Token)"
+            }
+            SettingKey::JenkinsSkipTlsVerify => concat!(
+                "Accept invalid TLS certificates (self-signed, expired, unknown CA) from Jenkins.\n",
+                "INSECURE: anyone between you and Jenkins can read your API token. Off by default;\n",
+                "prefer adding the internal CA to the system trust store, which Leeroy uses.",
+            ),
+            SettingKey::ProxyUrl => concat!(
+                "Proxy for reaching Jenkins: scheme://[user:pass@]host:port\n",
+                "Schemes: http, https, socks4, socks4a, socks5, socks5h.\n",
+                "SOCKS: socks5h:// or socks4a:// resolve DNS on the proxy (remote DNS);\n",
+                "socks5:// and socks4:// resolve DNS locally. HTTP(S) proxies always resolve remotely.\n",
+                "Unset: HTTPS_PROXY / HTTP_PROXY / ALL_PROXY / NO_PROXY are used.",
+            ),
+        }
+    }
+
+    /// Check (and normalize) a value before it's stored.
+    pub fn validate(self, value: &str) -> Result<String, String> {
+        let value = value.trim();
+        match self {
+            SettingKey::JenkinsUrl => {
+                let url = parse_url(value)?;
+                if !matches!(url.scheme(), "http" | "https") {
+                    return Err(format!(
+                        "unsupported scheme {:?}: use http or https",
+                        url.scheme()
+                    ));
+                }
+                Ok(value.to_owned())
+            }
+            SettingKey::ProxyUrl => {
+                let url = parse_url(value)?;
+                if !PROXY_SCHEMES.contains(&url.scheme()) {
+                    return Err(format!(
+                        "unsupported scheme {:?}: use one of {}",
+                        url.scheme(),
+                        PROXY_SCHEMES.join(", ")
+                    ));
+                }
+                Ok(value.to_owned())
+            }
+            SettingKey::JenkinsSkipTlsVerify => parse_bool(value)
+                .map(|b| b.to_string())
+                .ok_or_else(|| format!("expected true or false, got {value:?}")),
+            SettingKey::JenkinsUsername | SettingKey::JenkinsToken => Ok(value.to_owned()),
+        }
+    }
+
+    /// The value as it may be shown on screen or in logs: credentials in a
+    /// proxy URL are masked. Secrets (see [`Self::is_secret`]) are masked by
+    /// the caller, since it knows how.
+    pub fn display(self, value: &str) -> String {
+        match self {
+            SettingKey::ProxyUrl => redact_url(value),
+            _ if self.is_bool() => match parse_bool(value) {
+                Some(true) => "on".into(),
+                _ => "off".into(),
+            },
+            _ => value.to_owned(),
+        }
+    }
+}
+
+/// `true`/`false`, plus the usual env var spellings (`1`/`0`, `yes`/`no`, `on`/`off`).
+pub fn parse_bool(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" | "on" => Some(true),
+        "false" | "0" | "no" | "off" => Some(false),
+        _ => None,
+    }
+}
+
+pub const PROXY_SCHEMES: &[&str] = &["http", "https", "socks4", "socks4a", "socks5", "socks5h"];
+
+fn parse_url(value: &str) -> Result<url::Url, String> {
+    let url = url::Url::parse(value).map_err(|err| format!("invalid URL: {err}"))?;
+    if url.host_str().is_none_or(str::is_empty) {
+        return Err("invalid URL: missing host".into());
+    }
+    Ok(url)
+}
+
+/// Like [`redact_url`], but one `•` per password char, so every char keeps
+/// its position. For showing a URL while it's being edited (with a cursor).
+pub fn mask_url_password(value: &str) -> String {
+    let Some((start, end)) = password_range(value) else {
+        return value.to_owned();
+    };
+    let masked = "•".repeat(value[start..end].chars().count());
+    format!("{}{masked}{}", &value[..start], &value[end..])
+}
+
+/// Byte range of the password in `scheme://user:password@host...`, if any.
+fn password_range(value: &str) -> Option<(usize, usize)> {
+    let authority_start = value.find("://")? + 3;
+    let rest = &value[authority_start..];
+    let authority = &rest[..rest.find(['/', '?', '#']).unwrap_or(rest.len())];
+    let at = authority.rfind('@')?;
+    let colon = authority[..at].find(':')?;
+    Some((authority_start + colon + 1, authority_start + at))
+}
+
+/// Mask the password of a URL (`user:pass@` -> `user:••••@`). String-based,
+/// so the rest of the value is shown exactly as typed; input without a
+/// password (or not yet a full URL) is returned unchanged.
+pub fn redact_url(value: &str) -> String {
+    match password_range(value) {
+        Some((start, end)) => format!("{}••••{}", &value[..start], &value[end..]),
+        None => value.to_owned(),
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(default)]
 pub struct Settings {
     pub jenkins: JenkinsSettings,
+    pub proxy: ProxySettings,
+}
+
+#[derive(Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct ProxySettings {
+    pub url: Option<String>,
+}
+
+/// Hand-written so proxy credentials never end up in logs.
+impl std::fmt::Debug for ProxySettings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProxySettings")
+            .field("url", &self.url.as_deref().map(redact_url))
+            .finish()
+    }
 }
 
 #[derive(Clone, Default, PartialEq, Eq, Deserialize)]
@@ -84,6 +237,7 @@ pub struct JenkinsSettings {
     pub url: Option<String>,
     pub username: Option<String>,
     pub token: Option<String>,
+    pub skip_tls_verify: Option<bool>,
 }
 
 /// Hand-written so the token never ends up in logs or panic messages.
@@ -93,6 +247,7 @@ impl std::fmt::Debug for JenkinsSettings {
             .field("url", &self.url)
             .field("username", &self.username)
             .field("token", &self.token.as_ref().map(|_| "<redacted>"))
+            .field("skip_tls_verify", &self.skip_tls_verify)
             .finish()
     }
 }
@@ -103,25 +258,59 @@ impl Settings {
             SettingKey::JenkinsUrl => self.jenkins.url.as_deref(),
             SettingKey::JenkinsUsername => self.jenkins.username.as_deref(),
             SettingKey::JenkinsToken => self.jenkins.token.as_deref(),
+            SettingKey::JenkinsSkipTlsVerify => self
+                .jenkins
+                .skip_tls_verify
+                .map(|b| if b { "true" } else { "false" }),
+            SettingKey::ProxyUrl => self.proxy.url.as_deref(),
         }
     }
 
+    /// Store a value. It must have passed [`SettingKey::validate`]; for
+    /// boolean keys, an unparsable value unsets the setting.
     pub fn set(&mut self, key: SettingKey, value: Option<String>) {
         let slot = match key {
             SettingKey::JenkinsUrl => &mut self.jenkins.url,
             SettingKey::JenkinsUsername => &mut self.jenkins.username,
             SettingKey::JenkinsToken => &mut self.jenkins.token,
+            SettingKey::JenkinsSkipTlsVerify => {
+                self.jenkins.skip_tls_verify = value.as_deref().and_then(parse_bool);
+                return;
+            }
+            SettingKey::ProxyUrl => &mut self.proxy.url,
         };
         *slot = value;
     }
 
-    /// Settings given through env vars. Empty or non-UTF-8 values count as unset.
-    pub fn from_env(env: impl Fn(&str) -> Option<OsString>) -> Self {
+    /// Settings whose value is on (for boolean keys).
+    pub fn is_on(&self, key: SettingKey) -> bool {
+        self.get(key).and_then(parse_bool).unwrap_or(false)
+    }
+
+    /// Settings given through env vars. Empty or non-UTF-8 values count as
+    /// unset; invalid values are an error naming the variable.
+    pub fn from_env(env: impl Fn(&str) -> Option<OsString>) -> Result<Self> {
         let mut settings = Settings::default();
         for key in SettingKey::ALL {
-            settings.set(key, non_empty(env(key.env_var())));
+            if let Some(raw) = non_empty(env(key.env_var())) {
+                let value = key
+                    .validate(&raw)
+                    .map_err(|err| color_eyre::eyre::eyre!("invalid ${}: {err}", key.env_var()))?;
+                settings.set(key, Some(value));
+            }
         }
-        settings
+        Ok(settings)
+    }
+
+    /// Check every set value; `source` names where they came from in errors.
+    pub fn validate(&self, source: impl Fn(SettingKey) -> String) -> Result<()> {
+        for key in SettingKey::ALL {
+            if let Some(value) = self.get(key) {
+                key.validate(value)
+                    .map_err(|err| color_eyre::eyre::eyre!("invalid {}: {err}", source(key)))?;
+            }
+        }
+        Ok(())
     }
 
     /// `self` with every value set in `overrides` taking precedence.
@@ -229,7 +418,25 @@ pub fn save(path: &Path, settings: &Settings) -> Result<()> {
                 if !doc.contains_key(table) {
                     doc[table] = toml_edit::table();
                 }
-                doc[table][name] = toml_edit::value(value);
+                let is_new = doc[table].get(name).is_none();
+                doc[table][name] = if key.is_bool() {
+                    toml_edit::value(parse_bool(value).unwrap_or(false))
+                } else {
+                    toml_edit::value(value)
+                };
+                // Document a key the first time it's written; never touch
+                // comments on existing keys.
+                if is_new
+                    && let Some(mut key_mut) =
+                        doc[table].as_table_mut().and_then(|t| t.key_mut(name))
+                {
+                    let comment: String = key
+                        .doc()
+                        .lines()
+                        .map(|line| format!("# {line}\n"))
+                        .collect();
+                    key_mut.leaf_decor_mut().set_prefix(comment);
+                }
             }
             None => {
                 if let Some(table) = doc.get_mut(table).and_then(|t| t.as_table_like_mut()) {
@@ -380,7 +587,8 @@ mod tests {
         let overrides = Settings::from_env(env(&[
             ("LEEROY_JENKINS_URL", "https://env"),
             ("LEEROY_JENKINS_USERNAME", ""),
-        ]));
+        ]))
+        .unwrap();
 
         let merged = file.overlaid(&overrides);
         assert_eq!(merged.get(SettingKey::JenkinsUrl), Some("https://env"));
@@ -394,6 +602,113 @@ mod tests {
         settings.set(SettingKey::JenkinsToken, Some("s3cret".into()));
         let debug = format!("{settings:?}");
         assert!(!debug.contains("s3cret"), "{debug}");
+    }
+
+    #[test]
+    fn proxy_url_validation() {
+        let key = SettingKey::ProxyUrl;
+        for ok in [
+            "http://proxy:3128",
+            "https://proxy:443",
+            "socks4a://proxy:1080",
+            "socks5h://user:pass@proxy:1080",
+        ] {
+            assert_eq!(key.validate(&format!(" {ok} ")), Ok(ok.to_owned()));
+        }
+        for bad in ["ftp://proxy:21", "proxy:3128", "socks5h://", "not a url"] {
+            assert!(key.validate(bad).is_err(), "{bad} accepted");
+        }
+    }
+
+    #[test]
+    fn jenkins_url_validation() {
+        let key = SettingKey::JenkinsUrl;
+        assert!(key.validate("https://ci.example.com").is_ok());
+        assert!(key.validate("socks5://ci").is_err());
+        assert!(key.validate("ci.example.com").is_err());
+    }
+
+    #[test]
+    fn proxy_password_is_redacted() {
+        let key = SettingKey::ProxyUrl;
+        assert_eq!(
+            key.display("socks5h://me:hunter2@proxy:1080"),
+            "socks5h://me:••••@proxy:1080"
+        );
+        assert_eq!(key.display("http://me@proxy:1"), "http://me@proxy:1");
+        assert_eq!(key.display("http://proxy:1/p@th"), "http://proxy:1/p@th");
+        assert_eq!(key.display("http://me:hunt"), "http://me:hunt");
+        assert_eq!(
+            mask_url_password("socks5h://me:pw@proxy:1080"),
+            "socks5h://me:••@proxy:1080"
+        );
+
+        let mut settings = Settings::default();
+        settings.set(key, Some("http://me:hunter2@proxy:3128".into()));
+        let debug = format!("{settings:?}");
+        assert!(!debug.contains("hunter2"), "{debug}");
+    }
+
+    #[test]
+    fn invalid_values_fail_validation_with_source() {
+        let mut settings = Settings::default();
+        settings.set(SettingKey::ProxyUrl, Some("ftp://proxy".into()));
+        let err = settings
+            .validate(|key| format!("${}", key.env_var()))
+            .unwrap_err();
+        assert!(format!("{err}").contains("$LEEROY_PROXY_URL"), "{err}");
+    }
+
+    #[test]
+    fn first_save_documents_key_but_keeps_user_comments() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(FILE_NAME);
+        let mut settings = Settings::default();
+        settings.set(SettingKey::ProxyUrl, Some("socks5h://proxy:1080".into()));
+        save(&path, &settings).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.contains("# SOCKS: socks5h://"), "{text}");
+        assert_eq!(load(&path).unwrap(), settings);
+
+        // Re-saving an existing key doesn't duplicate or replace comments.
+        fs::write(&path, "[proxy]\n# mine\nurl = \"http://a:1\"\n").unwrap();
+        settings.set(SettingKey::ProxyUrl, Some("http://b:1".into()));
+        save(&path, &settings).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert_eq!(text, "[proxy]\n# mine\nurl = \"http://b:1\"\n");
+    }
+
+    #[test]
+    fn skip_tls_verify_is_a_bool() {
+        let key = SettingKey::JenkinsSkipTlsVerify;
+        assert!(!Settings::default().is_on(key), "must default to off");
+        for (raw, on) in [("true", true), ("1", true), ("YES", true), ("off", false)] {
+            let settings =
+                Settings::from_env(env(&[("LEEROY_JENKINS_SKIP_TLS_VERIFY", raw)])).unwrap();
+            assert_eq!(settings.is_on(key), on, "{raw}");
+        }
+        let err =
+            Settings::from_env(env(&[("LEEROY_JENKINS_SKIP_TLS_VERIFY", "maybe")])).unwrap_err();
+        assert!(
+            format!("{err}").contains("$LEEROY_JENKINS_SKIP_TLS_VERIFY"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn skip_tls_verify_saved_as_toml_bool() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(FILE_NAME);
+        let mut settings = Settings::default();
+        settings.set(SettingKey::JenkinsSkipTlsVerify, Some("true".into()));
+        save(&path, &settings).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.contains("skip_tls_verify = true\n"), "{text}");
+        assert_eq!(load(&path).unwrap(), settings);
+
+        // A string in the file is a parse error, not silently "off".
+        fs::write(&path, "[jenkins]\nskip_tls_verify = \"yes\"\n").unwrap();
+        assert!(load(&path).is_err());
     }
 
     #[test]
@@ -425,7 +740,8 @@ mod tests {
         save(&path, &settings).unwrap();
         assert_eq!(load(&path).unwrap(), settings);
         let text = fs::read_to_string(&path).unwrap();
-        assert!(text.starts_with("[jenkins]\n"), "{text}");
+        assert!(text.contains("[jenkins]\n"), "{text}");
+        assert!(!text.contains("jenkins = {"), "{text}");
     }
 
     #[test]

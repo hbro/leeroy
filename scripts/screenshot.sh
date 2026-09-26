@@ -6,9 +6,9 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-# Isolate from your own setup: no LEEROY_* env vars; each tape gets a fresh
+# Isolate from your own setup: no LEEROY_* or *_PROXY env vars; each tape gets a fresh
 # config at target/vhs/config.toml (set in tapes/_settings.tape).
-while read -r var; do unset "$var"; done < <(compgen -e | grep '^LEEROY_' || true)
+while read -r var; do unset "$var"; done < <(compgen -e | grep -Ei '^(LEEROY_|(https?|all|no)_proxy$)' || true)
 
 run() {
     if command -v vhs >/dev/null && command -v rustc >/dev/null; then "$@"; else nix develop -c "$@"; fi
@@ -16,6 +16,14 @@ run() {
 
 run cargo build --quiet
 mkdir -p target/screenshots
+
+# Tapes connect to a local fake Jenkins (http://127.0.0.1:8099), never the network.
+# Own process group (setsid), so cleanup kills it and its children, nothing else.
+setsid bash -c "$(declare -f run); run python3 scripts/fake-jenkins.py --port 8099" \
+    > target/fake-jenkins.log 2>&1 &
+fake_pgid=$!
+trap 'kill -- "-$fake_pgid" 2>/dev/null || true' EXIT
+for _ in $(seq 50); do grep -q 'fake Jenkins' target/fake-jenkins.log 2>/dev/null && break; sleep 0.1; done
 
 if [[ $# -gt 0 ]]; then
     tapes=("${@/#/tapes/}")
