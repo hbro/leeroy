@@ -5,7 +5,7 @@ Hide
 Type "target/debug/leeroy" Enter
 Sleep 1s
 Type "s"
-Up
+Down 2
 Enter
 Type "socks5h://me:hunter2@bastion:1080"
 Left 20

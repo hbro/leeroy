@@ -23,7 +23,7 @@ Show
 Screenshot target/screenshots/settings-saved.png
 Sleep 500ms
 Hide
-Up
+Down 2
 Enter
 Type "socks5h://me:secret@bastion:1080"
 Enter

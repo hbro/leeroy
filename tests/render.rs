@@ -92,7 +92,9 @@ fn settings_empty() {
 fn settings_editing_header() {
     let mut actions = vec![
         Action::OpenSettings,
-        Action::SelectPrev, // wraps to "+ add header"
+        Action::SelectNext,
+        Action::SelectNext,
+        Action::SelectNext, // "+ add header", after URL / TLS / proxy
         Action::StartEdit,
     ];
     actions.extend(type_str("Authorization: Basic s3cret"));

@@ -95,8 +95,10 @@ Rules:
   field being edited is shown exactly as typed (no masking, per user request);
   masking applies only to fields that aren't being edited.
 - Settings: add a `SettingKey` variant (label, TOML path, env var
-  `LEEROY_<TABLE>_<KEY>`, secret?, `doc`, `validate`, `display`) plus a field in
-  `Settings`. `doc` is shown in the settings view and written as a TOML comment
+  `LEEROY_<TABLE>_<KEY>`, `section`, `doc`, `validate`, `display`) plus a field in
+  `Settings`. The view groups rows by `config::Section`: Jenkins (URL, TLS, proxy,
+  then the Headers sub-section) and Application (refresh, confirm quit). Tests and
+  tapes navigate settings by row, so select rows explicitly rather than wrapping. `doc` is shown in the settings view and written as a TOML comment
   when the key is first saved. Invalid values keep the edit open; invalid file/env
   values fail at startup. Precedence: env var >
   config file; env-set values are read-only in the TUI and never written to the file.

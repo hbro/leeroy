@@ -27,7 +27,27 @@ use toml_edit::DocumentMut;
 pub const CONFIG_ENV: &str = "LEEROY_CONFIG";
 pub const FILE_NAME: &str = "config.toml";
 
-/// Every user-facing setting. The TUI settings view lists them in this order.
+/// Groups in the settings view, in display order. Custom headers belong to
+/// [`Section::Jenkins`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Section {
+    /// How to reach the Jenkins instance.
+    Jenkins,
+    /// How Leeroy itself behaves.
+    Application,
+}
+
+impl Section {
+    pub fn title(self) -> &'static str {
+        match self {
+            Section::Jenkins => "Jenkins",
+            Section::Application => "Application",
+        }
+    }
+}
+
+/// Every user-facing setting. The TUI settings view lists them in this order
+/// within their [`Section`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingKey {
     JenkinsUrl,
@@ -80,6 +100,18 @@ impl SettingKey {
             SettingKey::RefreshAuto => "LEEROY_REFRESH_AUTO",
             SettingKey::RefreshInterval => "LEEROY_REFRESH_INTERVAL",
             SettingKey::ConfirmQuit => "LEEROY_UI_CONFIRM_QUIT",
+        }
+    }
+
+    /// Which group of the settings view this belongs to.
+    pub fn section(self) -> Section {
+        match self {
+            SettingKey::JenkinsUrl | SettingKey::JenkinsSkipTlsVerify | SettingKey::ProxyUrl => {
+                Section::Jenkins
+            }
+            SettingKey::RefreshAuto | SettingKey::RefreshInterval | SettingKey::ConfirmQuit => {
+                Section::Application
+            }
         }
     }
 

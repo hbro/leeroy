@@ -5,7 +5,7 @@ use std::{
 
 use crate::{
     builds::{BuildLoad, BuildPage, BuildRef, BuildStep, BuildView},
-    config::{SettingKey, Settings, header_env_var, parse_header, redact_url},
+    config::{Section, SettingKey, Settings, header_env_var, parse_header, redact_url},
     console::{ConsoleChunk, ConsoleLoad, ConsoleView},
     input::TextInput,
     jenkins::{ConnectionConfig, ServerInfo},
@@ -298,6 +298,15 @@ pub enum SettingsRow {
     AddHeader,
 }
 
+impl SettingsRow {
+    pub fn section(&self) -> Section {
+        match self {
+            SettingsRow::Setting(key) => key.section(),
+            SettingsRow::Header(_) | SettingsRow::AddHeader => Section::Jenkins,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StatusMessage {
     Info(String),
@@ -336,7 +345,14 @@ impl SettingsState {
 
     /// Rows in display order: fixed settings, then headers, then "+ add header".
     pub fn rows(&self) -> Vec<SettingsRow> {
-        let mut rows: Vec<SettingsRow> = SettingKey::ALL.map(SettingsRow::Setting).into();
+        let in_section = |section: Section| {
+            SettingKey::ALL
+                .into_iter()
+                .filter(move |key| key.section() == section)
+                .map(SettingsRow::Setting)
+        };
+        // Jenkins connection (with its headers), then the application settings.
+        let mut rows: Vec<SettingsRow> = in_section(Section::Jenkins).collect();
         rows.extend(
             self.effective()
                 .jenkins
@@ -345,6 +361,7 @@ impl SettingsState {
                 .map(SettingsRow::Header),
         );
         rows.push(SettingsRow::AddHeader);
+        rows.extend(in_section(Section::Application));
         rows
     }
 
@@ -1200,7 +1217,11 @@ mod tests {
     fn selection_wraps() {
         let mut app = settings_app();
         app.update(Action::SelectPrev);
-        assert_eq!(app.settings.selected_row(), SettingsRow::AddHeader);
+        assert_eq!(
+            app.settings.selected_row(),
+            SettingsRow::Setting(SettingKey::ConfirmQuit),
+            "last row: the Application section follows the headers"
+        );
         app.update(Action::SelectNext);
         assert_eq!(
             app.settings.selected_row(),

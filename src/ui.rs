@@ -563,9 +563,20 @@ fn render_settings(frame: &mut Frame, area: Rect, s: &SettingsState) {
     let rows = s.rows();
     let selected_index = s.selected.min(rows.len() - 1);
     for (i, row) in rows.iter().enumerate() {
-        if i > 0
-            && matches!(row, SettingsRow::Header(_) | SettingsRow::AddHeader)
-            && matches!(rows[i - 1], SettingsRow::Setting(_))
+        let previous = i.checked_sub(1).map(|p| &rows[p]);
+        // Section heading where the section changes.
+        if previous.is_none_or(|p| p.section() != row.section()) {
+            if previous.is_some() {
+                lines.push(Line::raw(""));
+            }
+            lines.push(Line::styled(
+                format!(" {}", row.section().title()),
+                Style::new().fg(TAB_BLUE).bold(),
+            ));
+        }
+        // Headers sub-heading, within the Jenkins section.
+        if matches!(row, SettingsRow::Header(_) | SettingsRow::AddHeader)
+            && matches!(previous, Some(SettingsRow::Setting(_)))
         {
             lines.push(Line::raw(""));
             lines.push(Line::styled("   Headers", Style::new().bold()));
