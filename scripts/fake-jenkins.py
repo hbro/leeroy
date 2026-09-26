@@ -7,6 +7,7 @@
 Serves (under any path prefix, with an X-Jenkins header):
   GET /whoAmI/api/json   the current user
   GET /api/json          a job tree: folders, a multibranch project, every status
+  GET /job/../lastBuild/api/json   the job's last build (404 if never built)
 --auth      require HTTP basic auth, 401 otherwise; the user is echoed back
 --delay     sleep before answering (to see "connecting" / "refreshing")
 --status    always answer with this HTTP status
@@ -24,6 +25,7 @@ import tempfile
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import unquote
 
 VERSION = "2.504.1"
 COLORS = ["blue", "red", "yellow", "aborted", "notbuilt", "disabled", "blue_anime"]
@@ -49,6 +51,81 @@ def folder(parent: str, name: str, children: list, cls: str = "Folder") -> dict:
         "url": f"http://jenkins/job/{full}/",
         "jobs": children,
     }
+
+
+def find_color(items: list, full_name: str):
+    for item in items:
+        if item.get("fullName") == full_name and "jobs" not in item:
+            return item.get("color")
+        found = find_color(item.get("jobs", []), full_name)
+        if found is not None:
+            return found
+    return None
+
+
+SERVER_START_MS = int(time.time() * 1000)
+
+RESULTS = {
+    "blue": "SUCCESS",
+    "red": "FAILURE",
+    "yellow": "UNSTABLE",
+    "aborted": "ABORTED",
+    "disabled": "SUCCESS",
+}
+
+
+def last_build(full_name: str, color: str):
+    """A plausible last build for a job, or None if it was never built."""
+    if color == "notbuilt":
+        return None
+    now_ms = SERVER_START_MS  # fixed, so running builds progress over time
+    number = 40 + len(full_name) % 17
+    running = color.endswith("_anime")
+    build = {
+        "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+        "number": number,
+        "displayName": f"#{number}",
+        "result": None if running else RESULTS.get(color, "SUCCESS"),
+        "building": running,
+        "timestamp": now_ms - (150_000 if running else 600_000),
+        "duration": 0 if running else 95_000,
+        "estimatedDuration": 300_000,
+        "description": "Release candidate" if "release" in full_name else None,
+        "actions": [
+            {
+                "_class": "hudson.model.CauseAction",
+                "causes": [{"shortDescription": "Started by user Hans"}],
+            },
+            {},
+        ],
+        "changeSets": [
+            {
+                "items": [
+                    {
+                        "commitId": "0123abcd4567",
+                        "msg": "Fix login redirect\n\ndetails",
+                        "author": {"fullName": "Alice"},
+                    },
+                    {
+                        "commitId": "89ef0123abcd",
+                        "msg": "Bump version",
+                        "author": {"fullName": "Bob"},
+                    },
+                ]
+            }
+        ],
+    }
+    if full_name.startswith("backend/"):
+        build["actions"].append(
+            {
+                "_class": "hudson.model.ParametersAction",
+                "parameters": [
+                    {"name": "ENV", "value": "staging"},
+                    {"name": "DRY_RUN", "value": False},
+                ],
+            }
+        )
+    return build
 
 
 def job_tree(extra: int, churn_step: int) -> dict:
@@ -135,6 +212,21 @@ def main() -> None:
                 return self.reply(
                     200, {"name": user, "authenticated": user != "anonymous"}
                 )
+            if path.endswith("/lastBuild/api/json"):
+                parts = path.split("/")
+                names = [
+                    unquote(parts[i + 1])
+                    for i, p in enumerate(parts[:-1])
+                    if p == "job"
+                ]
+                full_name = "/".join(names)
+                color = find_color(job_tree(args.jobs, 0)["jobs"], full_name)
+                if color is None:
+                    return self.reply(404, {"error": "no such job"})
+                build = last_build(full_name, color)
+                if build is None:
+                    return self.reply(404, {"error": "no builds"})
+                return self.reply(200, build)
             if path.endswith("/api/json"):
                 job_requests[0] += 1
                 step = job_requests[0] if args.churn else 0

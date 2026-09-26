@@ -21,12 +21,18 @@ Elm-style: pure core, thin IO shell.
   is always passed in explicitly (`.no_proxy()`), so behaviour matches the UI.
 - `src/jobs.rs` — job model, `/api/json` parsing (folders flattened, not listed),
   filter matching, `JobsState` (load state, filter, selection). Pure.
+- `src/builds.rs` — last-build model/parsing, `BuildView` state. Request paths
+  are built from the job's full name (`job/a/job/b/lastBuild/…`) against the
+  configured URL, never from Jenkins' `url` field (may be an internal address
+  behind a reverse proxy). 404 on lastBuild = never built (`Ok(None)`).
 - `src/config.rs` — config file location, load/save, env var overrides. Takes the
   environment as a parameter (never reads `std::env` itself) so it's testable.
 - `src/event.rs` — `map_key(&App, KeyEvent) -> Option<Action>`.
 - `src/ui.rs` — `render(&mut Frame, &App)`. **Deterministic**: no clock, randomness,
-  or env reads. Time enters only via `Action::Tick(Instant)` → `App::now`; ages
-  ("updated 12s ago") are computed from that, so tests control time.
+  or env reads. Time enters only via `Action::Tick(Instant, SystemTime)` →
+  `App::now` (monotonic: refresh timing, data age) and `App::wall_now` (build
+  start times). Tests set both. The renderer may *record* layout facts through
+  `Cell`s (e.g. `BuildView::max_scroll`) for `update` to clamp against.
 - `src/main.rs` — terminal setup, `tokio::select!` loop over key events, a tick
   interval and an `mpsc<Action>` channel. Async work (Jenkins API calls) should run
   in spawned tasks that send `Action`s back through that channel.
@@ -42,6 +48,10 @@ Rules:
 - Global keys (`GLOBAL_BINDINGS`, bottom bar): q, s, ?, r (refresh), R (toggle
   auto-refresh). The refresh status is a compact `⟳ 4s` at the right end of the
   header (icon green = auto-refresh on, gray = off; `…` fetching, `✕` failed).
+- Build view (`View::Build`, part of the Jobs tab): `Enter` on a job opens it
+  and fetches unconditionally; `r`/auto-refresh re-fetch what's on screen (build
+  view: the build, not the job list) under the same one-in-flight rule. Results
+  are tagged with connection generation + job name; mismatches are ignored.
 - Jobs: fetched after each successful connect and on `r`, tagged with the
   connection generation (stale results ignored; list cleared on reconnect). A
   reload keeps the old list visible (`refreshing`) and restores the selection by
@@ -131,8 +141,9 @@ Run all three layers for UI changes; layer 1 is mandatory for every change.
    App log for the run: `target/tui.log` (RUST_LOG=debug).
    Fake Jenkins for connection tests: `scripts/fake-jenkins.py [--port 8099]
    [--auth USER:TOKEN] [--delay SECS] [--status CODE] [--tls] [--jobs N] [--churn]`
-   (job tree with folders/multibranch/all statuses; `--churn` changes a status per
-   request to watch auto-refresh).
+   (job tree with folders/multibranch/all statuses; `lastBuild` per job: 404 for
+   never built, running builds progress in real time; `--churn` changes a status
+   per request to watch auto-refresh).
    Run it in the background with its own process group; don't `pkill -f` it (the
    pattern can match unrelated shells).
    Isolation: all `LEEROY_*` and `*_proxy` vars from your shell are cleared and the config is a

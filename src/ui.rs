@@ -11,6 +11,7 @@ use ratatui::{
 
 use crate::{
     app::{App, ConnectionStatus, SettingsRow, SettingsState, StatusMessage, Tab, View},
+    builds::{Build, BuildLoad, format_duration},
     config::{DEFAULT_REFRESH_SECS, HEADERS_DOC, SettingKey, header_env_var, redact_url},
     event::{Binding, GLOBAL_BINDINGS, context_bindings},
     jobs::{JobStatus, JobsLoad},
@@ -33,6 +34,7 @@ pub fn render(frame: &mut Frame, app: &App) {
     render_tabs(frame, tabs, app);
     match app.view {
         View::Jobs => render_jobs(frame, body, app),
+        View::Build => render_build(frame, body, app),
         View::Settings => render_settings(frame, body, &app.settings),
     }
     render_context_bar(frame, context_bar, app);
@@ -100,7 +102,7 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(status).on_dark_gray(), right);
 }
 
-fn view_block(title: &str) -> Block<'_> {
+fn view_block(title: &str) -> Block<'static> {
     Block::new()
         .title(format!(" {title} "))
         .borders(Borders::ALL)
@@ -255,6 +257,162 @@ fn render_job_list(frame: &mut Frame, area: Rect, app: &App) {
     .highlight_spacing(HighlightSpacing::Always);
     let mut state = TableState::default().with_selected(Some(jobs.selected));
     frame.render_stateful_widget(table, list_area, &mut state);
+}
+
+fn render_build(frame: &mut Frame, area: Rect, app: &App) {
+    let Some(view) = &app.build else {
+        return;
+    };
+    let hint = Style::new().dark_gray();
+    let message = |lines: Vec<Line<'static>>, title: &str| {
+        Paragraph::new(lines)
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: true })
+            .block(view_block(title))
+    };
+    let build = match &view.load {
+        BuildLoad::Loading => {
+            let lines = vec![
+                Line::raw(""),
+                Line::styled("Loading last build…", Style::new().italic()),
+            ];
+            return frame.render_widget(message(lines, &view.job), area);
+        }
+        BuildLoad::Failed(error) => {
+            let lines = vec![
+                Line::raw(""),
+                Line::styled("Could not load the last build", Style::new().italic()),
+                Line::styled(error.clone(), Style::new().red()),
+                Line::styled("Press r to retry, Esc to go back", hint),
+            ];
+            return frame.render_widget(message(lines, &view.job), area);
+        }
+        BuildLoad::Loaded(None) => {
+            let lines = vec![
+                Line::raw(""),
+                Line::styled("No builds yet", Style::new().italic()),
+                Line::styled("This job has never run", hint),
+            ];
+            return frame.render_widget(message(lines, &view.job), area);
+        }
+        BuildLoad::Loaded(Some(build)) => build,
+    };
+
+    let mut title = format!("{} · {}", view.job, build.display_name);
+    if view.refreshing {
+        title.push_str(" · refreshing…");
+    }
+    let block = view_block(&title);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let label = |text: &str| Span::styled(format!(" {text:<12}"), hint);
+    let mut lines = Vec::new();
+
+    lines.push(Line::from(vec![label("Result"), result_span(build)]));
+    let age = app
+        .wall_now
+        .duration_since(build.started)
+        .unwrap_or_default();
+    lines.push(Line::from(vec![
+        label("Started"),
+        Span::raw(format!("{} ago", format_age(age))),
+    ]));
+    if build.building {
+        let estimate = build
+            .estimated
+            .map(|e| format!(" of ~{}", format_duration(e)))
+            .unwrap_or_default();
+        lines.push(Line::from(vec![
+            label("Running for"),
+            Span::raw(format!("{}{estimate}", format_duration(age))),
+        ]));
+        if let Some(estimated) = build.estimated {
+            lines.push(Line::from(vec![label(""), progress_bar(age, estimated)]));
+        }
+    } else {
+        lines.push(Line::from(vec![
+            label("Duration"),
+            Span::raw(format_duration(build.duration)),
+        ]));
+    }
+    for (i, cause) in build.causes.iter().enumerate() {
+        let name = if i == 0 { "Cause" } else { "" };
+        lines.push(Line::from(vec![label(name), Span::raw(cause.clone())]));
+    }
+    for (i, (name, value)) in build.parameters.iter().enumerate() {
+        let heading = if i == 0 { "Parameters" } else { "" };
+        lines.push(Line::from(vec![
+            label(heading),
+            Span::styled(name.clone(), Style::new().bold()),
+            Span::raw(format!(" = {value}")),
+        ]));
+    }
+    if let Some(description) = &build.description {
+        for (i, text) in description.lines().enumerate() {
+            let heading = if i == 0 { "Description" } else { "" };
+            lines.push(Line::from(vec![label(heading), Span::raw(text.to_owned())]));
+        }
+    }
+
+    lines.push(Line::raw(""));
+    if build.changes.is_empty() {
+        lines.push(Line::styled(" No changes", hint));
+    } else {
+        lines.push(Line::styled(
+            format!(" Changes ({})", build.changes.len()),
+            Style::new().bold(),
+        ));
+        for change in &build.changes {
+            let mut spans = vec![Span::raw("   ")];
+            if let Some(commit) = &change.commit {
+                spans.push(Span::styled(format!("{commit} "), Style::new().yellow()));
+            }
+            spans.push(Span::raw(change.message.clone()));
+            if let Some(author) = &change.author {
+                spans.push(Span::styled(format!(" — {author}"), hint));
+            }
+            lines.push(Line::from(spans));
+        }
+    }
+
+    // Remember how far scrolling is useful, so the app can clamp it.
+    let max_scroll = (lines.len() as u16).saturating_sub(inner.height);
+    view.max_scroll.set(max_scroll);
+    let scroll = view.scroll.min(max_scroll);
+    frame.render_widget(Paragraph::new(lines).scroll((scroll, 0)), inner);
+}
+
+fn result_span(build: &Build) -> Span<'static> {
+    if build.building {
+        return Span::styled("⟳ running", Style::new().yellow().bold());
+    }
+    match build.result {
+        Some(status) => {
+            let (symbol, color) = status_symbol(status);
+            Span::styled(
+                format!("{symbol} {}", status.label()),
+                Style::new().fg(color),
+            )
+        }
+        None => Span::styled("unknown", Style::new().dark_gray()),
+    }
+}
+
+/// `████████░░░░░░░░ 50%`, or full and red once past the estimate.
+fn progress_bar(elapsed: std::time::Duration, estimated: std::time::Duration) -> Span<'static> {
+    const WIDTH: usize = 30;
+    let ratio = elapsed.as_secs_f64() / estimated.as_secs_f64().max(1.0);
+    let filled = ((ratio.min(1.0)) * WIDTH as f64).round() as usize;
+    let bar = format!("{}{}", "█".repeat(filled), "░".repeat(WIDTH - filled));
+    if ratio > 1.0 {
+        Span::styled(format!("{bar} longer than usual"), Style::new().red())
+    } else {
+        Span::styled(
+            format!("{bar} {:>3.0}%", ratio * 100.0),
+            Style::new().yellow(),
+        )
+    }
 }
 
 /// Background of the selected job row.
@@ -485,14 +643,26 @@ fn refresh_status(app: &App) -> Line<'static> {
     };
     // Leading space: a gap even when the connection text is cut off.
     let mut spans = vec![Span::raw(" "), Span::styled("⟳", icon)];
-    let busy = app.jobs.fetch_in_flight();
+    // The data on screen: the open build, or the job list.
+    let (busy, fetched_at, failed) = match (&app.view, &app.build) {
+        (View::Build, Some(build)) => (
+            build.fetch_in_flight(),
+            build.fetched_at,
+            matches!(build.load, BuildLoad::Failed(_)),
+        ),
+        _ => (
+            app.jobs.fetch_in_flight(),
+            app.jobs.fetched_at,
+            matches!(app.jobs.load, JobsLoad::Failed(_)),
+        ),
+    };
     if busy {
         spans.push(Span::styled(" …", Style::new().yellow()));
-    } else if let Some(at) = app.jobs.fetched_at {
+    } else if let Some(at) = fetched_at {
         let age = format_age(app.now.saturating_duration_since(at));
         spans.push(Span::styled(format!(" {age}"), Style::new().gray()));
     }
-    if matches!(app.jobs.load, JobsLoad::Failed(_)) && !busy {
+    if failed && !busy {
         spans.push(Span::styled(" ✕", Style::new().red()));
     }
     spans.push(Span::raw(" "));

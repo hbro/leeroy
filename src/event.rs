@@ -25,12 +25,18 @@ pub const GLOBAL_BINDINGS: &[Binding] = &[
 
 /// Bindings that only apply in the given context (context bar).
 pub fn context_bindings(context: Context) -> &'static [Binding] {
-    const JOBS: &[Binding] = &[bind("↑/↓", "select"), bind("/", "filter")];
+    const JOBS: &[Binding] = &[
+        bind("↑/↓", "select"),
+        bind("Enter", "last build"),
+        bind("/", "filter"),
+    ];
     const JOBS_FILTERED: &[Binding] = &[
         bind("↑/↓", "select"),
+        bind("Enter", "last build"),
         bind("/", "filter"),
         bind("Esc", "clear filter"),
     ];
+    const BUILD: &[Binding] = &[bind("↑/↓", "scroll"), bind("Esc", "back")];
     const JOBS_FILTER: &[Binding] = &[
         bind("Enter", "apply"),
         bind("Esc", "cancel"),
@@ -54,6 +60,7 @@ pub fn context_bindings(context: Context) -> &'static [Binding] {
         Context::Jobs => JOBS,
         Context::JobsFiltered => JOBS_FILTERED,
         Context::JobsFilter => JOBS_FILTER,
+        Context::Build => BUILD,
         Context::Settings => SETTINGS,
         Context::EditSetting => EDIT,
         Context::Help => HELP,
@@ -125,6 +132,16 @@ pub fn map_key(app: &App, key: KeyEvent) -> Option<Action> {
             KeyCode::Home | KeyCode::Char('g') => Some(Action::SelectFirst),
             KeyCode::End | KeyCode::Char('G') => Some(Action::SelectLast),
             KeyCode::Char('/') => Some(Action::StartFilter),
+            KeyCode::Enter => Some(Action::OpenBuild),
+            _ => None,
+        },
+        (Context::Build, code) => match code {
+            KeyCode::Down | KeyCode::Char('j') => Some(Action::SelectNext),
+            KeyCode::Up | KeyCode::Char('k') => Some(Action::SelectPrev),
+            KeyCode::PageDown => Some(Action::SelectPageDown),
+            KeyCode::PageUp => Some(Action::SelectPageUp),
+            KeyCode::Home | KeyCode::Char('g') => Some(Action::SelectFirst),
+            KeyCode::End | KeyCode::Char('G') => Some(Action::SelectLast),
             _ => None,
         },
         _ => None,
@@ -136,10 +153,11 @@ mod tests {
     use super::*;
     use crate::app::View;
 
-    const ALL_CONTEXTS: [Context; 6] = [
+    const ALL_CONTEXTS: [Context; 7] = [
         Context::Jobs,
         Context::JobsFiltered,
         Context::JobsFilter,
+        Context::Build,
         Context::Settings,
         Context::EditSetting,
         Context::Help,
@@ -159,6 +177,10 @@ mod tests {
             Context::Jobs => {}
             Context::JobsFiltered => app.jobs.filter = "api".into(),
             Context::JobsFilter => app.jobs.filter_input = Some(Default::default()),
+            Context::Build => {
+                app.view = View::Build;
+                app.build = Some(crate::builds::BuildView::new("job".into()));
+            }
             Context::Settings => app.view = View::Settings,
             Context::EditSetting => {
                 app.view = View::Settings;
@@ -245,6 +267,7 @@ mod tests {
         let app = app_in(Context::Jobs);
         for (code, action) in [
             (KeyCode::Char('/'), Action::StartFilter),
+            (KeyCode::Enter, Action::OpenBuild),
             (KeyCode::Char('r'), Action::Refresh),
             (KeyCode::Char('R'), Action::ToggleAutoRefresh),
             (KeyCode::Char('j'), Action::SelectNext),
@@ -261,6 +284,21 @@ mod tests {
         assert_eq!(map_key(&app, key(KeyCode::Esc)), None, "nothing to clear");
         let filtered = app_in(Context::JobsFiltered);
         assert_eq!(map_key(&filtered, key(KeyCode::Esc)), Some(Action::Back));
+    }
+
+    #[test]
+    fn build_view_keys() {
+        let app = app_in(Context::Build);
+        assert_eq!(map_key(&app, key(KeyCode::Esc)), Some(Action::Back));
+        assert_eq!(
+            map_key(&app, key(KeyCode::Char('j'))),
+            Some(Action::SelectNext)
+        );
+        assert_eq!(
+            map_key(&app, key(KeyCode::Char('r'))),
+            Some(Action::Refresh)
+        );
+        assert_eq!(map_key(&app, key(KeyCode::Enter)), None);
     }
 
     #[test]

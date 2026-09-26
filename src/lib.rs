@@ -9,6 +9,7 @@
 //! - [`ui`]: `render(frame, &app)`
 
 pub mod app;
+pub mod builds;
 pub mod config;
 pub mod event;
 pub mod input;

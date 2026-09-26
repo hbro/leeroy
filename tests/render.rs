@@ -3,6 +3,7 @@
 
 use leeroy::{
     app::{Action, App, ConnectionStatus, SettingsState},
+    builds::{Build, Change},
     config::{SettingKey, Settings},
     jenkins::ServerInfo,
     jobs::{Job, JobStatus},
@@ -372,7 +373,11 @@ fn refresh_status_in_header() {
 
     // Same compact form with auto-refresh off (only the icon colour differs).
     apply(&mut app, &[Action::ToggleAutoRefresh]);
-    apply(&mut app, &[Action::Tick(base + Duration::from_secs(75))]);
+    let wall = app.wall_now + Duration::from_secs(75);
+    apply(
+        &mut app,
+        &[Action::Tick(base + Duration::from_secs(75), wall)],
+    );
     ends(&app, "⟳ 1m ");
 
     // R again: stale data is refreshed right away.
@@ -426,4 +431,95 @@ fn selected_row_status_stays_readable() {
             );
         }
     }
+}
+
+/// App in the build view of `backend/api/release-1.2`, with a fixed wall clock
+/// so ages in snapshots are stable.
+fn app_with_build(build: Option<Build>) -> App {
+    use std::time::{Duration, SystemTime};
+    let mut app = app_with_jobs();
+    app.wall_now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    apply(&mut app, &[Action::SelectNext, Action::OpenBuild]);
+    let generation = app.connection_generation;
+    apply(
+        &mut app,
+        &[Action::BuildFetched {
+            generation,
+            job: "backend/api/release-1.2".into(),
+            result: Ok(build),
+        }],
+    );
+    app
+}
+
+fn finished_build() -> Build {
+    use std::time::{Duration, SystemTime};
+    Build {
+        number: 42,
+        display_name: "#42".into(),
+        result: Some(JobStatus::Failed),
+        building: false,
+        // 5 minutes before the test's wall clock.
+        started: SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000 - 300),
+        duration: Duration::from_secs(133),
+        estimated: Some(Duration::from_secs(120)),
+        description: Some("Release candidate".into()),
+        causes: vec!["Started by user Hans".into()],
+        parameters: vec![
+            ("ENV".into(), "prod".into()),
+            ("DRY_RUN".into(), "false".into()),
+        ],
+        changes: vec![
+            Change {
+                commit: Some("0123abcd".into()),
+                message: "Fix login redirect".into(),
+                author: Some("Alice".into()),
+            },
+            Change {
+                commit: None,
+                message: "Bump version".into(),
+                author: None,
+            },
+        ],
+    }
+}
+
+#[test]
+fn build_finished() {
+    insta::assert_snapshot!(render(&app_with_build(Some(finished_build()))).backend());
+}
+
+#[test]
+fn build_running_with_progress() {
+    use std::time::Duration;
+    let mut build = finished_build();
+    build.building = true;
+    build.result = None;
+    build.duration = Duration::ZERO;
+    build.estimated = Some(Duration::from_secs(600)); // 5m of ~10m
+    build.changes.clear();
+    let screen = format!("{}", render(&app_with_build(Some(build))).backend());
+    assert!(screen.contains("⟳ running"), "{screen}");
+    assert!(screen.contains("5m 00s of ~10m 00s"), "{screen}");
+    assert!(
+        screen.contains("███████████████░░░░░░░░░░░░░░░  50%"),
+        "{screen}"
+    );
+}
+
+#[test]
+fn build_running_longer_than_usual() {
+    use std::time::Duration;
+    let mut build = finished_build();
+    build.building = true;
+    build.estimated = Some(Duration::from_secs(60));
+    let screen = format!("{}", render(&app_with_build(Some(build))).backend());
+    assert!(screen.contains("longer than usual"), "{screen}");
+}
+
+#[test]
+fn build_never_run() {
+    let screen = format!("{}", render(&app_with_build(None)).backend());
+    assert!(screen.contains("No builds yet"), "{screen}");
+    assert!(screen.contains("backend/api/release-1.2"), "{screen}");
 }

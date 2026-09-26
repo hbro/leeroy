@@ -5,6 +5,7 @@ use std::{fmt, time::Duration};
 use serde::Deserialize;
 
 use crate::{
+    builds::{self, Build},
     config::redact_url,
     jobs::{self, Job},
 };
@@ -83,7 +84,9 @@ pub fn client(config: &ConnectionConfig) -> Result<reqwest::Client, String> {
 /// Uses `whoAmI/api/json`, which also works for anonymous users, so a
 /// successful result with user `anonymous` means "reachable, not logged in".
 pub async fn check(config: &ConnectionConfig) -> Result<ServerInfo, String> {
-    let response = get(config, "whoAmI/api/json").await?;
+    let response = get(config, "whoAmI/api/json", false)
+        .await?
+        .ok_or("not found")?;
     let who: WhoAmI = serde_json::from_str(&response.body)
         .map_err(|_| "unexpected response: not a Jenkins API (is the URL right?)".to_owned())?;
     Ok(ServerInfo {
@@ -95,8 +98,20 @@ pub async fn check(config: &ConnectionConfig) -> Result<ServerInfo, String> {
 /// All jobs, folders flattened (see [`crate::jobs::parse_jobs`]).
 pub async fn fetch_jobs(config: &ConnectionConfig) -> Result<Vec<Job>, String> {
     let path = format!("api/json?tree={}", jobs::tree_query());
-    let response = get(config, &path).await?;
+    let response = get(config, &path, false).await?.ok_or("not found")?;
     jobs::parse_jobs(&response.body)
+}
+
+/// The most recent build of a job; `None` if it has never been built.
+pub async fn fetch_last_build(
+    config: &ConnectionConfig,
+    full_name: &str,
+) -> Result<Option<Build>, String> {
+    // Jenkins answers 404 on lastBuild when there is none.
+    match get(config, &builds::last_build_path(full_name), true).await? {
+        Some(response) => builds::parse_build(&response.body).map(Some),
+        None => Ok(None),
+    }
 }
 
 struct Response {
@@ -106,8 +121,13 @@ struct Response {
 }
 
 /// GET `path` (relative to the Jenkins URL) with the configured headers.
-/// Non-2xx answers become errors; 401/403 explain who refused and why.
-async fn get(config: &ConnectionConfig, path: &str) -> Result<Response, String> {
+/// Non-2xx answers become errors (401/403 explaining who refused and why),
+/// except 404 with `allow_not_found`, which gives `Ok(None)`.
+async fn get(
+    config: &ConnectionConfig,
+    path: &str,
+    allow_not_found: bool,
+) -> Result<Option<Response>, String> {
     let client = client(config)?;
     let endpoint = api_url(&config.url, path)?;
     let mut request = client.get(endpoint);
@@ -153,11 +173,14 @@ async fn get(config: &ConnectionConfig, path: &str) -> Result<Response, String> 
             &final_url,
         ));
     }
+    if allow_not_found && status.as_u16() == 404 {
+        return Ok(None);
+    }
     if !status.is_success() {
         return Err(format!("unexpected response: HTTP {status}"));
     }
     let body = response.text().await.map_err(describe)?;
-    Ok(Response { body, version })
+    Ok(Some(Response { body, version }))
 }
 
 /// Explain a 401/403: who refused, and whether a redirect dropped our headers.
@@ -435,6 +458,32 @@ mod tests {
         let names: Vec<&str> = jobs.iter().map(|j| j.full_name.as_str()).collect();
         assert_eq!(names, ["b", "f/a"]);
         assert!(jobs[1].building);
+    }
+
+    #[tokio::test]
+    async fn fetches_last_build_or_none() {
+        let server = MockServer::start().await;
+        Mock::given(path("/job/team/job/my%20svc/lastBuild/api/json"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "number": 3, "result": "SUCCESS", "building": false,
+                "timestamp": 1_700_000_000_000u64, "duration": 1000
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(path("/job/never/lastBuild/api/json"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        let config = config(&server.uri());
+        let build = fetch_last_build(&config, "team/my svc")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(build.number, 3);
+        assert_eq!(fetch_last_build(&config, "never").await.unwrap(), None);
+        // Elsewhere a 404 is still an error.
+        assert!(check(&config).await.is_err());
     }
 
     #[tokio::test]

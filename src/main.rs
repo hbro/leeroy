@@ -97,6 +97,7 @@ async fn run(mut terminal: DefaultTerminal, mut app: App) -> Result<()> {
         tx: action_tx,
         connect_task: None,
         fetch_task: None,
+        build_task: None,
     };
     for effect in app.start() {
         executor.run(effect);
@@ -106,7 +107,7 @@ async fn run(mut terminal: DefaultTerminal, mut app: App) -> Result<()> {
         terminal.draw(|frame| ui::render(frame, &app))?;
 
         let action = tokio::select! {
-            now = tick.tick() => Some(Action::Tick(now.into_std())),
+            now = tick.tick() => Some(Action::Tick(now.into_std(), std::time::SystemTime::now())),
             Some(action) = action_rx.recv() => Some(action),
             maybe_event = events.next() => match maybe_event {
                 Some(Ok(Event::Key(key))) => map_key(&app, key),
@@ -119,7 +120,7 @@ async fn run(mut terminal: DefaultTerminal, mut app: App) -> Result<()> {
 
         if let Some(action) = action {
             // Input chars may be part of a secret: don't log them.
-            if !matches!(action, Action::Tick(_) | Action::Input(_)) {
+            if !matches!(action, Action::Tick(..) | Action::Input(_)) {
                 tracing::debug!(?action, "update");
             }
             for effect in app.update(action) {
@@ -138,6 +139,8 @@ struct Executor {
     connect_task: Option<AbortHandle>,
     /// The in-flight job list fetch, aborted when a newer one starts.
     fetch_task: Option<AbortHandle>,
+    /// The in-flight build fetch, aborted when one for another job starts.
+    build_task: Option<AbortHandle>,
 }
 
 impl Executor {
@@ -184,6 +187,31 @@ impl Executor {
                     let _ = tx.send(Action::JobsFetched { generation, result });
                 });
                 self.fetch_task = Some(task.abort_handle());
+            }
+            Effect::FetchBuild {
+                generation,
+                job,
+                config,
+            } => {
+                if let Some(previous) = self.build_task.take() {
+                    previous.abort();
+                }
+                let tx = tx.clone();
+                let task = tokio::spawn(async move {
+                    let result = jenkins::fetch_last_build(&config, &job).await;
+                    match &result {
+                        Ok(build) => {
+                            tracing::info!(%job, number = ?build.as_ref().map(|b| b.number), "fetched build")
+                        }
+                        Err(err) => tracing::warn!(%job, %err, "fetching build failed"),
+                    }
+                    let _ = tx.send(Action::BuildFetched {
+                        generation,
+                        job,
+                        result,
+                    });
+                });
+                self.build_task = Some(task.abort_handle());
             }
         }
     }

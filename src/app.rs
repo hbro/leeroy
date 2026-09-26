@@ -1,6 +1,10 @@
-use std::{path::PathBuf, time::Instant};
+use std::{
+    path::PathBuf,
+    time::{Instant, SystemTime},
+};
 
 use crate::{
+    builds::{Build, BuildLoad, BuildView},
     config::{SettingKey, Settings, header_env_var, parse_header, redact_url},
     input::TextInput,
     jenkins::{ConnectionConfig, ServerInfo},
@@ -19,9 +23,10 @@ pub enum Action {
     ToggleHelp,
     /// Close the current context (overlay, edit, sub-view). No-op at the root view.
     Back,
-    /// Timer tick with the current time: drives auto-refresh and "updated
-    /// N ago". The only way time enters the core, so tests control it.
-    Tick(Instant),
+    /// Timer tick with the current time, monotonic (auto-refresh, data age)
+    /// and wall clock (build start times). The only way time enters the
+    /// core, so tests control it.
+    Tick(Instant, SystemTime),
     OpenSettings,
     SwitchTab(Tab),
     SelectNext,
@@ -32,6 +37,8 @@ pub enum Action {
     SelectLast,
     /// Jobs tab: open the `/` filter input.
     StartFilter,
+    /// Jobs tab: show the selected job's most recent build.
+    OpenBuild,
     /// Reload the job list (or reconnect if the connection failed).
     Refresh,
     /// `R`: turn auto-refresh on/off for this session.
@@ -63,6 +70,12 @@ pub enum Action {
         generation: u64,
         result: Result<Vec<Job>, String>,
     },
+    /// Outcome of [`Effect::FetchBuild`]; `Ok(None)`: never built.
+    BuildFetched {
+        generation: u64,
+        job: String,
+        result: Result<Option<Build>, String>,
+    },
 }
 
 /// Side effects requested by [`App::update`]. The IO shell (`main.rs`) runs
@@ -83,6 +96,12 @@ pub enum Effect {
     /// is the connection it belongs to.
     FetchJobs {
         generation: u64,
+        config: ConnectionConfig,
+    },
+    /// Load `job`'s last build; answer with [`Action::BuildFetched`].
+    FetchBuild {
+        generation: u64,
+        job: String,
         config: ConnectionConfig,
     },
 }
@@ -125,6 +144,8 @@ pub const PAGE: isize = 10;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum View {
     Jobs,
+    /// A job's most recent build (within the Jobs tab).
+    Build,
     Settings,
 }
 
@@ -132,7 +153,7 @@ impl View {
     /// The tab this view belongs to (`None` for settings).
     pub fn tab(self) -> Option<Tab> {
         match self {
-            View::Jobs => Some(Tab::Jobs),
+            View::Jobs | View::Build => Some(Tab::Jobs),
             View::Settings => None,
         }
     }
@@ -141,6 +162,7 @@ impl View {
     pub fn context(self) -> Context {
         match self {
             View::Jobs => Context::Jobs,
+            View::Build => Context::Build,
             View::Settings => Context::Settings,
         }
     }
@@ -155,6 +177,7 @@ pub enum Context {
     JobsFiltered,
     /// Typing the `/` filter.
     JobsFilter,
+    Build,
     Settings,
     EditSetting,
     Help,
@@ -165,6 +188,7 @@ impl Context {
         match self {
             Context::Jobs | Context::JobsFiltered => "Jobs",
             Context::JobsFilter => "Filter",
+            Context::Build => "Build",
             Context::Settings => "Settings",
             Context::EditSetting => "Edit",
             Context::Help => "Help",
@@ -177,6 +201,7 @@ impl Context {
             Context::Jobs => false,
             Context::JobsFiltered
             | Context::JobsFilter
+            | Context::Build
             | Context::Settings
             | Context::EditSetting
             | Context::Help => true,
@@ -320,8 +345,12 @@ pub struct App {
     pub connection_generation: u64,
     pub settings: SettingsState,
     pub jobs: JobsState,
+    /// The open build view (with [`View::Build`]).
+    pub build: Option<BuildView>,
     /// Time of the latest [`Action::Tick`].
     pub now: Instant,
+    /// Wall-clock time of the latest [`Action::Tick`].
+    pub wall_now: SystemTime,
     /// Auto-refresh for this session; starts from the `refresh.auto` setting.
     pub auto_refresh: bool,
 }
@@ -347,7 +376,9 @@ impl App {
             auto_refresh: settings.effective().is_on(SettingKey::RefreshAuto),
             settings,
             jobs: JobsState::default(),
+            build: None,
             now: Instant::now(),
+            wall_now: SystemTime::now(),
         }
     }
 
@@ -362,6 +393,10 @@ impl App {
         // Jobs of the previous connection may belong to another instance.
         self.jobs.load = JobsLoad::NotLoaded;
         self.jobs.refreshing = false;
+        self.build = None;
+        if self.view == View::Build {
+            self.view = View::Jobs;
+        }
         let Some(config) = self.settings.connection_config() else {
             self.connection = ConnectionStatus::NotConfigured;
             return None;
@@ -399,8 +434,9 @@ impl App {
             Action::Quit => self.running = false,
             Action::ToggleHelp => self.show_help = !self.show_help,
             Action::Back => self.back(),
-            Action::Tick(now) => {
+            Action::Tick(now, wall) => {
                 self.now = now;
+                self.wall_now = wall;
                 return self.auto_refresh_if_due();
             }
             Action::ToggleAutoRefresh => {
@@ -418,6 +454,21 @@ impl App {
             }
             Action::StartFilter => {
                 self.jobs.filter_input = Some(TextInput::new(&self.jobs.filter));
+            }
+            Action::OpenBuild => {
+                let Some(job) = self
+                    .jobs
+                    .visible()
+                    .get(self.jobs.selected)
+                    .map(|j| j.full_name.clone())
+                else {
+                    return Vec::new();
+                };
+                self.view = View::Build;
+                // A new view starts out loading: its first fetch goes out
+                // unconditionally (an older job's fetch is simply ignored).
+                self.build = Some(BuildView::new(job));
+                return self.build_effect().into_iter().collect();
             }
             Action::Refresh => return self.refresh(),
             Action::SelectNext
@@ -437,6 +488,27 @@ impl App {
                     _ => isize::MAX / 2,
                 };
                 self.jobs.move_selection(delta);
+            }
+            Action::SelectNext
+            | Action::SelectPrev
+            | Action::SelectPageDown
+            | Action::SelectPageUp
+            | Action::SelectFirst
+            | Action::SelectLast
+                if self.view == View::Build =>
+            {
+                // Scrolling; the renderer clamps to the content height.
+                if let Some(build) = &mut self.build {
+                    let scroll = match action {
+                        Action::SelectNext => build.scroll.saturating_add(1),
+                        Action::SelectPrev => build.scroll.saturating_sub(1),
+                        Action::SelectPageDown => build.scroll.saturating_add(PAGE as u16),
+                        Action::SelectPageUp => build.scroll.saturating_sub(PAGE as u16),
+                        Action::SelectFirst => 0,
+                        _ => u16::MAX,
+                    };
+                    build.scroll = scroll.min(build.max_scroll.get());
+                }
             }
             Action::SelectPageDown
             | Action::SelectPageUp
@@ -547,6 +619,29 @@ impl App {
                     return self.fetch_jobs();
                 }
             }
+            Action::BuildFetched {
+                generation,
+                job,
+                result,
+            } => {
+                let now = self.now;
+                let Some(build) = self
+                    .build
+                    .as_mut()
+                    .filter(|b| b.job == job && generation == self.connection_generation)
+                else {
+                    return Vec::new(); // another job or connection by now
+                };
+                build.refreshing = false;
+                build.attempted_at = Some(now);
+                if result.is_ok() {
+                    build.fetched_at = Some(now);
+                }
+                build.load = match result {
+                    Ok(found) => BuildLoad::Loaded(found),
+                    Err(error) => BuildLoad::Failed(error),
+                };
+            }
             Action::JobsFetched { generation, result } => {
                 if generation != self.connection_generation {
                     return Vec::new(); // belongs to an older connection
@@ -601,26 +696,57 @@ impl App {
         }]
     }
 
-    /// Start a fetch when auto-refresh is on, we're connected, nothing is in
-    /// flight and the last attempt is at least one interval old.
-    fn auto_refresh_if_due(&mut self) -> Vec<Effect> {
-        let idle = !self.jobs.fetch_in_flight();
-        let connected = matches!(self.connection, ConnectionStatus::Connected { .. });
-        let interval = self.settings.effective().refresh_interval();
-        let due = self
-            .jobs
-            .attempted_at
-            .is_none_or(|last| self.now.saturating_duration_since(last) >= interval);
-        if self.auto_refresh && connected && idle && due {
-            self.fetch_jobs()
+    /// Reload the open build view's data, unless its fetch is in flight
+    /// (same no-pile-up rule as for jobs).
+    fn fetch_build(&mut self) -> Vec<Effect> {
+        let Some(build) = self.build.as_mut().filter(|b| !b.fetch_in_flight()) else {
+            return Vec::new();
+        };
+        if matches!(build.load, BuildLoad::Loaded(_)) {
+            build.refreshing = true;
         } else {
-            Vec::new()
+            build.load = BuildLoad::Loading;
+        }
+        self.build_effect().into_iter().collect()
+    }
+
+    /// The fetch for the open build view (no in-flight check).
+    fn build_effect(&self) -> Option<Effect> {
+        Some(Effect::FetchBuild {
+            generation: self.connection_generation,
+            job: self.build.as_ref()?.job.clone(),
+            config: self.settings.connection_config()?,
+        })
+    }
+
+    /// Start a fetch of what's on screen when auto-refresh is on, we're
+    /// connected, nothing is in flight and the last attempt is at least one
+    /// interval old.
+    fn auto_refresh_if_due(&mut self) -> Vec<Effect> {
+        let connected = matches!(self.connection, ConnectionStatus::Connected { .. });
+        if !self.auto_refresh || !connected {
+            return Vec::new();
+        }
+        let interval = self.settings.effective().refresh_interval();
+        let due = |last: Option<Instant>| {
+            last.is_none_or(|last| self.now.saturating_duration_since(last) >= interval)
+        };
+        match (&self.view, &self.build) {
+            (View::Build, Some(build)) => {
+                if !build.fetch_in_flight() && due(build.attempted_at) {
+                    return self.fetch_build();
+                }
+                Vec::new()
+            }
+            _ if !self.jobs.fetch_in_flight() && due(self.jobs.attempted_at) => self.fetch_jobs(),
+            _ => Vec::new(),
         }
     }
 
-    /// `r`: reload jobs when connected; otherwise (re)connect.
+    /// `r`: reload what's on screen when connected; otherwise (re)connect.
     fn refresh(&mut self) -> Vec<Effect> {
         match self.connection {
+            ConnectionStatus::Connected { .. } if self.view == View::Build => self.fetch_build(),
             ConnectionStatus::Connected { .. } => self.fetch_jobs(),
             ConnectionStatus::Connecting { .. } => Vec::new(),
             ConnectionStatus::NotConfigured | ConnectionStatus::Failed { .. } => {
@@ -735,6 +861,10 @@ impl App {
             Context::JobsFiltered => {
                 self.jobs.filter.clear();
                 self.jobs.clamp_selection();
+            }
+            Context::Build => {
+                self.view = View::Jobs;
+                self.build = None;
             }
             Context::Settings => {
                 self.view = View::Jobs;
@@ -1425,7 +1555,8 @@ mod tests {
 
     fn tick(app: &mut App, after: Duration) -> Vec<Effect> {
         let now = app.now + after;
-        app.update(Action::Tick(now))
+        let wall = app.wall_now + after;
+        app.update(Action::Tick(now, wall))
     }
 
     fn finish_fetch(app: &mut App, result: Result<Vec<Job>, String>) {
@@ -1567,5 +1698,167 @@ mod tests {
             result: Ok(info("me")),
         });
         assert_eq!(fetches(&effects), 1);
+    }
+
+    fn sample_build(number: u64) -> Build {
+        Build {
+            number,
+            display_name: format!("#{number}"),
+            result: Some(crate::jobs::JobStatus::Success),
+            building: false,
+            started: SystemTime::UNIX_EPOCH,
+            duration: Duration::from_secs(60),
+            estimated: None,
+            description: None,
+            causes: vec![],
+            parameters: vec![],
+            changes: vec![],
+        }
+    }
+
+    fn build_fetch(effects: &[Effect]) -> Option<(u64, String)> {
+        effects.iter().find_map(|e| match e {
+            Effect::FetchBuild {
+                generation, job, ..
+            } => Some((*generation, job.clone())),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn enter_opens_the_selected_jobs_last_build() {
+        let mut app = connected_with_jobs(&["a", "b"]);
+        app.update(Action::SelectNext);
+        let (generation, job) = build_fetch(&app.update(Action::OpenBuild)).unwrap();
+        assert_eq!(job, "b");
+        assert_eq!(app.view, View::Build);
+        assert_eq!(app.context(), Context::Build);
+        assert_eq!(app.view.tab(), Some(Tab::Jobs), "still the Jobs tab");
+
+        app.update(Action::BuildFetched {
+            generation,
+            job: "b".into(),
+            result: Ok(Some(sample_build(7))),
+        });
+        let build = app.build.as_ref().unwrap();
+        assert_eq!(build.load, BuildLoad::Loaded(Some(sample_build(7))));
+        assert_eq!(build.fetched_at, Some(app.now));
+    }
+
+    #[test]
+    fn no_builds_and_failures_are_states() {
+        let mut app = connected_with_jobs(&["a"]);
+        let (generation, _) = build_fetch(&app.update(Action::OpenBuild)).unwrap();
+        app.update(Action::BuildFetched {
+            generation,
+            job: "a".into(),
+            result: Ok(None),
+        });
+        assert_eq!(app.build.as_ref().unwrap().load, BuildLoad::Loaded(None));
+        app.update(Action::Refresh);
+        app.update(Action::BuildFetched {
+            generation,
+            job: "a".into(),
+            result: Err("HTTP 500".into()),
+        });
+        assert_eq!(
+            app.build.as_ref().unwrap().load,
+            BuildLoad::Failed("HTTP 500".into())
+        );
+    }
+
+    #[test]
+    fn answers_for_another_job_or_connection_are_ignored() {
+        let mut app = connected_with_jobs(&["a", "b"]);
+        let (generation, _) = build_fetch(&app.update(Action::OpenBuild)).unwrap();
+        app.update(Action::Back);
+        app.update(Action::SelectNext);
+        app.update(Action::OpenBuild); // "b"
+        app.update(Action::BuildFetched {
+            generation,
+            job: "a".into(),
+            result: Ok(Some(sample_build(1))),
+        });
+        assert_eq!(app.build.as_ref().unwrap().load, BuildLoad::Loading);
+        app.update(Action::BuildFetched {
+            generation: generation + 99,
+            job: "b".into(),
+            result: Ok(Some(sample_build(1))),
+        });
+        assert_eq!(app.build.as_ref().unwrap().load, BuildLoad::Loading);
+    }
+
+    #[test]
+    fn refresh_and_auto_refresh_follow_the_build_view_without_pile_up() {
+        let mut app = connected_with_jobs(&["a"]);
+        let (generation, _) = build_fetch(&app.update(Action::OpenBuild)).unwrap();
+        assert_eq!(
+            app.update(Action::Refresh),
+            Vec::new(),
+            "first fetch in flight"
+        );
+        app.update(Action::BuildFetched {
+            generation,
+            job: "a".into(),
+            result: Ok(Some(sample_build(1))),
+        });
+        // r: the build, not the job list.
+        let effects = app.update(Action::Refresh);
+        assert!(build_fetch(&effects).is_some());
+        assert_eq!(fetches(&effects), 0);
+        assert!(
+            app.build.as_ref().unwrap().refreshing,
+            "old details stay visible"
+        );
+        assert_eq!(app.update(Action::Refresh), Vec::new(), "in flight");
+        app.update(Action::BuildFetched {
+            generation,
+            job: "a".into(),
+            result: Ok(Some(sample_build(2))),
+        });
+        // Auto-refresh (on by default) re-fetches the build after the interval.
+        assert_eq!(tick(&mut app, Duration::from_secs(9)), Vec::new());
+        let effects = tick(&mut app, Duration::from_secs(1));
+        assert!(build_fetch(&effects).is_some());
+        assert_eq!(
+            fetches(&effects),
+            0,
+            "job list not polled from the build view"
+        );
+    }
+
+    #[test]
+    fn esc_returns_to_the_list_with_selection() {
+        let mut app = connected_with_jobs(&["a", "b", "c"]);
+        app.update(Action::SelectLast);
+        app.update(Action::OpenBuild);
+        app.update(Action::Back);
+        assert_eq!(app.view, View::Jobs);
+        assert!(app.build.is_none());
+        assert_eq!(app.jobs.selected, 2);
+    }
+
+    #[test]
+    fn build_scroll_is_clamped_to_what_the_renderer_allows() {
+        let mut app = connected_with_jobs(&["a"]);
+        app.update(Action::OpenBuild);
+        app.build.as_ref().unwrap().max_scroll.set(5);
+        app.update(Action::SelectLast);
+        assert_eq!(app.build.as_ref().unwrap().scroll, 5);
+        app.update(Action::SelectPrev);
+        assert_eq!(
+            app.build.as_ref().unwrap().scroll,
+            4,
+            "no overshoot after G"
+        );
+        app.update(Action::SelectFirst);
+        assert_eq!(app.build.as_ref().unwrap().scroll, 0);
+    }
+
+    #[test]
+    fn enter_with_no_visible_jobs_does_nothing() {
+        let mut app = connected_with_jobs(&[]);
+        assert_eq!(app.update(Action::OpenBuild), Vec::new());
+        assert_eq!(app.view, View::Jobs);
     }
 }

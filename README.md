@@ -159,6 +159,7 @@ build runs.
 | Key | Action |
 | --- | --- |
 | `↑/↓` `j/k`, `PgUp/PgDn`, `g/G` | move |
+| `Enter` | details of the job's most recent build |
 | `/` | filter (live, case-insensitive; space-separated words must all match) |
 | `Enter` / `Esc` while filtering | apply / cancel |
 | `Esc` | clear an applied filter |
@@ -168,3 +169,12 @@ icon is green while auto-refresh is on and gray while it's off; `⟳ …` means 
 refresh is running and `✕` that the last one failed. The
 default and the interval are in the settings (`[refresh]`); a failed refresh is
 retried after a full interval, never in a tight loop.
+
+### Last build
+
+`Enter` on a job shows its most recent build: result, when it started, how long
+it took, what triggered it, parameters, description and the SCM changes it
+included. A running build shows its elapsed time against Jenkins' estimate as a
+progress bar. `r` and auto-refresh re-fetch the build while this view is open (so
+a running build updates live), and the header's `⟳` age refers to it. `↑/↓`
+`PgUp/PgDn` `g/G` scroll, `Esc` goes back to the list.
