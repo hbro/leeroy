@@ -6,6 +6,9 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
+# Isolate from your own setup: no LEEROY_* env vars; each tape gets a fresh
+# config at target/vhs/config.toml (set in tapes/_settings.tape).
+while read -r var; do unset "$var"; done < <(compgen -e | grep '^LEEROY_' || true)
 
 run() {
     if command -v vhs >/dev/null && command -v rustc >/dev/null; then "$@"; else nix develop -c "$@"; fi
@@ -28,6 +31,7 @@ for tape in "${tapes[@]}"; do
     # expected screenshots first and check they exist afterwards.
     mapfile -t shots < <(sed -n 's/^Screenshot "\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$tape")
     rm -f "${shots[@]}"
+    rm -rf target/vhs && mkdir -p target/vhs
     run vhs --quiet "$tape"
     for shot in "${shots[@]}"; do
         [[ -s $shot ]] || { echo "error: $tape did not produce $shot" >&2; exit 1; }

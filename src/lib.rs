@@ -1,10 +1,12 @@
 //! Leeroy — a terminal UI for Jenkins.
 //!
 //! The core is pure and terminal-free so it can be tested headlessly:
-//! - [`app`]: state + `update(Action)`
+//! - [`app`]: state + `update(Action) -> Option<Effect>`
+//! - [`config`]: config file location, load/save, env overrides
 //! - [`event`]: terminal input -> [`app::Action`]
 //! - [`ui`]: `render(frame, &app)`
 
 pub mod app;
+pub mod config;
 pub mod event;
 pub mod ui;

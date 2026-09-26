@@ -2,17 +2,22 @@
 # Drive the real Leeroy binary inside a detached tmux session.
 # Uses a private tmux server socket, so it never touches your own tmux.
 #
-#   scripts/tui.sh start [WxH] [-- args...]  build + launch (default 100x30)
+#   scripts/tui.sh start [WxH] [-e VAR=VAL]... [-- args...]
+#                                             build + launch (default 100x30)
 #   scripts/tui.sh keys <key>...              send tmux keys: q '?' Down Enter C-c
 #   scripts/tui.sh capture [--ansi]           print screen (--ansi keeps colors)
 #   scripts/tui.sh wait-for <text> [secs]     poll until text is on screen (default 5s)
 #   scripts/tui.sh status                     running | exited (<code>) | stopped
 #   scripts/tui.sh stop                       kill session
 #
-# Logs of the run go to target/tui.log.
+# Runs are isolated from your own setup: every LEEROY_* env var is cleared and
+# the config file is target/tui/config.toml, wiped on each start. Pass env vars
+# for a run with -e (e.g. -e LEEROY_JENKINS_URL=https://ci), or a config with
+# -- --config FILE. Logs of the run go to target/tui.log.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
+while read -r var; do unset "$var"; done < <(compgen -e | grep '^LEEROY_' || true)
 SOCKET=leeroy-agent
 SESSION=leeroy
 BIN=target/debug/leeroy
@@ -34,15 +39,25 @@ shift || true
 case "$cmd" in
 start)
     size=100x30
-    if [[ ${1:-} =~ ^[0-9]+x[0-9]+$ ]]; then size=$1; shift; fi
-    [[ ${1:-} == -- ]] && shift
+    envs=()
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            [0-9]*x[0-9]*) size=$1; shift ;;
+            -e) envs+=(-e "${2:?-e needs VAR=VAL}"); shift 2 ;;
+            --) shift; break ;;
+            *) break ;;
+        esac
+    done
     cargo_ build --quiet
-    has_session && tm kill-session -t "$SESSION"
+    # Fresh server, so it doesn't carry env from an earlier run.
+    tm kill-server 2>/dev/null || true
+    rm -rf target/tui && mkdir -p target/tui
     : > target/tui.log
     # Wrapper keeps the pane alive after exit so crashes/exit codes stay visible.
     tm new-session -d -s "$SESSION" -x "${size%x*}" -y "${size#*x}" \
         -e LEEROY_LOG="$PWD/target/tui.log" -e RUST_LOG="${RUST_LOG:-debug}" \
-        "$BIN $(printf '%q ' "$@"); echo; echo \"$EXIT_MARKER \$?]\"; sleep 86400"
+        -e LEEROY_CONFIG="$PWD/target/tui/config.toml" "${envs[@]}" \
+        "$BIN${*:+ $(printf '%q ' "$@")}; code=\$?; echo; echo \"$EXIT_MARKER \$code]\"; sleep 86400"
     echo "started $SESSION ($size)"
     ;;
 keys)
@@ -78,7 +93,7 @@ stop)
     echo stopped
     ;;
 *)
-    sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'
     exit 1
     ;;
 esac

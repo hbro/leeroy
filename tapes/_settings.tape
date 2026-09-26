@@ -7,3 +7,4 @@ Set Padding 10
 Set Theme "Catppuccin Mocha"
 Set TypingSpeed 0
 Env LEEROY_LOG "target/vhs.log"
+Env LEEROY_CONFIG "target/vhs/config.toml"

@@ -1,40 +1,84 @@
-use std::{path::PathBuf, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
-use color_eyre::Result;
+use clap::Parser;
+use color_eyre::{Result, eyre::eyre};
 use crossterm::event::{Event, EventStream};
 use futures::StreamExt;
 use leeroy::{
-    app::{Action, App},
+    app::{Action, App, Effect, SettingsState},
+    config::{self, Settings},
     event::map_key,
     ui,
 };
 use ratatui::DefaultTerminal;
-use tokio::sync::mpsc;
+use tokio::sync::mpsc::{self, UnboundedSender};
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::EnvFilter;
 
 const TICK_RATE: Duration = Duration::from_millis(250);
 
+/// Leeroy — a terminal UI for Jenkins.
+///
+/// Every setting can also be set with an env var, which takes precedence over
+/// the config file: LEEROY_JENKINS_URL, LEEROY_JENKINS_USERNAME,
+/// LEEROY_JENKINS_TOKEN.
+#[derive(Debug, Parser)]
+#[command(version)]
+struct Cli {
+    /// Config file to use. Overrides $LEEROY_CONFIG
+    /// [default: $XDG_CONFIG_HOME/leeroy/config.toml (~/.config/leeroy/config.toml),
+    /// or an existing ~/.leeroy/config.toml]
+    // $LEEROY_CONFIG is handled by config::resolve_path rather than clap's
+    // `env`, which rejects an empty value instead of ignoring it.
+    #[arg(short, long, value_name = "FILE")]
+    config: Option<PathBuf>,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Parse args and load config before touching the terminal, so errors
+    // (and --help) print normally.
+    let cli = Cli::parse();
     color_eyre::install()?;
     let _log_guard = init_logging()?;
     tracing::info!("starting Leeroy");
 
+    let location = config::resolve_path(cli.config, |name| std::env::var_os(name), Path::exists)
+        .ok_or_else(|| {
+            eyre!("cannot determine config location: set $HOME or $LEEROY_CONFIG, or pass --config")
+        })?;
+    if let Some(ignored) = &location.ignored {
+        // Printed before the alternate screen, so it's visible after quitting.
+        eprintln!(
+            "warning: both {} and {} exist; using {}",
+            location.path.display(),
+            ignored.display(),
+            location.path.display()
+        );
+        tracing::warn!(used = %location.path.display(), ignored = %ignored.display(), "two config files found");
+    }
+    let path = location.path;
+    let file = config::load(&path)?;
+    let env = Settings::from_env(|name| std::env::var_os(name));
+    tracing::info!(path = %path.display(), "loaded config");
+    let app = App::new(SettingsState::new(path, file, env));
+
     // ratatui::init enters raw mode + alternate screen and installs a panic
     // hook that restores the terminal before the panic message is printed.
     let terminal = ratatui::init();
-    let result = run(terminal).await;
+    let result = run(terminal, app).await;
     ratatui::restore();
     result
 }
 
-async fn run(mut terminal: DefaultTerminal) -> Result<()> {
-    let mut app = App::new();
+async fn run(mut terminal: DefaultTerminal, mut app: App) -> Result<()> {
     let mut events = EventStream::new();
     let mut tick = tokio::time::interval(TICK_RATE);
     // Background tasks (e.g. Jenkins API calls) send their results here.
-    let (_action_tx, mut action_rx) = mpsc::unbounded_channel::<Action>();
+    let (action_tx, mut action_rx) = mpsc::unbounded_channel::<Action>();
 
     while app.running {
         terminal.draw(|frame| ui::render(frame, &app))?;
@@ -52,14 +96,33 @@ async fn run(mut terminal: DefaultTerminal) -> Result<()> {
         };
 
         if let Some(action) = action {
-            if action != Action::Tick {
+            // Input chars may be part of a secret: don't log them.
+            if !matches!(action, Action::Tick | Action::Input(_)) {
                 tracing::debug!(?action, "update");
             }
-            app.update(action);
+            if let Some(effect) = app.update(action) {
+                execute(effect, &action_tx);
+            }
         }
     }
     tracing::info!("exiting");
     Ok(())
+}
+
+/// Run a side effect requested by `App::update`; report back via `tx`.
+fn execute(effect: Effect, tx: &UnboundedSender<Action>) {
+    match effect {
+        Effect::SaveSettings { path, settings } => {
+            // Inline on purpose: a tiny local write, and running saves in
+            // order means an older save can never overwrite a newer one.
+            let result = config::save(&path, &settings).map_err(|err| format!("{err:#}"));
+            match &result {
+                Ok(()) => tracing::info!(path = %path.display(), "saved config"),
+                Err(err) => tracing::error!(%err, "saving config failed"),
+            }
+            let _ = tx.send(Action::SettingsSaved(result));
+        }
+    }
 }
 
 /// Log to a file: stdout belongs to the TUI.
