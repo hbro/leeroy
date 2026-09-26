@@ -1,0 +1,28 @@
+---
+source: tests/render.rs
+expression: render(&app).backend()
+---
+" Leeroy  ● https://ci.example.com · Jenkins 2.504.1 · me                   ⟳ 0s "
+"  F1 Jobs                                                                       "
+"╭ backend/api/release-1.2 · #42 · console · ⟳ following ───────────────────────╮"
+"│[INFO]  line 082 of the build                                                ║│"
+"│[INFO]  line 083 of the build                                                ║│"
+"│[INFO]  line 084 of the build                                                ║│"
+"│[INFO]  line 085 of the build                                                ║│"
+"│[INFO]  line 086 of the build                                                ║│"
+"│[INFO]  line 087 of the build                                                ║│"
+"│[INFO]  line 088 of the build                                                ║│"
+"│[INFO]  line 089 of the build                                                ║│"
+"│[INFO]  line 090 of the build                                                ║│"
+"│[INFO]  line 091 of the build                                                ║│"
+"│[INFO]  line 092 of the build                                                ║│"
+"│[INFO]  line 093 of the build                                                ║│"
+"│[INFO]  line 094 of the build                                                ║│"
+"│[INFO]  line 095 of the build                                                ║│"
+"│[INFO]  line 096 of the build                                                ║│"
+"│[INFO]  line 097 of the build                                                █│"
+"│[INFO]  line 098 of the build                                                █│"
+"│[INFO]  line 099 of the build                                                █│"
+"╰──────────────────────────────────────────────────────────────────────────────╯"
+" Console   ↑/↓  line   PgUp/PgDn  page   Home/End  top/bottom   c/Esc  back   ←/"
+" q  quit   s  settings   ?  help   r  refresh   R  toggle auto-refresh          "

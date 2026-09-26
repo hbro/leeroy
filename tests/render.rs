@@ -5,6 +5,7 @@ use leeroy::{
     app::{Action, App, ConnectionStatus, SettingsState},
     builds::{Build, BuildPage, BuildRef, BuildStep, Change},
     config::{SettingKey, Settings},
+    console::ConsoleChunk,
     jenkins::ServerInfo,
     jobs::{Job, JobStatus},
     ui,
@@ -570,4 +571,50 @@ fn quit_confirmation_popup() {
     let mut app = app_with_jobs();
     apply(&mut app, &[Action::RequestQuit]);
     insta::assert_snapshot!(render(&app).backend());
+}
+
+/// Console view of the finished build with `lines` lines of output.
+fn app_with_console(lines: usize, more: bool) -> App {
+    let mut app = app_with_build(Some(finished_build()));
+    apply(&mut app, &[Action::OpenConsole]);
+    let text: String = (0..lines)
+        .map(|i| format!("\x1b[32m[INFO]\x1b[0m\tline {i:03} of the build\n"))
+        .collect();
+    let generation = app.connection_generation;
+    apply(
+        &mut app,
+        &[Action::ConsoleFetched {
+            generation,
+            job: "backend/api/release-1.2".into(),
+            number: 42,
+            start: 0,
+            result: Ok(ConsoleChunk {
+                bytes: text.clone().into_bytes(),
+                next: text.len() as u64,
+                more,
+            }),
+        }],
+    );
+    app
+}
+
+#[test]
+fn console_following_a_running_build() {
+    let app = app_with_console(100, true);
+    insta::assert_snapshot!(render(&app).backend());
+}
+
+#[test]
+fn console_paused_and_complete() {
+    let mut app = app_with_console(100, true);
+    render(&app); // records the viewport height
+    apply(&mut app, &[Action::SelectFirst]);
+    let screen = format!("{}", render(&app).backend());
+    assert!(screen.contains("paused (End to follow)"), "{screen}");
+    assert!(screen.contains("[INFO]  line 000 of the build"), "{screen}");
+    assert!(!screen.contains('\x1b'), "escape codes stripped");
+
+    let done = app_with_console(3, false);
+    let screen = format!("{}", render(&done).backend());
+    assert!(screen.contains("console · complete"), "{screen}");
 }

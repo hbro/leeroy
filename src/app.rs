@@ -6,6 +6,7 @@ use std::{
 use crate::{
     builds::{BuildLoad, BuildPage, BuildRef, BuildStep, BuildView},
     config::{SettingKey, Settings, header_env_var, parse_header, redact_url},
+    console::{ConsoleChunk, ConsoleLoad, ConsoleView},
     input::TextInput,
     jenkins::{ConnectionConfig, ServerInfo},
     jobs::{Job, JobsLoad, JobsState},
@@ -44,6 +45,11 @@ pub enum Action {
     OpenBuild,
     /// Build view: go to another build of the same job.
     BuildStep(BuildStep),
+    /// Build view: open the build's console output.
+    OpenConsole,
+    /// Console: scroll sideways.
+    ScrollLeft,
+    ScrollRight,
     /// Reload the job list (or reconnect if the connection failed).
     Refresh,
     /// `R`: turn auto-refresh on/off for this session.
@@ -75,6 +81,14 @@ pub enum Action {
         generation: u64,
         result: Result<Vec<Job>, String>,
     },
+    /// Outcome of [`Effect::FetchConsole`] (the chunk from `start`).
+    ConsoleFetched {
+        generation: u64,
+        job: String,
+        number: u64,
+        start: u64,
+        result: Result<ConsoleChunk, String>,
+    },
     /// Outcome of [`Effect::FetchBuild`].
     BuildFetched {
         generation: u64,
@@ -102,6 +116,15 @@ pub enum Effect {
     /// is the connection it belongs to.
     FetchJobs {
         generation: u64,
+        config: ConnectionConfig,
+    },
+    /// Load console output of build `number` of `job` from byte `start`;
+    /// answer with [`Action::ConsoleFetched`].
+    FetchConsole {
+        generation: u64,
+        job: String,
+        number: u64,
+        start: u64,
         config: ConnectionConfig,
     },
     /// Load `which` build of `job`; answer with [`Action::BuildFetched`].
@@ -144,6 +167,9 @@ impl Tab {
     }
 }
 
+/// How often a running build's console output is polled while shown.
+pub const CONSOLE_POLL: std::time::Duration = std::time::Duration::from_secs(1);
+
 /// Rows moved by PgUp/PgDn.
 pub const PAGE: isize = 10;
 
@@ -153,6 +179,8 @@ pub enum View {
     Jobs,
     /// A job's most recent build (within the Jobs tab).
     Build,
+    /// A build's console output (within the Jobs tab).
+    Console,
     Settings,
 }
 
@@ -160,7 +188,7 @@ impl View {
     /// The tab this view belongs to (`None` for settings).
     pub fn tab(self) -> Option<Tab> {
         match self {
-            View::Jobs | View::Build => Some(Tab::Jobs),
+            View::Jobs | View::Build | View::Console => Some(Tab::Jobs),
             View::Settings => None,
         }
     }
@@ -170,6 +198,7 @@ impl View {
         match self {
             View::Jobs => Context::Jobs,
             View::Build => Context::Build,
+            View::Console => Context::Console,
             View::Settings => Context::Settings,
         }
     }
@@ -187,6 +216,7 @@ pub enum Context {
     /// Typing the `/` filter.
     JobsFilter,
     Build,
+    Console,
     Settings,
     EditSetting,
     Help,
@@ -199,6 +229,7 @@ impl Context {
             Context::JobsFilter => "Filter",
             Context::ConfirmQuit => "Quit?",
             Context::Build => "Build",
+            Context::Console => "Console",
             Context::Settings => "Settings",
             Context::EditSetting => "Edit",
             Context::Help => "Help",
@@ -213,6 +244,7 @@ impl Context {
             | Context::JobsFilter
             | Context::ConfirmQuit
             | Context::Build
+            | Context::Console
             | Context::Settings
             | Context::EditSetting
             | Context::Help => true,
@@ -364,8 +396,10 @@ pub struct App {
     pub connection_generation: u64,
     pub settings: SettingsState,
     pub jobs: JobsState,
-    /// The open build view (with [`View::Build`]).
+    /// The open build view (with [`View::Build`] and [`View::Console`]).
     pub build: Option<BuildView>,
+    /// The open console view (with [`View::Console`]).
+    pub console: Option<ConsoleView>,
     /// Time of the latest [`Action::Tick`].
     pub now: Instant,
     /// Wall-clock time of the latest [`Action::Tick`].
@@ -397,6 +431,7 @@ impl App {
             settings,
             jobs: JobsState::default(),
             build: None,
+            console: None,
             now: Instant::now(),
             wall_now: SystemTime::now(),
         }
@@ -414,7 +449,8 @@ impl App {
         self.jobs.load = JobsLoad::NotLoaded;
         self.jobs.refreshing = false;
         self.build = None;
-        if self.view == View::Build {
+        self.console = None;
+        if matches!(self.view, View::Build | View::Console) {
             self.view = View::Jobs;
         }
         let Some(config) = self.settings.connection_config() else {
@@ -466,7 +502,9 @@ impl App {
             Action::Tick(now, wall) => {
                 self.now = now;
                 self.wall_now = wall;
-                return self.auto_refresh_if_due();
+                let mut effects = self.auto_refresh_if_due();
+                effects.extend(self.console_poll_if_due());
+                return effects;
             }
             Action::ToggleAutoRefresh => {
                 self.auto_refresh = !self.auto_refresh;
@@ -537,6 +575,88 @@ impl App {
                         _ => u16::MAX,
                     };
                     build.scroll = scroll.min(build.max_scroll.get());
+                }
+            }
+            Action::SelectNext
+            | Action::SelectPrev
+            | Action::SelectPageDown
+            | Action::SelectPageUp
+            | Action::SelectFirst
+            | Action::SelectLast
+            | Action::ScrollLeft
+            | Action::ScrollRight
+                if self.view == View::Console =>
+            {
+                if let Some(console) = &mut self.console {
+                    match action {
+                        Action::SelectNext => console.scroll_by(1),
+                        Action::SelectPrev => console.scroll_by(-1),
+                        Action::SelectPageDown => console.page_by(1),
+                        Action::SelectPageUp => console.page_by(-1),
+                        Action::SelectFirst => console.scroll_home(),
+                        Action::SelectLast => console.scroll_end(),
+                        Action::ScrollRight => {
+                            console.left += crate::console::HSCROLL_STEP;
+                        }
+                        _ => {
+                            console.left =
+                                console.left.saturating_sub(crate::console::HSCROLL_STEP);
+                        }
+                    }
+                }
+            }
+            Action::ScrollLeft | Action::ScrollRight => {}
+            Action::OpenConsole => {
+                let Some(number) = self
+                    .build
+                    .as_ref()
+                    .filter(|_| self.view == View::Build)
+                    .and_then(|b| match &b.load {
+                        BuildLoad::Loaded(Some(build)) => Some(build.number),
+                        _ => None,
+                    })
+                else {
+                    return Vec::new(); // no build to show the output of
+                };
+                let job = self
+                    .build
+                    .as_ref()
+                    .map(|b| b.job.clone())
+                    .unwrap_or_default();
+                self.view = View::Console;
+                self.console = Some(ConsoleView::new(job, number));
+                return self.console_effect().into_iter().collect();
+            }
+            Action::ConsoleFetched {
+                generation,
+                job,
+                number,
+                start,
+                result,
+            } => {
+                let now = self.now;
+                let Some(console) = self.console.as_mut().filter(|c| {
+                    c.job == job
+                        && c.number == number
+                        && c.offset == start
+                        && generation == self.connection_generation
+                }) else {
+                    return Vec::new(); // another build, a stale chunk, or reconnected
+                };
+                console.in_flight = false;
+                console.attempted_at = Some(now);
+                match result {
+                    Ok(chunk) => {
+                        console.push(chunk);
+                        console.fetched_at = Some(now);
+                        console.last_error = None;
+                        console.load = ConsoleLoad::Loaded;
+                    }
+                    Err(error) if console.load == ConsoleLoad::Loaded => {
+                        // Keep what we have; the next poll retries.
+                        console.last_error = Some(error);
+                    }
+                    Err(error) => console.load = ConsoleLoad::Failed(error),
                 }
             }
             Action::SelectPageDown
@@ -769,6 +889,42 @@ impl App {
         })
     }
 
+    /// The next chunk for the open console view (no in-flight check).
+    fn console_effect(&self) -> Option<Effect> {
+        let console = self.console.as_ref()?;
+        Some(Effect::FetchConsole {
+            generation: self.connection_generation,
+            job: console.job.clone(),
+            number: console.number,
+            start: console.offset,
+            config: self.settings.connection_config()?,
+        })
+    }
+
+    /// Fetch more console output unless a fetch is running.
+    fn fetch_console(&mut self) -> Vec<Effect> {
+        let Some(console) = self.console.as_mut().filter(|c| !c.in_flight) else {
+            return Vec::new();
+        };
+        console.in_flight = true;
+        self.console_effect().into_iter().collect()
+    }
+
+    /// Tail a running build's output: poll every [`CONSOLE_POLL`] while the
+    /// console is on screen, independent of the auto-refresh setting.
+    fn console_poll_if_due(&mut self) -> Vec<Effect> {
+        let connected = matches!(self.connection, ConnectionStatus::Connected { .. });
+        let due = self
+            .console
+            .as_ref()
+            .is_some_and(|c| c.poll_due(self.now, CONSOLE_POLL));
+        if connected && self.view == View::Console && due {
+            self.fetch_console()
+        } else {
+            Vec::new()
+        }
+    }
+
     /// Start a fetch of what's on screen when auto-refresh is on, we're
     /// connected, nothing is in flight and the last attempt is at least one
     /// interval old.
@@ -782,6 +938,8 @@ impl App {
             last.is_none_or(|last| self.now.saturating_duration_since(last) >= interval)
         };
         match (&self.view, &self.build) {
+            // Tailed separately (see `console_poll_if_due`).
+            (View::Console, _) => Vec::new(),
             (View::Build, Some(build)) => {
                 if !build.fetch_in_flight() && due(build.attempted_at) {
                     return self.fetch_build();
@@ -796,6 +954,9 @@ impl App {
     /// `r`: reload what's on screen when connected; otherwise (re)connect.
     fn refresh(&mut self) -> Vec<Effect> {
         match self.connection {
+            ConnectionStatus::Connected { .. } if self.view == View::Console => {
+                self.fetch_console()
+            }
             ConnectionStatus::Connected { .. } if self.view == View::Build => self.fetch_build(),
             ConnectionStatus::Connected { .. } => self.fetch_jobs(),
             ConnectionStatus::Connecting { .. } => Vec::new(),
@@ -916,6 +1077,10 @@ impl App {
             Context::Build => {
                 self.view = View::Jobs;
                 self.build = None;
+            }
+            Context::Console => {
+                self.view = View::Build;
+                self.console = None;
             }
             Context::Settings => {
                 self.view = View::Jobs;
@@ -2117,6 +2282,150 @@ mod tests {
         assert_eq!(
             app.settings.file.get(SettingKey::ConfirmQuit),
             Some("false")
+        );
+    }
+
+    use crate::console::ConsoleChunk;
+
+    fn console_fetch(effects: &[Effect]) -> Option<(u64, u64)> {
+        effects.iter().find_map(|e| match e {
+            Effect::FetchConsole { number, start, .. } => Some((*number, *start)),
+            _ => None,
+        })
+    }
+
+    fn chunk_arrives(app: &mut App, start: u64, text: &str, more: bool) {
+        let generation = app.connection_generation;
+        let number = app.console.as_ref().unwrap().number;
+        app.update(Action::ConsoleFetched {
+            generation,
+            job: "a".into(),
+            number,
+            start,
+            result: Ok(ConsoleChunk {
+                bytes: text.as_bytes().to_vec(),
+                next: start + text.len() as u64,
+                more,
+            }),
+        });
+    }
+
+    #[test]
+    fn c_opens_the_console_of_the_shown_build() {
+        let mut app = app_on_latest_build(); // #8
+        let effects = app.update(Action::OpenConsole);
+        assert_eq!(console_fetch(&effects), Some((8, 0)));
+        assert_eq!(app.view, View::Console);
+        assert_eq!(app.context(), Context::Console);
+        assert_eq!(app.view.tab(), Some(Tab::Jobs));
+        chunk_arrives(&mut app, 0, "line 1\nline 2\n", false);
+        let console = app.console.as_ref().unwrap();
+        assert_eq!(console.load, ConsoleLoad::Loaded);
+        assert_eq!(console.line_count(), 2);
+        // Esc: back to the build.
+        app.update(Action::Back);
+        assert_eq!(app.view, View::Build);
+        assert!(app.console.is_none());
+    }
+
+    #[test]
+    fn no_console_without_a_loaded_build() {
+        let mut app = connected_with_jobs(&["a"]);
+        app.update(Action::OpenBuild); // still loading
+        assert_eq!(app.update(Action::OpenConsole), Vec::new());
+        assert_eq!(app.view, View::Build);
+    }
+
+    #[test]
+    fn running_build_output_is_tailed_every_second() {
+        let mut app = app_on_latest_build();
+        app.update(Action::OpenConsole);
+        assert_eq!(
+            tick(&mut app, Duration::from_secs(5)),
+            Vec::new(),
+            "first fetch in flight"
+        );
+        chunk_arrives(&mut app, 0, "a\n", true);
+        assert_eq!(
+            tick(&mut app, Duration::from_millis(500)),
+            Vec::new(),
+            "not due"
+        );
+        let effects = tick(&mut app, Duration::from_millis(500));
+        assert_eq!(
+            console_fetch(&effects),
+            Some((8, 2)),
+            "continues at the offset"
+        );
+        assert_eq!(app.update(Action::Refresh), Vec::new(), "one in flight");
+        chunk_arrives(&mut app, 2, "b\n", false);
+        assert_eq!(app.console.as_ref().unwrap().line_count(), 2);
+        assert_eq!(
+            tick(&mut app, Duration::from_secs(60)),
+            Vec::new(),
+            "complete: polling stops"
+        );
+    }
+
+    #[test]
+    fn tailing_ignores_auto_refresh_setting() {
+        let mut app = app_on_latest_build();
+        app.auto_refresh = false;
+        app.update(Action::OpenConsole);
+        chunk_arrives(&mut app, 0, "a\n", true);
+        assert!(console_fetch(&tick(&mut app, Duration::from_secs(1))).is_some());
+    }
+
+    #[test]
+    fn stale_or_duplicate_chunks_are_ignored() {
+        let mut app = app_on_latest_build();
+        app.update(Action::OpenConsole);
+        chunk_arrives(&mut app, 0, "a\n", true);
+        chunk_arrives(&mut app, 0, "a\n", true); // same chunk again
+        assert_eq!(app.console.as_ref().unwrap().line_count(), 1);
+    }
+
+    #[test]
+    fn poll_errors_keep_the_output() {
+        let mut app = app_on_latest_build();
+        app.update(Action::OpenConsole);
+        chunk_arrives(&mut app, 0, "a\n", true);
+        tick(&mut app, Duration::from_secs(1));
+        let generation = app.connection_generation;
+        app.update(Action::ConsoleFetched {
+            generation,
+            job: "a".into(),
+            number: 8,
+            start: 2,
+            result: Err("timed out".into()),
+        });
+        let console = app.console.as_ref().unwrap();
+        assert_eq!(console.load, ConsoleLoad::Loaded);
+        assert_eq!(console.last_error.as_deref(), Some("timed out"));
+        assert_eq!(console.line_count(), 1);
+    }
+
+    #[test]
+    fn console_scroll_actions() {
+        let mut app = app_on_latest_build();
+        app.update(Action::OpenConsole);
+        let text: String = (0..50).map(|i| format!("{i}\n")).collect();
+        chunk_arrives(&mut app, 0, &text, true);
+        app.console.as_ref().unwrap().viewport.set(10);
+        app.update(Action::SelectPrev);
+        assert!(!app.console.as_ref().unwrap().following);
+        app.update(Action::SelectFirst);
+        assert_eq!(app.console.as_ref().unwrap().visible_top(), 0);
+        app.update(Action::SelectPageDown);
+        assert_eq!(app.console.as_ref().unwrap().visible_top(), 10);
+        app.update(Action::SelectLast);
+        assert!(app.console.as_ref().unwrap().following);
+        app.update(Action::ScrollRight);
+        app.update(Action::ScrollRight);
+        app.update(Action::ScrollLeft);
+        assert_eq!(
+            app.console.as_ref().unwrap().left,
+            crate::console::HSCROLL_STEP
         );
     }
 }

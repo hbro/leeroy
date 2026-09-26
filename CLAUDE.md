@@ -25,6 +25,11 @@ Elm-style: pure core, thin IO shell.
   are built from the job's full name (`job/a/job/b/lastBuild/…`) against the
   configured URL, never from Jenkins' `url` field (may be an internal address
   behind a reverse proxy). 404 on lastBuild = never built (`Ok(None)`).
+- `src/console.rs` — console output: `ConsoleView` buffer fed by
+  `logText/progressiveText?start=<byte>` chunks (`X-Text-Size` = next offset,
+  `X-More-Data` = still running), UTF-8 carried across chunk boundaries, lines
+  cleaned (ANSI/control chars stripped, text after the last `\r`, tabs), capped at
+  `MAX_LINES`. Follow = pinned to the bottom; scrolling up pauses, `End` resumes.
 - `src/config.rs` — config file location, load/save, env var overrides. Takes the
   environment as a parameter (never reads `std::env` itself) so it's testable.
 - `src/event.rs` — `map_key(&App, KeyEvent) -> Option<Action>`.
@@ -56,6 +61,12 @@ Rules:
   also matched on `which`, so quick steps ignore builds left behind; `r`/auto-refresh re-fetch what's on screen (build
   view: the build, not the job list) under the same one-in-flight rule. Results
   are tagged with connection generation + job name; mismatches are ignored.
+- Console view (`View::Console`, under the build view): `c` toggles it (opens it
+  from the build view, `c`/`Esc` go back) for the
+  shown build's *number*. Polled every `CONSOLE_POLL` (1s) while shown and the
+  build runs, regardless of auto-refresh; one fetch in flight; chunks are matched
+  on job + number + start offset (duplicates never appended). Only visible lines
+  are rendered; the renderer records the viewport height for paging.
 - Jobs: fetched after each successful connect and on `r`, tagged with the
   connection generation (stale results ignored; list cleared on reconnect). A
   reload keeps the old list visible (`refreshing`) and restores the selection by
@@ -150,7 +161,8 @@ Run all three layers for UI changes; layer 1 is mandatory for every change.
    Fake Jenkins for connection tests: `scripts/fake-jenkins.py [--port 8099]
    [--auth USER:TOKEN] [--delay SECS] [--status CODE] [--tls] [--jobs N] [--churn]`
    (job tree with folders/multibranch/all statuses; `lastBuild` per job: 404 for
-   never built, running builds progress in real time; `--churn` changes a status
+   never built, running builds progress in real time and their console log grows
+   a line every 0.3s (ANSI, `\r`, UTF-8, long lines); `--churn` changes a status
    per request to watch auto-refresh).
    Run it in the background with its own process group; don't `pkill -f` it (the
    pattern can match unrelated shells).

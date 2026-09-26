@@ -39,11 +39,20 @@ pub fn context_bindings(context: Context) -> &'static [Binding] {
         bind("/", "filter"),
         bind("Esc", "clear filter"),
     ];
+    // Ordered by importance: at 80 columns the last one may be cut off.
     const BUILD: &[Binding] = &[
         bind("←/→", "older/newer"),
         bind("Home/End", "first/last"),
-        bind("↑/↓", "scroll"),
+        bind("c", "console"),
         bind("Esc", "back"),
+        bind("↑/↓", "scroll"),
+    ];
+    const CONSOLE: &[Binding] = &[
+        bind("↑/↓", "line"),
+        bind("PgUp/PgDn", "page"),
+        bind("Home/End", "top/bottom"),
+        bind("c/Esc", "back"),
+        bind("←/→", "sideways"),
     ];
     const JOBS_FILTER: &[Binding] = &[
         bind("Enter", "apply"),
@@ -71,6 +80,7 @@ pub fn context_bindings(context: Context) -> &'static [Binding] {
         Context::JobsFiltered => JOBS_FILTERED,
         Context::JobsFilter => JOBS_FILTER,
         Context::Build => BUILD,
+        Context::Console => CONSOLE,
         Context::Settings => SETTINGS,
         Context::EditSetting => EDIT,
         Context::Help => HELP,
@@ -167,6 +177,20 @@ pub fn map_key(app: &App, key: KeyEvent) -> Option<Action> {
             KeyCode::PageUp => Some(Action::SelectPageUp),
             KeyCode::Char('g') => Some(Action::SelectFirst),
             KeyCode::Char('G') => Some(Action::SelectLast),
+            KeyCode::Char('c') => Some(Action::OpenConsole),
+            _ => None,
+        },
+        (Context::Console, code) => match code {
+            KeyCode::Down | KeyCode::Char('j') => Some(Action::SelectNext),
+            KeyCode::Up | KeyCode::Char('k') => Some(Action::SelectPrev),
+            KeyCode::PageDown => Some(Action::SelectPageDown),
+            KeyCode::PageUp => Some(Action::SelectPageUp),
+            KeyCode::Home | KeyCode::Char('g') => Some(Action::SelectFirst),
+            KeyCode::End | KeyCode::Char('G') => Some(Action::SelectLast),
+            KeyCode::Left => Some(Action::ScrollLeft),
+            KeyCode::Right => Some(Action::ScrollRight),
+            // c toggles: it opened the console from the build view.
+            KeyCode::Char('c') => Some(Action::Back),
             _ => None,
         },
         _ => None,
@@ -178,12 +202,13 @@ mod tests {
     use super::*;
     use crate::app::View;
 
-    const ALL_CONTEXTS: [Context; 8] = [
+    const ALL_CONTEXTS: [Context; 9] = [
         Context::ConfirmQuit,
         Context::Jobs,
         Context::JobsFiltered,
         Context::JobsFilter,
         Context::Build,
+        Context::Console,
         Context::Settings,
         Context::EditSetting,
         Context::Help,
@@ -207,6 +232,10 @@ mod tests {
             Context::Build => {
                 app.view = View::Build;
                 app.build = Some(crate::builds::BuildView::new("job".into()));
+            }
+            Context::Console => {
+                app.view = View::Console;
+                app.console = Some(crate::console::ConsoleView::new("job".into(), 1));
             }
             Context::Settings => app.view = View::Settings,
             Context::EditSetting => {
@@ -237,6 +266,8 @@ mod tests {
                 "y" => key(KeyCode::Char('y')),
                 "n" => key(KeyCode::Char('n')),
                 "End" => key(KeyCode::End),
+                "PgUp" => key(KeyCode::PageUp),
+                "PgDn" => key(KeyCode::PageDown),
                 s if s.starts_with("C-") && s.chars().count() == 3 => {
                     ctrl(s.chars().nth(2).unwrap())
                 }
@@ -315,6 +346,29 @@ mod tests {
         assert_eq!(map_key(&app, key(KeyCode::Esc)), None, "nothing to clear");
         let filtered = app_in(Context::JobsFiltered);
         assert_eq!(map_key(&filtered, key(KeyCode::Esc)), Some(Action::Back));
+    }
+
+    #[test]
+    fn console_keys() {
+        let app = app_in(Context::Console);
+        for (code, action) in [
+            (KeyCode::Down, Action::SelectNext),
+            (KeyCode::Up, Action::SelectPrev),
+            (KeyCode::PageDown, Action::SelectPageDown),
+            (KeyCode::PageUp, Action::SelectPageUp),
+            (KeyCode::Home, Action::SelectFirst),
+            (KeyCode::End, Action::SelectLast),
+            (KeyCode::Left, Action::ScrollLeft),
+            (KeyCode::Right, Action::ScrollRight),
+            (KeyCode::Esc, Action::Back),
+            (KeyCode::Char('c'), Action::Back),
+        ] {
+            assert_eq!(map_key(&app, key(code)), Some(action), "{code:?}");
+        }
+        assert_eq!(
+            map_key(&app_in(Context::Build), key(KeyCode::Char('c'))),
+            Some(Action::OpenConsole)
+        );
     }
 
     #[test]

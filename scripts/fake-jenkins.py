@@ -10,6 +10,8 @@ Serves (under any path prefix, with an X-Jenkins header):
   GET /job/../api/json             the job: allBuilds (numbers, with gaps) + lastBuild
   GET /job/../<n>/api/json         build n (404 if it doesn't exist)
   GET /job/../lastBuild/api/json   the job's last build (404 if never built)
+  GET /job/../<n>/logText/progressiveText?start=B   console output from byte B;
+      a running build's log grows by a line every 0.3s (X-More-Data: true)
 --auth      require HTTP basic auth, 401 otherwise; the user is echoed back
 --delay     sleep before answering (to see "connecting" / "refreshing")
 --status    always answer with this HTTP status
@@ -159,6 +161,38 @@ def build(full_name: str, color: str, number: int):
     return data
 
 
+def console_line(i: int) -> str:
+    """Line i of a fake log: ANSI colours, \r progress bars, tabs, UTF-8."""
+    kind = i % 10
+    if kind == 0:
+        return f"\x1b[1m[Pipeline] stage\x1b[0m {{ (Stage {i // 10}) }}"
+    if kind == 3:
+        return f"Downloading artifact-{i}.jar 10%\r50%\r100% ✓"
+    if kind == 5:
+        return f"\x1b[32m[INFO]\x1b[0m\tTests run: {i}, Failures: 0 — ümlaut ok"
+    if kind == 7:
+        return f"+ ./gradlew build --info -Pversion=1.{i} " + "-Dlong.option=value " * 8
+    return f"[step {i:05}] doing work…"
+
+
+def console_text(full_name: str, color: str, number: int):
+    """(log bytes, still running) for a build, or None if it doesn't exist."""
+    data = build(full_name, color, number)
+    if data is None:
+        return None
+    running = data["building"]
+    if running:
+        # Grows over time: base lines + one per 0.3 s since the server started.
+        count = 20 + int((time.time() * 1000 - SERVER_START_MS) / 300)
+    else:
+        count = 150 + number % 50
+    lines = ["Started by user Hans", "Running in Durability level: MAX_SURVIVABILITY"]
+    lines += [console_line(i) for i in range(count)]
+    if not running:
+        lines.append(f"Finished: {data['result']}")
+    return ("\n".join(lines) + "\n").encode(), running
+
+
 def last_build(full_name: str, color: str):
     numbers = build_numbers(full_name, color)
     return build(full_name, color, numbers[-1]) if numbers else None
@@ -248,7 +282,7 @@ def main() -> None:
                 return self.reply(
                     200, {"name": user, "authenticated": user != "anonymous"}
                 )
-            if "/job/" in path and path.endswith("/api/json"):
+            if "/job/" in path:
                 parts = path.split("/")
                 names = [
                     unquote(parts[i + 1])
@@ -261,7 +295,9 @@ def main() -> None:
                     return self.reply(404, {"error": "no such job"})
                 # What follows the last /job/<name>/: "", "lastBuild" or a number.
                 last_job = max(i for i, p in enumerate(parts[:-1]) if p == "job") + 1
-                tail = parts[last_job + 1 : -2]
+                tail = parts[last_job + 1 :]
+                if tail[-2:] == ["api", "json"]:
+                    tail = tail[:-2]
                 if not tail:
                     numbers = build_numbers(full_name, color)
                     return self.reply(
@@ -270,6 +306,27 @@ def main() -> None:
                             "allBuilds": [{"number": n} for n in reversed(numbers)],
                             "lastBuild": last_build(full_name, color),
                         },
+                    )
+                if (
+                    len(tail) == 3
+                    and tail[0].isdigit()
+                    and tail[1:]
+                    == [
+                        "logText",
+                        "progressiveText",
+                    ]
+                ):
+                    log = console_text(full_name, color, int(tail[0]))
+                    if log is None:
+                        return self.reply(404, {"error": "no such build"})
+                    text, running = log
+                    query = self.path.split("?", 1)[1] if "?" in self.path else ""
+                    params = dict(p.split("=", 1) for p in query.split("&") if "=" in p)
+                    start = min(int(params.get("start", "0")), len(text))
+                    return self.reply_bytes(
+                        text[start:],
+                        {"X-Text-Size": str(len(text))}
+                        | ({"X-More-Data": "true"} if running else {}),
                     )
                 if tail == ["lastBuild"]:
                     data = last_build(full_name, color)
@@ -285,6 +342,16 @@ def main() -> None:
                 step = job_requests[0] if args.churn else 0
                 return self.reply(200, job_tree(args.jobs, step))
             self.reply(404, {"error": "not found"})
+
+        def reply_bytes(self, body: bytes, headers: dict) -> None:
+            self.send_response(200)
+            self.send_header("X-Jenkins", VERSION)
+            self.send_header("Content-Type", "text/plain;charset=UTF-8")
+            for name, value in headers.items():
+                self.send_header(name, value)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
 
         def reply(self, status: int, body: dict) -> None:
             data = json.dumps(body).encode()

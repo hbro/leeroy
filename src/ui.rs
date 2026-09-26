@@ -4,8 +4,8 @@ use ratatui::{
     style::{Color, Modifier, Style, Stylize},
     text::{Line, Span},
     widgets::{
-        Block, BorderType, Borders, Cell, Clear, HighlightSpacing, Paragraph, Row, Table,
-        TableState, Wrap,
+        Block, BorderType, Borders, Cell, Clear, HighlightSpacing, Paragraph, Row, Scrollbar,
+        ScrollbarOrientation, ScrollbarState, Table, TableState, Wrap,
     },
 };
 
@@ -13,6 +13,7 @@ use crate::{
     app::{App, ConnectionStatus, SettingsRow, SettingsState, StatusMessage, Tab, View},
     builds::{Build, BuildLoad, BuildRef, format_duration},
     config::{DEFAULT_REFRESH_SECS, HEADERS_DOC, SettingKey, header_env_var, redact_url},
+    console::ConsoleLoad,
     event::{Binding, GLOBAL_BINDINGS, context_bindings},
     jobs::{JobStatus, JobsLoad},
     proxy::SystemProxy,
@@ -35,6 +36,7 @@ pub fn render(frame: &mut Frame, app: &App) {
     match app.view {
         View::Jobs => render_jobs(frame, body, app),
         View::Build => render_build(frame, body, app),
+        View::Console => render_console(frame, body, app),
         View::Settings => render_settings(frame, body, &app.settings),
     }
     render_context_bar(frame, context_bar, app);
@@ -406,6 +408,80 @@ fn render_build(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(lines).scroll((scroll, 0)), inner);
 }
 
+fn render_console(frame: &mut Frame, area: Rect, app: &App) {
+    let Some(console) = &app.console else {
+        return;
+    };
+    let hint = Style::new().dark_gray();
+    let mut title = format!("{} · #{} · console", console.job, console.number);
+    match console.load {
+        ConsoleLoad::Loaded if console.more && console.following => {
+            title.push_str(" · ⟳ following")
+        }
+        ConsoleLoad::Loaded if console.more => title.push_str(" · paused (End to follow)"),
+        ConsoleLoad::Loaded => title.push_str(" · complete"),
+        _ => {}
+    }
+    if console.dropped > 0 {
+        title.push_str(&format!(" · last {} lines", crate::console::MAX_LINES));
+    }
+    let block = view_block(&title);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let message = |lines: Vec<Line<'static>>| {
+        Paragraph::new(lines)
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: true })
+    };
+    match &console.load {
+        ConsoleLoad::Loading => {
+            let lines = vec![
+                Line::raw(""),
+                Line::styled("Loading console output…", Style::new().italic()),
+            ];
+            return frame.render_widget(message(lines), inner);
+        }
+        ConsoleLoad::Failed(error) => {
+            let lines = vec![
+                Line::raw(""),
+                Line::styled("Could not load the console output", Style::new().italic()),
+                Line::styled(error.clone(), Style::new().red()),
+                Line::styled("Press r to retry, Esc to go back", hint),
+            ];
+            return frame.render_widget(message(lines), inner);
+        }
+        ConsoleLoad::Loaded if console.line_count() == 0 => {
+            let lines = vec![
+                Line::raw(""),
+                Line::styled("No output yet", Style::new().italic()),
+            ];
+            return frame.render_widget(message(lines), inner);
+        }
+        ConsoleLoad::Loaded => {}
+    }
+
+    // Leave a column for the scrollbar.
+    let [text_area, bar_area] =
+        Layout::horizontal([Constraint::Min(0), Constraint::Length(1)]).areas(inner);
+    console.viewport.set(text_area.height);
+    let top = console.visible_top();
+    let visible: Vec<Line> = (top..top + usize::from(text_area.height))
+        .filter_map(|i| console.line(i))
+        .map(|line| Line::raw(line.chars().skip(console.left).collect::<String>()))
+        .collect();
+    frame.render_widget(Paragraph::new(visible), text_area);
+
+    let mut scrollbar = ScrollbarState::new(console.max_top() + 1).position(top);
+    frame.render_stateful_widget(
+        Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(None)
+            .end_symbol(None),
+        bar_area,
+        &mut scrollbar,
+    );
+}
+
 fn result_span(build: &Build) -> Span<'static> {
     if build.building {
         return Span::styled("⟳ running", Style::new().yellow().bold());
@@ -668,6 +744,14 @@ fn refresh_status(app: &App) -> Line<'static> {
     let mut spans = vec![Span::raw(" "), Span::styled("⟳", icon)];
     // The data on screen: the open build, or the job list.
     let (busy, fetched_at, failed) = match (&app.view, &app.build) {
+        (View::Console, _) if app.console.is_some() => {
+            let console = app.console.as_ref().expect("checked");
+            (
+                console.in_flight,
+                console.fetched_at,
+                console.last_error.is_some() || matches!(console.load, ConsoleLoad::Failed(_)),
+            )
+        }
         (View::Build, Some(build)) => (
             build.fetch_in_flight(),
             build.fetched_at,

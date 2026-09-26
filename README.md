@@ -187,9 +187,28 @@ a running build updates live), and the header's `⟳` age refers to it.
 | --- | --- |
 | `←` / `→` | older / newer build (deleted builds are skipped) |
 | `Home` / `End` | first (oldest kept) / latest build |
+| `c` | console output of this build |
 | `↑/↓` `PgUp/PgDn` `g/G` | scroll |
 | `Esc` | back to the list |
 
 The title shows which build you're on (`#42 · 17 of 20`, counted from the
 oldest). On the latest build, refreshing follows new builds as they start; an
 older build stays put.
+
+### Console output
+
+`c` in the build view opens the build's console output, scrolled to the end.
+While the build runs, new output is fetched every second (only the new part)
+and followed at the bottom. Scrolling up pauses following (the title says so);
+`End` resumes it.
+
+| Key | Action |
+| --- | --- |
+| `↑/↓` `j/k` | one line |
+| `PgUp/PgDn` | one page |
+| `Home` / `End` | top / bottom (`End` = follow again) |
+| `←/→` | scroll long lines sideways |
+| `c` / `Esc` | back to the build (`c` toggles the console) |
+
+Colour codes are removed, `\r` progress bars show their final state, and at
+most the last 100 000 lines are kept.

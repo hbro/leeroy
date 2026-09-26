@@ -11,6 +11,7 @@
 pub mod app;
 pub mod builds;
 pub mod config;
+pub mod console;
 pub mod event;
 pub mod input;
 pub mod jenkins;

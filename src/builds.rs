@@ -53,10 +53,7 @@ pub enum BuildRef {
 /// URL uses Jenkins' configured root, which behind a reverse proxy can be an
 /// internal address the user can't (or shouldn't) reach directly.
 pub fn build_path(full_name: &str, which: BuildRef) -> String {
-    let job_path: String = full_name
-        .split('/')
-        .map(|segment| format!("job/{}/", encode_segment(segment)))
-        .collect();
+    let job_path = job_path(full_name);
     match which {
         // `allBuilds` has every number; `builds` is the fallback where it's
         // not exported (and may be capped to recent ones).
@@ -116,6 +113,14 @@ pub fn parse_job_builds(json: &str) -> Result<BuildPage, String> {
         build,
         numbers: Some(numbers),
     })
+}
+
+/// `job/<a>/job/<b>/` for full name `a/b`, segments percent-encoded.
+pub fn job_path(full_name: &str) -> String {
+    full_name
+        .split('/')
+        .map(|segment| format!("job/{}/", encode_segment(segment)))
+        .collect()
 }
 
 /// Percent-encode one path segment (job names may contain spaces, `#`, ...).

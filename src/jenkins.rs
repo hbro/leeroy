@@ -7,6 +7,7 @@ use serde::Deserialize;
 use crate::{
     builds::{self, BuildPage, BuildRef},
     config::redact_url,
+    console::{self, ConsoleChunk},
     jobs::{self, Job},
 };
 
@@ -102,6 +103,35 @@ pub async fn fetch_jobs(config: &ConnectionConfig) -> Result<Vec<Job>, String> {
     jobs::parse_jobs(&response.body)
 }
 
+/// Console output of build `number` of a job, from byte offset `start`.
+pub async fn fetch_console(
+    config: &ConnectionConfig,
+    full_name: &str,
+    number: u64,
+    start: u64,
+) -> Result<ConsoleChunk, String> {
+    let path = console::console_path(full_name, number, start);
+    let response = get(config, &path, true)
+        .await?
+        .ok_or_else(|| format!("build #{number} no longer exists"))?;
+    let header = |name: &str| {
+        response
+            .headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned)
+    };
+    // Without X-Text-Size, assume everything up to what we got.
+    let next = header("X-Text-Size")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(start + response.bytes.len() as u64);
+    Ok(ConsoleChunk {
+        more: header("X-More-Data").is_some_and(|v| v.eq_ignore_ascii_case("true")),
+        next,
+        bytes: response.bytes,
+    })
+}
+
 /// `which` build of a job. For [`BuildRef::Latest`] this also returns the
 /// job's build numbers; a never-built job gives `build: None`. For a number,
 /// `build: None` means that build doesn't exist (deleted).
@@ -126,7 +156,11 @@ pub async fn fetch_build(
 }
 
 struct Response {
+    /// Body as text (lossy UTF-8), for JSON.
     body: String,
+    /// Raw body, for console output (decoded by the caller across chunks).
+    bytes: Vec<u8>,
+    headers: reqwest::header::HeaderMap,
     /// From the `X-Jenkins` header.
     version: Option<String>,
 }
@@ -190,8 +224,14 @@ async fn get(
     if !status.is_success() {
         return Err(format!("unexpected response: HTTP {status}"));
     }
-    let body = response.text().await.map_err(describe)?;
-    Ok(Some(Response { body, version }))
+    let headers = response.headers().clone();
+    let bytes = response.bytes().await.map_err(describe)?.to_vec();
+    Ok(Some(Response {
+        body: String::from_utf8_lossy(&bytes).into_owned(),
+        bytes,
+        headers,
+        version,
+    }))
 }
 
 /// Explain a 401/403: who refused, and whether a redirect dropped our headers.
@@ -525,6 +565,49 @@ mod tests {
         // A job that's gone is an error.
         assert!(
             fetch_build(&config, "gone", BuildRef::Latest)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn fetches_console_chunks() {
+        let server = MockServer::start().await;
+        Mock::given(path("/job/team/job/svc/7/logText/progressiveText"))
+            .and(wiremock::matchers::query_param("start", "10"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("X-Text-Size", "25")
+                    .insert_header("X-More-Data", "true")
+                    .set_body_bytes(&b"more output\n\xc3"[..]),
+            )
+            .mount(&server)
+            .await;
+        let chunk = fetch_console(&config(&server.uri()), "team/svc", 7, 10)
+            .await
+            .unwrap();
+        assert_eq!(chunk.next, 25);
+        assert!(chunk.more);
+        assert_eq!(
+            chunk.bytes, b"more output\n\xc3",
+            "raw bytes, not lossy text"
+        );
+
+        // Finished build: no X-More-Data.
+        Mock::given(path("/job/done/1/logText/progressiveText"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("X-Text-Size", "3")
+                    .set_body_string("ok\n"),
+            )
+            .mount(&server)
+            .await;
+        let chunk = fetch_console(&config(&server.uri()), "done", 1, 0)
+            .await
+            .unwrap();
+        assert!(!chunk.more);
+        assert!(
+            fetch_console(&config(&server.uri()), "gone", 1, 0)
                 .await
                 .is_err()
         );

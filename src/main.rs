@@ -98,6 +98,7 @@ async fn run(mut terminal: DefaultTerminal, mut app: App) -> Result<()> {
         connect_task: None,
         fetch_task: None,
         build_task: None,
+        console_task: None,
     };
     for effect in app.start() {
         executor.run(effect);
@@ -141,6 +142,8 @@ struct Executor {
     fetch_task: Option<AbortHandle>,
     /// The in-flight build fetch, aborted when one for another job starts.
     build_task: Option<AbortHandle>,
+    /// The in-flight console fetch, aborted when another starts.
+    console_task: Option<AbortHandle>,
 }
 
 impl Executor {
@@ -187,6 +190,36 @@ impl Executor {
                     let _ = tx.send(Action::JobsFetched { generation, result });
                 });
                 self.fetch_task = Some(task.abort_handle());
+            }
+            Effect::FetchConsole {
+                generation,
+                job,
+                number,
+                start,
+                config,
+            } => {
+                if let Some(previous) = self.console_task.take() {
+                    previous.abort();
+                }
+                let tx = tx.clone();
+                let task = tokio::spawn(async move {
+                    let result = jenkins::fetch_console(&config, &job, number, start).await;
+                    match &result {
+                        Ok(chunk) => tracing::debug!(
+                            %job, number, start, bytes = chunk.bytes.len(), more = chunk.more,
+                            "fetched console"
+                        ),
+                        Err(err) => tracing::warn!(%job, number, %err, "fetching console failed"),
+                    }
+                    let _ = tx.send(Action::ConsoleFetched {
+                        generation,
+                        job,
+                        number,
+                        start,
+                        result,
+                    });
+                });
+                self.console_task = Some(task.abort_handle());
             }
             Effect::FetchBuild {
                 generation,
