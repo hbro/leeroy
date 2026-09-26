@@ -2,7 +2,7 @@
 source: tests/render.rs
 expression: "render_after(&[]).backend()"
 ---
-" leeroy  Jenkins TUI                                                            "
+" Leeroy  ○ not connected                                                        "
 "╭ Jobs ────────────────────────────────────────────────────────────────────────╮"
 "│                                                                              │"
 "│                        No Jenkins instance configured                        │"
@@ -23,6 +23,6 @@ expression: "render_after(&[]).backend()"
 "│                                                                              │"
 "│                                                                              │"
 "│                                                                              │"
-"│                                                                              │"
 "╰──────────────────────────────────────────────────────────────────────────────╯"
-" q / Esc  quit   ?  toggle help                                                 "
+" Jobs                                                                           "
+" q  quit   ?  help                                                              "

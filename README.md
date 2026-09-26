@@ -1,2 +1,2 @@
-# leeroy
+# Leeroy
 Jenkins TUI

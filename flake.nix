@@ -1,5 +1,5 @@
 {
-  description = "leeroy - a TUI for Jenkins";
+  description = "Leeroy - a TUI for Jenkins";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";

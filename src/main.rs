@@ -19,7 +19,7 @@ const TICK_RATE: Duration = Duration::from_millis(250);
 async fn main() -> Result<()> {
     color_eyre::install()?;
     let _log_guard = init_logging()?;
-    tracing::info!("starting leeroy");
+    tracing::info!("starting Leeroy");
 
     // ratatui::init enters raw mode + alternate screen and installs a panic
     // hook that restores the terminal before the panic message is printed.

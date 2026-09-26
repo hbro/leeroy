@@ -1,4 +1,4 @@
-# leeroy
+# Leeroy
 
 Terminal UI for Jenkins, written in Rust (ratatui 0.30 + crossterm 0.29 + tokio).
 
@@ -22,6 +22,16 @@ Elm-style: pure core, thin IO shell.
 
 Rules:
 - New behaviour = new `Action` variant + `update` arm + tests.
+- Header: app name + connected Jenkins instance (`App::connection`).
+- Bottom of screen = two bars. Global bar (last line): app-wide commands
+  (`GLOBAL_BINDINGS`). Context bar above it: keys of
+  whatever has focus, from `context_bindings(App::context())`. A new view or overlay
+  = new `View`/`Context` variant, its bindings in `event.rs`, handled in `map_key`.
+  Test `advertised_bindings_are_mapped` fails if a shown key does nothing.
+- `Esc` = `Action::Back`: closes the current context (popup, sub-view) and is
+  only mapped where `Context::closable()`. It must never quit the app.
+- "Leeroy" is capitalized in all prose/UI text; only the crate/binary name,
+  paths, env vars and tmux ids stay lowercase `leeroy`.
 - Import crossterm types via `ratatui::crossterm` (EventStream is the exception:
   it needs the direct `crossterm` dep for the `event-stream` feature; both are the
   same crate version — keep them in sync when upgrading ratatui).
@@ -44,7 +54,7 @@ Run all three layers for UI changes; layer 1 is mandatory for every change.
 2. **Real binary in tmux** (interactive, real terminal) — `scripts/tui.sh`
    ```sh
    scripts/tui.sh start [100x30]
-   scripts/tui.sh wait-for "Jenkins TUI"
+   scripts/tui.sh wait-for "Leeroy"
    scripts/tui.sh keys '?'        # tmux key names: Escape Enter Up Down Tab C-c ...
    scripts/tui.sh capture         # --ansi to include color escape codes
    scripts/tui.sh status          # running | exited (<code>) | stopped

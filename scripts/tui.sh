@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Drive the real leeroy binary inside a detached tmux session.
+# Drive the real Leeroy binary inside a detached tmux session.
 # Uses a private tmux server socket, so it never touches your own tmux.
 #
 #   scripts/tui.sh start [WxH] [-- args...]  build + launch (default 100x30)
@@ -16,7 +16,7 @@ cd "$(dirname "$0")/.."
 SOCKET=leeroy-agent
 SESSION=leeroy
 BIN=target/debug/leeroy
-EXIT_MARKER="[leeroy exited:"
+EXIT_MARKER="[Leeroy exited:"
 tm() { tmux -L "$SOCKET" "$@"; }
 
 cargo_() {

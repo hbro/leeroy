@@ -7,13 +7,64 @@
 pub enum Action {
     Quit,
     ToggleHelp,
+    /// Close the current context (overlay, sub-view). No-op at the root view.
+    Back,
     Tick,
+}
+
+/// The main view being displayed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum View {
+    Jobs,
+}
+
+impl View {
+    /// The context this view provides when nothing is overlaid on it.
+    pub fn context(self) -> Context {
+        match self {
+            View::Jobs => Context::Jobs,
+        }
+    }
+}
+
+/// What currently has focus: decides which context keybindings apply and
+/// what the context bar shows. Overlays take precedence over the view below.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Context {
+    Jobs,
+    Help,
+}
+
+impl Context {
+    pub fn title(self) -> &'static str {
+        match self {
+            Context::Jobs => "Jobs",
+            Context::Help => "Help",
+        }
+    }
+
+    /// Whether [`Action::Back`] can close this context.
+    pub fn closable(self) -> bool {
+        match self {
+            Context::Jobs => false,
+            Context::Help => true,
+        }
+    }
+}
+
+/// Connection to the Jenkins instance, shown in the header.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConnectionStatus {
+    NotConfigured,
+    Connected { url: String },
 }
 
 #[derive(Debug)]
 pub struct App {
     pub running: bool,
+    pub view: View,
     pub show_help: bool,
+    pub connection: ConnectionStatus,
 }
 
 impl Default for App {
@@ -26,7 +77,17 @@ impl App {
     pub fn new() -> Self {
         Self {
             running: true,
+            view: View::Jobs,
             show_help: false,
+            connection: ConnectionStatus::NotConfigured,
+        }
+    }
+
+    pub fn context(&self) -> Context {
+        if self.show_help {
+            Context::Help
+        } else {
+            self.view.context()
         }
     }
 
@@ -35,6 +96,11 @@ impl App {
         match action {
             Action::Quit => self.running = false,
             Action::ToggleHelp => self.show_help = !self.show_help,
+            Action::Back => {
+                if self.show_help {
+                    self.show_help = false;
+                }
+            }
             Action::Tick => {}
         }
     }
@@ -58,5 +124,30 @@ mod tests {
         assert!(app.show_help);
         app.update(Action::ToggleHelp);
         assert!(!app.show_help);
+    }
+
+    #[test]
+    fn back_closes_help() {
+        let mut app = App::new();
+        app.update(Action::ToggleHelp);
+        app.update(Action::Back);
+        assert!(!app.show_help);
+        assert_eq!(app.context(), Context::Jobs);
+    }
+
+    #[test]
+    fn back_at_root_keeps_running() {
+        let mut app = App::new();
+        app.update(Action::Back);
+        assert!(app.running);
+        assert_eq!(app.context(), Context::Jobs);
+    }
+
+    #[test]
+    fn help_overlay_takes_context() {
+        let mut app = App::new();
+        assert_eq!(app.context(), Context::Jobs);
+        app.update(Action::ToggleHelp);
+        assert_eq!(app.context(), Context::Help);
     }
 }

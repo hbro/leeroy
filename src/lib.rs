@@ -1,4 +1,4 @@
-//! leeroy — a terminal UI for Jenkins.
+//! Leeroy — a terminal UI for Jenkins.
 //!
 //! The core is pure and terminal-free so it can be tested headlessly:
 //! - [`app`]: state + `update(Action)`
