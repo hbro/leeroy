@@ -73,7 +73,11 @@ Rules:
 - `Esc` = `Action::Back`: closes the current context (popup, sub-view) and is
   only mapped where `Context::closable()`. It must never quit the app.
 - Text input contexts (`Context::captures_input()`) receive every key except
-  `Ctrl-C`; global keys are off there and the global bar is dimmed. Editing uses
+  `Ctrl-C`; global keys are off there and the global bar is dimmed (generally:
+  `Context::global_keys_off()`, which also covers the quit prompt).
+- Quit: `q` = `Action::RequestQuit` → "Quit Leeroy?" prompt (`Context::ConfirmQuit`,
+  on top of everything; y/Enter/q quit, n/Esc stay) unless `ui.confirm_quit` (default
+  on) is off. `Ctrl-C` = `Action::Quit`, immediate, everywhere. Editing uses
   `input::TextInput` (char-indexed cursor): ←/→, Home/End, Ctrl-A/E, Backspace,
   Delete, Ctrl-U. ↑/↓ while editing = save the field (if valid) and move. The
   field being edited is shown exactly as typed (no masking, per user request);

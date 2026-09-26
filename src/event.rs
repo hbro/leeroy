@@ -64,7 +64,9 @@ pub fn context_bindings(context: Context) -> &'static [Binding] {
         bind("C-u", "clear"),
     ];
     const HELP: &[Binding] = &[bind("Esc", "close")];
+    const CONFIRM_QUIT: &[Binding] = &[bind("y/Enter", "quit"), bind("n/Esc", "stay")];
     match context {
+        Context::ConfirmQuit => CONFIRM_QUIT,
         Context::Jobs => JOBS,
         Context::JobsFiltered => JOBS_FILTERED,
         Context::JobsFilter => JOBS_FILTER,
@@ -86,6 +88,16 @@ pub fn map_key(app: &App, key: KeyEvent) -> Option<Action> {
         return Some(Action::Quit);
     }
     let context = app.context();
+
+    // The quit prompt takes every key: only its own answers do something.
+    if context == Context::ConfirmQuit {
+        return match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => Some(Action::Quit),
+            KeyCode::Char('q') => Some(Action::RequestQuit),
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => Some(Action::Back),
+            _ => None,
+        };
+    }
 
     // Text input swallows everything else, including global keys.
     if context.captures_input() {
@@ -115,7 +127,7 @@ pub fn map_key(app: &App, key: KeyEvent) -> Option<Action> {
 
     match key.code {
         KeyCode::F(n) => return Tab::from_f_key(n).map(Action::SwitchTab),
-        KeyCode::Char('q') => return Some(Action::Quit),
+        KeyCode::Char('q') => return Some(Action::RequestQuit),
         KeyCode::Char('s') => return Some(Action::OpenSettings),
         KeyCode::Char('?') => return Some(Action::ToggleHelp),
         // Some terminals report Shift+r as 'r' with SHIFT instead of 'R'.
@@ -166,7 +178,8 @@ mod tests {
     use super::*;
     use crate::app::View;
 
-    const ALL_CONTEXTS: [Context; 7] = [
+    const ALL_CONTEXTS: [Context; 8] = [
+        Context::ConfirmQuit,
         Context::Jobs,
         Context::JobsFiltered,
         Context::JobsFilter,
@@ -188,6 +201,7 @@ mod tests {
         let mut app = App::default();
         match context {
             Context::Jobs => {}
+            Context::ConfirmQuit => app.confirm_quit = true,
             Context::JobsFiltered => app.jobs.filter = "api".into(),
             Context::JobsFilter => app.jobs.filter_input = Some(Default::default()),
             Context::Build => {
@@ -220,6 +234,8 @@ mod tests {
                 "←" => key(KeyCode::Left),
                 "→" => key(KeyCode::Right),
                 "Home" => key(KeyCode::Home),
+                "y" => key(KeyCode::Char('y')),
+                "n" => key(KeyCode::Char('n')),
                 "End" => key(KeyCode::End),
                 s if s.starts_with("C-") && s.chars().count() == 3 => {
                     ctrl(s.chars().nth(2).unwrap())
@@ -302,6 +318,35 @@ mod tests {
     }
 
     #[test]
+    fn quit_prompt_keys() {
+        let app = app_in(Context::ConfirmQuit);
+        for code in [KeyCode::Char('y'), KeyCode::Enter] {
+            assert_eq!(map_key(&app, key(code)), Some(Action::Quit), "{code:?}");
+        }
+        assert_eq!(
+            map_key(&app, key(KeyCode::Char('q'))),
+            Some(Action::RequestQuit)
+        );
+        for code in [KeyCode::Char('n'), KeyCode::Esc] {
+            assert_eq!(map_key(&app, key(code)), Some(Action::Back), "{code:?}");
+        }
+        // Everything else is ignored while asking, global keys included.
+        for code in [
+            KeyCode::Char('s'),
+            KeyCode::Char('r'),
+            KeyCode::F(1),
+            KeyCode::Down,
+        ] {
+            assert_eq!(map_key(&app, key(code)), None, "{code:?}");
+        }
+        assert_eq!(
+            map_key(&app, ctrl('c')),
+            Some(Action::Quit),
+            "Ctrl-C still quits"
+        );
+    }
+
+    #[test]
     fn build_view_keys() {
         let app = app_in(Context::Build);
         for (code, step) in [
@@ -372,7 +417,10 @@ mod tests {
     #[test]
     fn quit_keys() {
         let app = App::default();
-        assert_eq!(map_key(&app, key(KeyCode::Char('q'))), Some(Action::Quit));
+        assert_eq!(
+            map_key(&app, key(KeyCode::Char('q'))),
+            Some(Action::RequestQuit)
+        );
         assert_eq!(map_key(&app, ctrl('c')), Some(Action::Quit));
     }
 
@@ -419,7 +467,7 @@ mod tests {
     fn advertised_bindings_are_mapped() {
         for context in ALL_CONTEXTS {
             let app = app_in(context);
-            let globals = if context.captures_input() {
+            let globals = if context.global_keys_off() {
                 &[][..]
             } else {
                 GLOBAL_BINDINGS

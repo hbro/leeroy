@@ -43,6 +43,9 @@ pub fn render(frame: &mut Frame, app: &App) {
     if app.show_help {
         render_help(frame, body, app);
     }
+    if app.confirm_quit {
+        render_confirm_quit(frame, body);
+    }
 }
 
 /// Header: app name + the Jenkins instance we're connected to.
@@ -636,7 +639,7 @@ fn render_context_bar(frame: &mut Frame, area: Rect, app: &App) {
 /// Global bar: application-wide commands (dimmed while typing text, since
 /// the keys then go to the input) and the refresh status on the right.
 fn render_global_bar(frame: &mut Frame, area: Rect, app: &App) {
-    let captured = app.context().captures_input();
+    let captured = app.context().global_keys_off();
     let key_style = if captured {
         Style::new().black().on_gray()
     } else {
@@ -697,6 +700,31 @@ fn format_age(age: std::time::Duration) -> String {
         s @ 3600..86_400 => format!("{}h", s / 3600),
         s => format!("{}d", s / 86_400),
     }
+}
+
+fn render_confirm_quit(frame: &mut Frame, area: Rect) {
+    let key = Style::new().bold();
+    let lines = vec![
+        Line::raw(""),
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled("y", key),
+            Span::raw(" / "),
+            Span::styled("Enter", key),
+            Span::raw(" quit     "),
+            Span::styled("n", key),
+            Span::raw(" / "),
+            Span::styled("Esc", key),
+            Span::raw(" stay"),
+        ]),
+    ];
+    let popup = centered(area, 38, lines.len() as u16 + 2);
+    let block = Block::bordered()
+        .title(" Quit Leeroy? ")
+        .border_type(BorderType::Double)
+        .border_style(Style::new().fg(Color::Red));
+    frame.render_widget(Clear, popup);
+    frame.render_widget(Paragraph::new(lines).block(block), popup);
 }
 
 fn render_help(frame: &mut Frame, area: Rect, app: &App) {

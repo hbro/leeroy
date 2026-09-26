@@ -28,6 +28,9 @@ url = "socks5h://user:pass@bastion.example.com:1080"
 [refresh]
 auto = true    # default: start with auto-refresh on (toggle with R at any time)
 interval = 10  # default; seconds between automatic refreshes, minimum 1
+
+[ui]
+confirm_quit = true  # default: ask before quitting with q
 ```
 
 Every setting can be overridden by an env var, which wins over the file (and
@@ -41,6 +44,7 @@ can't be edited in the TUI while set):
 | Proxy    | `LEEROY_PROXY_URL`        |
 | Auto-refresh | `LEEROY_REFRESH_AUTO` |
 | Refresh interval | `LEEROY_REFRESH_INTERVAL` (seconds, ≥ 1) |
+| Confirm quit | `LEEROY_UI_CONFIRM_QUIT` |
 
 Saving from the TUI keeps comments and unknown keys in the file.
 
@@ -144,7 +148,8 @@ Global keys (bottom bar), available everywhere except while typing in a field:
 
 | Key | Action |
 | --- | --- |
-| `q` | quit |
+| `q` | quit (asks first: `y`/`Enter`/`q` quits, `n`/`Esc` stays; setting `ui.confirm_quit`) |
+| `Ctrl-C` | quit immediately, from anywhere |
 | `s` | settings |
 | `?` | help |
 | `r` | refresh now (reconnects if the connection failed) |

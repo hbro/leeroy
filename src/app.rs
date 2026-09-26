@@ -19,7 +19,10 @@ use crate::{
 /// can be unit tested.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
+    /// Quit right away (Ctrl-C, or confirming the quit prompt).
     Quit,
+    /// `q`: quit, after confirmation if the `ui.confirm_quit` setting is on.
+    RequestQuit,
     ToggleHelp,
     /// Close the current context (overlay, edit, sub-view). No-op at the root view.
     Back,
@@ -176,6 +179,8 @@ impl View {
 /// what the context bar shows. Overlays take precedence over the view below.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Context {
+    /// "Quit Leeroy?" prompt, on top of everything else.
+    ConfirmQuit,
     Jobs,
     /// Jobs tab with a filter applied (Esc clears it).
     JobsFiltered,
@@ -192,6 +197,7 @@ impl Context {
         match self {
             Context::Jobs | Context::JobsFiltered => "Jobs",
             Context::JobsFilter => "Filter",
+            Context::ConfirmQuit => "Quit?",
             Context::Build => "Build",
             Context::Settings => "Settings",
             Context::EditSetting => "Edit",
@@ -205,6 +211,7 @@ impl Context {
             Context::Jobs => false,
             Context::JobsFiltered
             | Context::JobsFilter
+            | Context::ConfirmQuit
             | Context::Build
             | Context::Settings
             | Context::EditSetting
@@ -215,6 +222,12 @@ impl Context {
     /// Text input: all printable keys go to the input, global keys are off.
     pub fn captures_input(self) -> bool {
         matches!(self, Context::EditSetting | Context::JobsFilter)
+    }
+
+    /// Global keys (bottom bar) don't work here: text input, or a prompt
+    /// that only takes its own answers. The global bar is dimmed then.
+    pub fn global_keys_off(self) -> bool {
+        self.captures_input() || self == Context::ConfirmQuit
     }
 }
 
@@ -342,6 +355,8 @@ impl SettingsState {
 #[derive(Debug)]
 pub struct App {
     pub running: bool,
+    /// The quit confirmation prompt is open.
+    pub confirm_quit: bool,
     pub view: View,
     pub show_help: bool,
     pub connection: ConnectionStatus,
@@ -373,6 +388,7 @@ impl App {
     pub fn new(settings: SettingsState) -> Self {
         Self {
             running: true,
+            confirm_quit: false,
             view: View::Jobs,
             show_help: false,
             connection: ConnectionStatus::NotConfigured,
@@ -416,7 +432,9 @@ impl App {
     }
 
     pub fn context(&self) -> Context {
-        if self.show_help {
+        if self.confirm_quit {
+            Context::ConfirmQuit
+        } else if self.show_help {
             Context::Help
         } else if self.view == View::Settings && self.settings.editing.is_some() {
             Context::EditSetting
@@ -436,6 +454,13 @@ impl App {
         let s = &mut self.settings;
         match action {
             Action::Quit => self.running = false,
+            Action::RequestQuit => {
+                if self.confirm_quit || !self.settings.effective().is_on(SettingKey::ConfirmQuit) {
+                    self.running = false; // q q, or no confirmation wanted
+                } else {
+                    self.confirm_quit = true;
+                }
+            }
             Action::ToggleHelp => self.show_help = !self.show_help,
             Action::Back => self.back(),
             Action::Tick(now, wall) => {
@@ -879,6 +904,7 @@ impl App {
     /// Close whatever is on top: help popup, then an edit, then the settings view.
     fn back(&mut self) {
         match self.context() {
+            Context::ConfirmQuit => self.confirm_quit = false,
             Context::Help => self.show_help = false,
             Context::EditSetting => self.settings.editing = None,
             // Cancel typing: the previously applied filter stays.
@@ -2044,5 +2070,53 @@ mod tests {
         app.update(Action::SelectLast);
         app.update(Action::BuildStep(BuildStep::Older));
         assert_eq!(app.build.as_ref().unwrap().scroll, 0);
+    }
+
+    #[test]
+    fn quit_asks_for_confirmation_by_default() {
+        let mut app = connected_with_jobs(&["a"]);
+        app.update(Action::RequestQuit);
+        assert!(app.running);
+        assert_eq!(app.context(), Context::ConfirmQuit);
+        // Esc / n: stay.
+        app.update(Action::Back);
+        assert!(app.running);
+        assert_eq!(app.context(), Context::Jobs);
+        // q q: quit.
+        app.update(Action::RequestQuit);
+        app.update(Action::RequestQuit);
+        assert!(!app.running);
+    }
+
+    #[test]
+    fn prompt_sits_on_top_of_other_contexts() {
+        let mut app = settings_app();
+        app.update(Action::ToggleHelp);
+        app.update(Action::RequestQuit);
+        assert_eq!(app.context(), Context::ConfirmQuit);
+        app.update(Action::Back);
+        assert_eq!(app.context(), Context::Help, "back to where we were");
+    }
+
+    #[test]
+    fn quit_without_confirmation_when_disabled() {
+        let mut app = App::default();
+        app.settings
+            .file
+            .set(SettingKey::ConfirmQuit, Some("false".into()));
+        app.update(Action::RequestQuit);
+        assert!(!app.running);
+    }
+
+    #[test]
+    fn confirm_quit_setting_defaults_on_and_toggles_to_explicit_off() {
+        let mut app = settings_app();
+        assert!(app.settings.effective().is_on(SettingKey::ConfirmQuit));
+        select(&mut app, SettingsRow::Setting(SettingKey::ConfirmQuit));
+        app.update(Action::StartEdit);
+        assert_eq!(
+            app.settings.file.get(SettingKey::ConfirmQuit),
+            Some("false")
+        );
     }
 }

@@ -35,15 +35,17 @@ pub enum SettingKey {
     ProxyUrl,
     RefreshAuto,
     RefreshInterval,
+    ConfirmQuit,
 }
 
 impl SettingKey {
-    pub const ALL: [SettingKey; 5] = [
+    pub const ALL: [SettingKey; 6] = [
         SettingKey::JenkinsUrl,
         SettingKey::JenkinsSkipTlsVerify,
         SettingKey::ProxyUrl,
         SettingKey::RefreshAuto,
         SettingKey::RefreshInterval,
+        SettingKey::ConfirmQuit,
     ];
 
     pub fn label(self) -> &'static str {
@@ -53,6 +55,7 @@ impl SettingKey {
             SettingKey::ProxyUrl => "Proxy URL",
             SettingKey::RefreshAuto => "Auto-refresh",
             SettingKey::RefreshInterval => "Refresh every",
+            SettingKey::ConfirmQuit => "Confirm quit",
         }
     }
 
@@ -64,6 +67,7 @@ impl SettingKey {
             SettingKey::ProxyUrl => ("proxy", "url"),
             SettingKey::RefreshAuto => ("refresh", "auto"),
             SettingKey::RefreshInterval => ("refresh", "interval"),
+            SettingKey::ConfirmQuit => ("ui", "confirm_quit"),
         }
     }
 
@@ -75,6 +79,7 @@ impl SettingKey {
             SettingKey::ProxyUrl => "LEEROY_PROXY_URL",
             SettingKey::RefreshAuto => "LEEROY_REFRESH_AUTO",
             SettingKey::RefreshInterval => "LEEROY_REFRESH_INTERVAL",
+            SettingKey::ConfirmQuit => "LEEROY_UI_CONFIRM_QUIT",
         }
     }
 
@@ -83,13 +88,13 @@ impl SettingKey {
     pub fn is_bool(self) -> bool {
         matches!(
             self,
-            SettingKey::JenkinsSkipTlsVerify | SettingKey::RefreshAuto
+            SettingKey::JenkinsSkipTlsVerify | SettingKey::RefreshAuto | SettingKey::ConfirmQuit
         )
     }
 
     /// Value of an on/off setting when it isn't set.
     pub fn default_on(self) -> bool {
-        matches!(self, SettingKey::RefreshAuto)
+        matches!(self, SettingKey::RefreshAuto | SettingKey::ConfirmQuit)
     }
 
     /// Whole seconds, stored as a TOML integer.
@@ -124,6 +129,10 @@ impl SettingKey {
             SettingKey::RefreshInterval => concat!(
                 "Seconds between automatic refreshes (minimum 1). Default: 10.\n",
                 "After a failed refresh, the next attempt also waits a full interval.",
+            ),
+            SettingKey::ConfirmQuit => concat!(
+                "Ask before quitting with q (the default): y, Enter or q again quits, n or Esc stays.\n",
+                "Ctrl-C always quits right away.",
             ),
         }
     }
@@ -161,7 +170,9 @@ impl SettingKey {
                     "expected whole seconds between {MIN_REFRESH_SECS} and {MAX_REFRESH_SECS}, got {value:?}"
                 )),
             },
-            SettingKey::JenkinsSkipTlsVerify | SettingKey::RefreshAuto => parse_bool(value)
+            SettingKey::JenkinsSkipTlsVerify
+            | SettingKey::RefreshAuto
+            | SettingKey::ConfirmQuit => parse_bool(value)
                 .map(|b| b.to_string())
                 .ok_or_else(|| format!("expected true or false, got {value:?}")),
         }
@@ -334,6 +345,13 @@ pub struct Settings {
     pub jenkins: JenkinsSettings,
     pub proxy: ProxySettings,
     pub refresh: RefreshSettings,
+    pub ui: UiSettings,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct UiSettings {
+    pub confirm_quit: Option<bool>,
 }
 
 pub const DEFAULT_REFRESH_SECS: u64 = 10;
@@ -402,6 +420,10 @@ impl Settings {
             SettingKey::ProxyUrl => self.proxy.url.as_deref(),
             SettingKey::RefreshAuto => self.refresh.auto.map(|b| if b { "true" } else { "false" }),
             SettingKey::RefreshInterval => self.refresh.interval.as_deref(),
+            SettingKey::ConfirmQuit => self
+                .ui
+                .confirm_quit
+                .map(|b| if b { "true" } else { "false" }),
         }
     }
 
@@ -430,6 +452,10 @@ impl Settings {
                 return;
             }
             SettingKey::RefreshInterval => &mut self.refresh.interval,
+            SettingKey::ConfirmQuit => {
+                self.ui.confirm_quit = value.as_deref().and_then(parse_bool);
+                return;
+            }
         };
         *slot = value;
     }

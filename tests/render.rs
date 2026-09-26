@@ -564,3 +564,10 @@ fn build_navigation_title_and_deleted_build() {
     let screen = format!("{}", render(&app).backend());
     assert!(screen.contains("Build #41 no longer exists"), "{screen}");
 }
+
+#[test]
+fn quit_confirmation_popup() {
+    let mut app = app_with_jobs();
+    apply(&mut app, &[Action::RequestQuit]);
+    insta::assert_snapshot!(render(&app).backend());
+}
