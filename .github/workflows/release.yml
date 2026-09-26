@@ -36,9 +36,14 @@ jobs:
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
+  # The full CI (lint + tests on every platform) for the tagged commit.
+  test:
+    name: CI
+    uses: ./.github/workflows/ci.yml
+
   build:
     name: Build (${{ matrix.target }})
-    needs: version
+    needs: [version, test]
     strategy:
       fail-fast: false
       matrix:

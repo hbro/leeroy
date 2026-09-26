@@ -278,7 +278,8 @@ git push origin main v0.2.0
 ```
 
 The tag triggers `.github/workflows/release.yml`: it fails if the tag doesn't
-match `Cargo.toml`, builds the seven targets, and publishes a GitHub release with
+match `Cargo.toml`, runs the full CI (nothing is built or published unless
+it passes), builds the seven targets, and publishes a GitHub release with
 the archives, `SHA256SUMS` and the changelog section as release notes (a
 version with a `-suffix` becomes a pre-release). Running the workflow by hand
 (Actions → Release → Run workflow) is a dry run: it builds and uploads the
