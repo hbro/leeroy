@@ -29,8 +29,8 @@ A release's section is used as its GitHub release notes.
 - Config file in `$XDG_CONFIG_HOME/leeroy/config.toml`
   (`%APPDATA%\leeroy\config.toml` on Windows), or `--config` /
   `$LEEROY_CONFIG`.
-- Prebuilt binaries for Linux (x86_64, ARM64), macOS (Apple Silicon, Intel)
-  and Windows (x86_64).
+- Prebuilt binaries for Linux (x86_64, ARM64; static musl and glibc), macOS
+  (Apple Silicon, Intel) and Windows (x86_64).
 
 [Unreleased]: https://github.com/hbro/leeroy/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/hbro/leeroy/releases/tag/v0.1.0

@@ -43,16 +43,30 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Ubuntu 22.04: an older glibc, so the binaries run on more distros.
+          # `name` goes in the archive name: the target without its vendor, and
+          # glibc instead of gnu.
+          # glibc builds on Ubuntu 22.04: an older glibc, so they run on more
+          # distros. musl builds are static and run on any Linux.
           - target: x86_64-unknown-linux-gnu
+            name: x86_64-linux-glibc
             os: ubuntu-22.04
           - target: aarch64-unknown-linux-gnu
+            name: aarch64-linux-glibc
             os: ubuntu-22.04-arm
+          - target: x86_64-unknown-linux-musl
+            name: x86_64-linux-musl
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-musl
+            name: aarch64-linux-musl
+            os: ubuntu-24.04-arm
           - target: aarch64-apple-darwin
+            name: aarch64-darwin
             os: macos-latest
           - target: x86_64-apple-darwin
+            name: x86_64-darwin
             os: macos-latest
           - target: x86_64-pc-windows-msvc
+            name: x86_64-windows-msvc
             os: windows-latest
     runs-on: ${{ matrix.os }}
     steps:
@@ -62,14 +76,38 @@ jobs:
           targets: ${{ matrix.target }}
       - if: runner.os == 'Windows'
         uses: ilammy/setup-nasm@v1
+      # C dependencies (ring, aws-lc) must be compiled against musl too.
+      - if: endsWith(matrix.target, '-musl')
+        shell: bash
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -qy musl-tools
+          target=${{ matrix.target }}
+          echo "CC_${target//-/_}=musl-gcc" >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
       - run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Check the binary
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          bin=target/$TARGET/release/leeroy
+          [[ $RUNNER_OS == Windows ]] && bin+=.exe
+          # x86_64 macOS binaries can't run on the ARM runner.
+          if [[ $TARGET != x86_64-apple-darwin ]]; then
+            "$bin" --version
+          fi
+          if [[ $TARGET == *-musl ]]; then
+            file "$bin"
+            file "$bin" | grep -Eq 'static(ally|-pie) linked' \
+              || { echo "::error::musl binary isn't statically linked"; exit 1; }
+          fi
       - name: Package
         shell: bash
         run: |
-          name="leeroy-v${{ needs.version.outputs.version }}-${{ matrix.target }}"
+          name="leeroy-v${{ needs.version.outputs.version }}-${{ matrix.name }}"
           mkdir -p "dist/$name"
           cp README.md LICENSE CHANGELOG.md "dist/$name/"
           if [[ "${{ runner.os }}" == Windows ]]; then
@@ -82,7 +120,7 @@ jobs:
           rm -rf "dist/$name"
       - uses: actions/upload-artifact@v4
         with:
-          name: leeroy-${{ matrix.target }}
+          name: leeroy-${{ matrix.name }}
           path: dist/*
           if-no-files-found: error
 

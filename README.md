@@ -1,5 +1,5 @@
 # Leeroy
-Jenkins TUI
+A TUI for Jenkins
 
 ## Installing
 
@@ -9,14 +9,16 @@ checksums) and put the `leeroy` binary on your `PATH`:
 
 | Platform | Archive |
 | --- | --- |
-| Linux x86_64 | `leeroy-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz` |
-| Linux ARM64 | `leeroy-vX.Y.Z-aarch64-unknown-linux-gnu.tar.gz` |
-| macOS Apple Silicon | `leeroy-vX.Y.Z-aarch64-apple-darwin.tar.gz` |
-| macOS Intel | `leeroy-vX.Y.Z-x86_64-apple-darwin.tar.gz` |
-| Windows x86_64 | `leeroy-vX.Y.Z-x86_64-pc-windows-msvc.zip` |
+| Linux x86_64 | `leeroy-vX.Y.Z-x86_64-linux-musl.tar.gz` or `…-x86_64-linux-glibc.tar.gz` |
+| Linux ARM64 | `leeroy-vX.Y.Z-aarch64-linux-musl.tar.gz` or `…-aarch64-linux-glibc.tar.gz` |
+| macOS Apple Silicon | `leeroy-vX.Y.Z-aarch64-darwin.tar.gz` |
+| macOS Intel | `leeroy-vX.Y.Z-x86_64-darwin.tar.gz` |
+| Windows x86_64 | `leeroy-vX.Y.Z-x86_64-windows-msvc.zip` |
 
-The Linux binaries need glibc 2.35 or newer. macOS binaries aren't signed:
-clear the quarantine flag with `xattr -d com.apple.quarantine leeroy`.
+On Linux, the `musl` builds are static and run on any distribution (Alpine
+included); the `glibc` builds link against glibc 2.35 or newer. macOS binaries
+aren't signed: clear the quarantine flag with
+`xattr -d com.apple.quarantine leeroy`.
 
 Or build from source: `cargo install --git https://github.com/hbro/leeroy`.
 `leeroy --version` prints the version.
@@ -259,8 +261,8 @@ filtering by result (e.g. "failed") only searches what's loaded.
 
 `CLAUDE.md` describes the architecture and how to verify changes (tests,
 snapshots, tmux, screenshots). CI (`.github/workflows/ci.yml`) runs rustfmt and
-clippy, and the tests on Linux x86_64/ARM64, macOS and Windows, for every push
-to `main` and every pull request.
+clippy, and the tests on Linux (x86_64 glibc and musl, ARM64), macOS and
+Windows, for every push to `main` and every pull request.
 
 ### Releasing
 
@@ -276,7 +278,7 @@ git push origin main v0.2.0
 ```
 
 The tag triggers `.github/workflows/release.yml`: it fails if the tag doesn't
-match `Cargo.toml`, builds the five targets, and publishes a GitHub release with
+match `Cargo.toml`, builds the seven targets, and publishes a GitHub release with
 the archives, `SHA256SUMS` and the changelog section as release notes (a
 version with a `-suffix` becomes a pre-release). Running the workflow by hand
 (Actions → Release → Run workflow) is a dry run: it builds and uploads the

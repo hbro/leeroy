@@ -49,3 +49,17 @@ jobs:
       # CI=true (set by GitHub) makes insta fail on snapshot changes instead
       # of writing .snap.new files.
       - run: cargo test --locked
+
+  musl:
+    name: Test (Linux x86_64 musl)
+    runs-on: ubuntu-latest
+    env:
+      CC_x86_64_unknown_linux_musl: musl-gcc
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - run: sudo apt-get update -q && sudo apt-get install -qy musl-tools
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked --target x86_64-unknown-linux-musl
