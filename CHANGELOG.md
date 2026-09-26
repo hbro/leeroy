@@ -10,6 +10,8 @@ A release's section is used as its GitHub release notes.
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-09-26
+
 ### Added
 
 - Jobs tab: all jobs (folders flattened) with their last result, live filter.
@@ -30,4 +32,5 @@ A release's section is used as its GitHub release notes.
 - Prebuilt binaries for Linux (x86_64, ARM64), macOS (Apple Silicon, Intel)
   and Windows (x86_64).
 
-[Unreleased]: https://github.com/hbro/leeroy/commits/main
+[Unreleased]: https://github.com/hbro/leeroy/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/hbro/leeroy/releases/tag/v0.1.0
