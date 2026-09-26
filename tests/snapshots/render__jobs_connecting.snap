@@ -2,8 +2,8 @@
 source: tests/render.rs
 expression: render(&app).backend()
 ---
-" Leeroy  ◌ https://ci.example.com · connecting…                                 "
-" F1 Jobs                                                                        "
+" Leeroy  ◌ https://ci.example.com · connecting…                       h/?  help "
+" 1 Jobs                                                              0 Settings "
 "Jobs ───────────────────────────────────────────────────────────────────────────"
 "                                                                                "
 "                      Connecting to https://ci.example.com…                     "
@@ -23,6 +23,6 @@ expression: render(&app).backend()
 "                                                                                "
 "                                                                                "
 "                                                                                "
+"                                                                                "
 "────────────────────────────────────────────────────────────────────────────────"
 " ↑/↓  select   Enter  last build   /  filter                                    "
-" q  quit   s  settings   ?  help   r  refresh   R  toggle auto-refresh          "

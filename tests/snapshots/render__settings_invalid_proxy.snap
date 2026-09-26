@@ -2,8 +2,8 @@
 source: tests/render.rs
 expression: render_after(&actions).backend()
 ---
-" Leeroy  ○ not connected                                                        "
-" F1 Jobs   Settings                                                             "
+" Leeroy  ○ not connected                                              h/?  help "
+" 1 Jobs                                                              0 Settings "
 "Settings ───────────────────────────────────────────────────────────────────────"
 "   Config file       /home/user/.config/leeroy/config.toml                      "
 "                                                                                "
@@ -23,6 +23,6 @@ expression: render_after(&actions).backend()
 "   Proxy for reaching Jenkins: scheme://[user:pass@]host:port                   "
 "   Schemes: http, https, socks4, socks4a, socks5, socks5h.                      "
 "   SOCKS: socks5h:// or socks4a:// resolve DNS on the proxy (remote DNS);       "
+"   socks5:// and socks4:// resolve DNS locally. HTTP(S) proxies always resolve  "
 "────────────────────────────────────────────────────────────────────────────────"
 " Enter  save   Esc  cancel   ↑/↓  save & move   ←/→  cursor   C-u  clear        "
-" q  quit   s  settings   ?  help   r  refresh   R  toggle auto-refresh          "

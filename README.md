@@ -3,7 +3,7 @@ Jenkins TUI
 
 ## Configuration
 
-Settings can be edited in the TUI (press `s`) and are saved to a TOML file:
+Settings can be edited in the TUI (Settings tab: `0`, or `s`) and are saved to a TOML file:
 
 1. `--config FILE`, if given
 2. else `$LEEROY_CONFIG`
@@ -138,20 +138,22 @@ header shows `⚠ TLS NOT VERIFIED`.
 
 ## Using Leeroy
 
-Content lives in tabs, switched with the F-keys (shown in the tab bar):
+Content lives in tabs, selected with the digit keys shown in the tab bar:
 
 | Key | Tab |
 | --- | --- |
-| `F1` | Jobs |
+| `1` | Jobs |
+| `0` | Settings (far right of the tab bar) |
 
-Global keys (bottom bar), available everywhere except while typing in a field:
+Global keys, available everywhere except while typing in a field (the full list
+is in the help popup, `h` or `?`, hinted at the right of the header):
 
 | Key | Action |
 | --- | --- |
 | `q` | quit (asks first: `y`/`Enter`/`q` quits, `n`/`Esc` stays; setting `ui.confirm_quit`) |
 | `Ctrl-C` | quit immediately, from anywhere |
-| `s` | settings |
-| `?` | help |
+| `s` | settings (same as `0`) |
+| `h` / `?` | help |
 | `r` | refresh now (reconnects if the connection failed) |
 | `R` | toggle auto-refresh for this session |
 

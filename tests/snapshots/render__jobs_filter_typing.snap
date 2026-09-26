@@ -2,8 +2,8 @@
 source: tests/render.rs
 expression: render(&app).backend()
 ---
-" Leeroy  ● https://ci.example.com · Jenkins 2.504.1 · me                   ⟳ 0s "
-" F1 Jobs                                                                        "
+" Leeroy  ● https://ci.example.com · Jenkins 2.504.1 · me       h/?  help   ⟳ 0s "
+" 1 Jobs                                                              0 Settings "
 "Jobs (2/6) ─────────────────────────────────────────────────────────────────────"
 " / api█                                                                         "
 "▶ ● success     backend/api/main                                                "
@@ -23,6 +23,6 @@ expression: render(&app).backend()
 "                                                                                "
 "                                                                                "
 "                                                                                "
+"                                                                                "
 "────────────────────────────────────────────────────────────────────────────────"
 " Enter  apply   Esc  cancel   ↑/↓  select   C-u  clear                          "
-" q  quit   s  settings   ?  help   r  refresh   R  toggle auto-refresh          "

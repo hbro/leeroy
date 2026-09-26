@@ -2,8 +2,8 @@
 source: tests/render.rs
 expression: screen
 ---
-" Leeroy  ○ not connected                                                        "
-" F1 Jobs   Settings                                                             "
+" Leeroy  ○ not connected                                              h/?  help "
+" 1 Jobs                                                              0 Settings "
 "Settings ───────────────────────────────────────────────────────────────────────"
 "   Config file       /home/user/.config/leeroy/config.toml                      "
 "                                                                                "
@@ -23,6 +23,6 @@ expression: screen
 "   except while editing.                                                        "
 "   Examples:                                                                    "
 "     Authorization: Basic <base64 of user:password>                             "
+"     Authorization: Bearer <token>                                              "
 "────────────────────────────────────────────────────────────────────────────────"
 " Enter  save   Esc  cancel   ↑/↓  save & move   ←/→  cursor   C-u  clear        "
-" q  quit   s  settings   ?  help   r  refresh   R  toggle auto-refresh          "

@@ -136,33 +136,49 @@ pub enum Effect {
     },
 }
 
-/// Content tabs, switched with F-keys (`F1` = first).
+/// Tabs, selected with digit keys (`1` = first, `0` = Settings).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
     Jobs,
+    Settings,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 1] = [Tab::Jobs];
+    /// In tab-bar order.
+    pub const ALL: [Tab; 2] = [Tab::Jobs, Tab::Settings];
 
     pub fn title(self) -> &'static str {
         match self {
             Tab::Jobs => "Jobs",
+            Tab::Settings => "Settings",
         }
     }
 
-    /// The F-key number: `Tab::ALL[n - 1]`.
-    pub fn f_key(self) -> u8 {
-        Tab::ALL.iter().position(|t| *t == self).unwrap_or(0) as u8 + 1
+    /// The key selecting this tab. Content tabs are `1`–`9` in order;
+    /// Settings is `0`, shown at the far right of the tab bar.
+    pub fn key(self) -> char {
+        match self {
+            Tab::Jobs => '1',
+            Tab::Settings => '0',
+        }
     }
 
-    pub fn from_f_key(n: u8) -> Option<Tab> {
-        Tab::ALL.get(usize::from(n).checked_sub(1)?).copied()
+    /// [`Self::key`] as a label.
+    pub fn key_label(self) -> &'static str {
+        match self {
+            Tab::Jobs => "1",
+            Tab::Settings => "0",
+        }
+    }
+
+    pub fn from_key(c: char) -> Option<Tab> {
+        Tab::ALL.into_iter().find(|tab| tab.key() == c)
     }
 
     fn view(self) -> View {
         match self {
             Tab::Jobs => View::Jobs,
+            Tab::Settings => View::Settings,
         }
     }
 }
@@ -185,11 +201,11 @@ pub enum View {
 }
 
 impl View {
-    /// The tab this view belongs to (`None` for settings).
+    /// The tab this view belongs to.
     pub fn tab(self) -> Option<Tab> {
         match self {
             View::Jobs | View::Build | View::Console => Some(Tab::Jobs),
-            View::Settings => None,
+            View::Settings => Some(Tab::Settings),
         }
     }
 
@@ -239,13 +255,13 @@ impl Context {
     /// Whether [`Action::Back`] can close this context.
     pub fn closable(self) -> bool {
         match self {
-            Context::Jobs => false,
+            // Tabs aren't closed with Esc; they're switched with F-keys.
+            Context::Jobs | Context::Settings => false,
             Context::JobsFiltered
             | Context::JobsFilter
             | Context::ConfirmQuit
             | Context::Build
             | Context::Console
-            | Context::Settings
             | Context::EditSetting
             | Context::Help => true,
         }
@@ -516,6 +532,9 @@ impl App {
                 self.show_help = false;
             }
             Action::SwitchTab(tab) => {
+                if self.view == View::Settings && tab != Tab::Settings {
+                    self.settings.message = None; // "Saved to …" is stale by now
+                }
                 self.view = tab.view();
                 self.show_help = false;
             }
@@ -1082,11 +1101,7 @@ impl App {
                 self.view = View::Build;
                 self.console = None;
             }
-            Context::Settings => {
-                self.view = View::Jobs;
-                self.settings.message = None;
-            }
-            Context::Jobs => {}
+            Context::Jobs | Context::Settings => {}
         }
     }
 }
@@ -1174,7 +1189,10 @@ mod tests {
         assert_eq!(app.context(), Context::EditSetting);
         app.update(Action::Back);
         assert_eq!(app.context(), Context::Settings);
+        // Settings is a tab: Esc doesn't leave it (F1 does).
         app.update(Action::Back);
+        assert_eq!(app.context(), Context::Settings);
+        app.update(Action::SwitchTab(Tab::Jobs));
         assert_eq!(app.context(), Context::Jobs);
     }
 
@@ -1751,13 +1769,16 @@ mod tests {
     }
 
     #[test]
-    fn f_key_leaves_settings() {
+    fn tab_keys() {
         let mut app = settings_app();
         app.update(Action::SwitchTab(Tab::Jobs));
         assert_eq!(app.view, View::Jobs);
-        assert_eq!(Tab::from_f_key(1), Some(Tab::Jobs));
-        assert_eq!(Tab::from_f_key(0), None);
-        assert_eq!(Tab::Jobs.f_key(), 1);
+        assert_eq!(Tab::from_key('1'), Some(Tab::Jobs));
+        assert_eq!(Tab::from_key('0'), Some(Tab::Settings));
+        assert_eq!(Tab::from_key('2'), None);
+        for tab in Tab::ALL {
+            assert_eq!(tab.key_label(), tab.key().to_string());
+        }
     }
 
     use std::time::Duration;

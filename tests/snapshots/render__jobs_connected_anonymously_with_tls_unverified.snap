@@ -2,8 +2,8 @@
 source: tests/render.rs
 expression: render(&app).backend()
 ---
-" Leeroy  ⚠ TLS NOT VERIFIED ● https://ci.example.com · Jenkins 2.504.1 · a  ⟳ … "
-" F1 Jobs                                                                        "
+" Leeroy  ⚠ TLS NOT VERIFIED ● https://ci.example.com · Jenkins  h/?  help   ⟳ … "
+" 1 Jobs                                                              0 Settings "
 "Jobs ───────────────────────────────────────────────────────────────────────────"
 "                                                                                "
 "                                  Loading jobs…                                 "
@@ -23,6 +23,6 @@ expression: render(&app).backend()
 "                                                                                "
 "                                                                                "
 "                                                                                "
+"                                                                                "
 "────────────────────────────────────────────────────────────────────────────────"
 " ↑/↓  select   Enter  last build   /  filter                                    "
-" q  quit   s  settings   ?  help   r  refresh   R  toggle auto-refresh          "

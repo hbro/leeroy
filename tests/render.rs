@@ -2,7 +2,7 @@
 //! `tests/snapshots/*.snap`. Review changes with `cargo insta review`.
 
 use leeroy::{
-    app::{Action, App, ConnectionStatus, SettingsState},
+    app::{Action, App, ConnectionStatus, SettingsState, Tab},
     builds::{Build, BuildPage, BuildRef, BuildStep, Change},
     config::{SettingKey, Settings},
     console::ConsoleChunk,
@@ -80,7 +80,7 @@ fn header_shows_connected_instance() {
         .iter()
         .map(|cell| cell.symbol())
         .collect();
-    insta::assert_snapshot!(header.trim_end(), @" Leeroy  ● https://jenkins.example.com · Jenkins 2.504.1 · hbro               ⟳");
+    insta::assert_snapshot!(header.trim_end(), @" Leeroy  ● https://jenkins.example.com · Jenkins 2.504.1 · hbro   h/?  help   ⟳");
 }
 
 #[test]
@@ -336,20 +336,30 @@ fn jobs_filter_applied_no_match() {
 }
 
 #[test]
-fn tab_bar_marks_settings_while_open() {
+fn tab_bar_digits_with_settings_on_the_right() {
+    use ratatui::style::Color;
     let mut app = app_with_jobs();
-    let row = |app: &App| -> String {
+    let row = |app: &App| -> (String, Color, Color) {
         let terminal = render(app);
-        terminal.backend().buffer().content()[WIDTH as usize..2 * WIDTH as usize]
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect::<String>()
-            .trim_end()
-            .to_owned()
+        let buffer = terminal.backend().buffer();
+        let text: String = (0..WIDTH).map(|x| buffer[(x, 1)].symbol()).collect();
+        (text, buffer[(1, 1)].bg, buffer[(WIDTH - 2, 1)].bg)
     };
-    assert_eq!(row(&app), " F1 Jobs");
-    apply(&mut app, &[Action::OpenSettings]);
-    assert_eq!(row(&app), " F1 Jobs   Settings");
+    let (text, jobs_bg, settings_bg) = row(&app);
+    assert!(text.starts_with(" 1 Jobs "), "{text:?}");
+    assert!(text.ends_with(" 0 Settings "), "right-aligned: {text:?}");
+    assert_eq!(
+        (jobs_bg, settings_bg),
+        (Color::Blue, Color::Reset),
+        "Jobs active"
+    );
+    apply(&mut app, &[Action::SwitchTab(Tab::Settings)]);
+    let (_, jobs_bg, settings_bg) = row(&app);
+    assert_eq!(
+        (jobs_bg, settings_bg),
+        (Color::Reset, Color::Blue),
+        "Settings active"
+    );
 }
 
 /// First line of the screen (the header).
@@ -370,7 +380,7 @@ fn refresh_status_in_header() {
         let line = header_line(app);
         assert!(line.ends_with(tail), "expected …{tail:?} in {line:?}");
     };
-    ends(&app, "· me                   ⟳ 0s ");
+    ends(&app, "· me       h/?  help   ⟳ 0s ");
 
     // Same compact form with auto-refresh off (only the icon colour differs).
     apply(&mut app, &[Action::ToggleAutoRefresh]);
@@ -627,35 +637,22 @@ fn bar_colours() {
     let app = app_with_jobs();
     let terminal = render(&app);
     let buffer = terminal.backend().buffer();
-    // Header white up to the refresh block (which has its own colour).
-    let block = (0..WIDTH)
-        .find(|&x| buffer[(x, 0)].symbol() == "⟳")
-        .expect("refresh block")
-        - 2;
-    for x in 0..block {
+    // Header white up to the help hint, which is white on black. (Columns,
+    // not byte offsets: the header has multi-byte symbols.)
+    let hint = (0..WIDTH)
+        .find(|&x| buffer[(x + 1, 0)].symbol() == "h" && buffer[(x + 2, 0)].symbol() == "/")
+        .expect("help hint");
+    for x in 0..hint {
         assert_eq!(buffer[(x, 0)].bg, Color::White, "header column {x}");
     }
-    let y = HEIGHT - 1;
-    let global: String = (0..WIDTH).map(|x| buffer[(x, y)].symbol()).collect();
-    // Hotkeys white on black, everything else black on white to the edge.
-    let q = global.find(" q ").unwrap() as u16 + 1;
     assert_eq!(
-        (buffer[(q, y)].fg, buffer[(q, y)].bg),
+        (buffer[(hint + 1, 0)].fg, buffer[(hint + 1, 0)].bg),
         (Color::White, Color::Black)
     );
-    let quit = global.find("quit").unwrap() as u16;
-    assert_eq!(
-        (buffer[(quit, y)].fg, buffer[(quit, y)].bg),
-        (Color::Black, Color::White)
-    );
-    assert_eq!(
-        buffer[(WIDTH - 1, y)].bg,
-        Color::White,
-        "white to the right edge"
-    );
 
-    // Context bar: selection gray, hotkeys in the tab blue, no context name.
-    let y = HEIGHT - 2;
+    // The last line is the context bar (no global bar): selection gray,
+    // hotkeys in the tab blue, no context name.
+    let y = HEIGHT - 1;
     let context: String = (0..WIDTH).map(|x| buffer[(x, y)].symbol()).collect();
     assert!(context.starts_with(" ↑/↓ "), "no context name: {context:?}");
     assert_eq!(buffer[(1, y)].bg, Color::Blue, "hotkey");

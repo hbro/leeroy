@@ -1,7 +1,7 @@
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Flex, Layout, Rect},
-    style::{Color, Modifier, Style, Stylize},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{
         Block, BorderType, Borders, Cell, Clear, HighlightSpacing, Paragraph, Row, Scrollbar,
@@ -22,11 +22,10 @@ use crate::{
 /// Draw the whole UI. Keep this deterministic (no clock, no randomness):
 /// snapshot tests depend on it.
 pub fn render(frame: &mut Frame, app: &App) {
-    let [header, tabs, body, context_bar, global_bar] = Layout::vertical([
+    let [header, tabs, body, context_bar] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Min(0),
-        Constraint::Length(1),
         Constraint::Length(1),
     ])
     .areas(frame.area());
@@ -40,7 +39,6 @@ pub fn render(frame: &mut Frame, app: &App) {
         View::Settings => render_settings(frame, body, &app.settings),
     }
     render_context_bar(frame, context_bar, app);
-    render_global_bar(frame, global_bar, app);
 
     if app.show_help {
         render_help(frame, body, app);
@@ -96,8 +94,14 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App) {
             Span::styled(format!(" · {error}"), Style::new().red()),
         ],
     });
-    // Refresh status on the far right; the connection info gets the rest.
-    let status = refresh_status(app);
+    // Right end: the help hint, then the refresh status; the connection
+    // info gets the rest.
+    let mut right = vec![
+        Span::styled(" h/? ", Style::new().fg(Color::White).bg(Color::Black)),
+        Span::raw(" help "),
+    ];
+    right.extend(refresh_status(app).spans);
+    let status = Line::from(right);
     let [left, right] = Layout::horizontal([
         Constraint::Min(0),
         Constraint::Length(status.width() as u16),
@@ -122,28 +126,31 @@ fn view_block(title: &str) -> Block<'static> {
         .border_style(Style::new().fg(Color::Blue))
 }
 
-/// Tab bar: `F1 Jobs  F2 …`, the active one highlighted. Settings isn't a
-/// tab but shows up as active while open, so it's clear where you are.
+/// Tab bar: `1 Jobs  2 …` from the left, `0 Settings` at the far right; the
+/// active tab highlighted.
 fn render_tabs(frame: &mut Frame, area: Rect, app: &App) {
     let active = Style::new().fg(Color::Black).bg(TAB_BLUE).bold();
-    let inactive = Style::new().gray();
-    let mut spans = Vec::new();
-    for tab in Tab::ALL {
+    let inactive = Style::new().fg(Color::Gray);
+    let label = |tab: Tab| {
         let style = if app.view.tab() == Some(tab) {
             active
         } else {
             inactive
         };
-        spans.push(Span::styled(
-            format!(" F{} {} ", tab.f_key(), tab.title()),
-            style,
-        ));
-        spans.push(Span::raw(" "));
+        Span::styled(format!(" {} {} ", tab.key(), tab.title()), style)
+    };
+    // Content tabs from the left; Settings at the far right.
+    let mut left = Vec::new();
+    for tab in Tab::ALL.into_iter().filter(|t| *t != Tab::Settings) {
+        left.push(label(tab));
+        left.push(Span::raw(" "));
     }
-    if app.view == View::Settings {
-        spans.push(Span::styled(" Settings ", active));
-    }
-    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    let right = Line::from(label(Tab::Settings));
+    let [left_area, right_area] =
+        Layout::horizontal([Constraint::Min(0), Constraint::Length(right.width() as u16)])
+            .areas(area);
+    frame.render_widget(Paragraph::new(Line::from(left)), left_area);
+    frame.render_widget(Paragraph::new(right), right_area);
 }
 
 fn render_jobs(frame: &mut Frame, area: Rect, app: &App) {
@@ -715,23 +722,6 @@ fn render_context_bar(frame: &mut Frame, area: Rect, app: &App) {
     );
 }
 
-/// Global bar: application-wide commands (dimmed while typing text, since
-/// the keys then go to the input) and the refresh status on the right.
-fn render_global_bar(frame: &mut Frame, area: Rect, app: &App) {
-    let captured = app.context().global_keys_off();
-    // Keys are the inverse of their bar: white on black (gray when inactive).
-    let key_style = if captured {
-        Style::new().fg(Color::White).bg(Color::DarkGray)
-    } else {
-        Style::new().fg(Color::White).bg(Color::Black)
-    };
-    let mut commands = Line::from(binding_spans(GLOBAL_BINDINGS, key_style));
-    if captured {
-        commands = commands.fg(Color::DarkGray).italic();
-    }
-    frame.render_widget(Paragraph::new(commands).style(BAR), area);
-}
-
 /// `⟳ 4s`: how old the data is; the icon is green while auto-refresh is on,
 /// gray while it's off. `⟳ …` while fetching, `✕` after a failed refresh.
 /// Only shown when connected (there's nothing to refresh otherwise).
@@ -842,7 +832,7 @@ fn render_help(frame: &mut Frame, area: Rect, app: &App) {
     let tab_bindings: Vec<Binding> = Tab::ALL
         .iter()
         .map(|tab| Binding {
-            key: TAB_KEYS[usize::from(tab.f_key()) - 1],
+            key: tab.key_label(),
             desc: tab.title(),
         })
         .collect();
@@ -862,11 +852,6 @@ fn render_help(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(Clear, popup);
     frame.render_widget(Paragraph::new(lines).block(block), popup);
 }
-
-/// Labels for F-keys, indexed by `Tab::f_key() - 1`.
-const TAB_KEYS: [&str; 12] = [
-    "F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10", "F11", "F12",
-];
 
 fn centered(area: Rect, width: u16, height: u16) -> Rect {
     let [area] = Layout::vertical([Constraint::Length(height)])

@@ -2,8 +2,8 @@
 source: tests/render.rs
 expression: render(&app).backend()
 ---
-" Leeroy  ● https://ci.example.com · Jenkins 2.504.1 · me                   ⟳ 0s "
-" F1 Jobs                                                                        "
+" Leeroy  ● https://ci.example.com · Jenkins 2.504.1 · me       h/?  help   ⟳ 0s "
+" 1 Jobs                                                              0 Settings "
 "Jobs (6) ───────────────────────────────────────────────────────────────────────"
 "▶ ● success     backend/api/main                                                "
 "  ● failed    ⟳ backend/api/release-1.2                                         "
@@ -11,6 +11,7 @@ expression: render(&app).backend()
 "  ⊘ disabled    docs                                                            "
 "  ● aborted     frontend/web/main                                               "
 "  ○ not built   frontend/web/pr-42                                              "
+"                                                                                "
 "                                                                                "
 "                     ╔ Quit Leeroy? ══════════════════════╗                     "
 "                     ║                                    ║                     "
@@ -25,4 +26,3 @@ expression: render(&app).backend()
 "                                                                                "
 "────────────────────────────────────────────────────────────────────────────────"
 " y/Enter  quit   n/Esc  stay                                                    "
-" q  quit   s  settings   ?  help   r  refresh   R  toggle auto-refresh          "

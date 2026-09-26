@@ -2,8 +2,8 @@
 source: tests/render.rs
 expression: render(&app_with_build(Some(finished_build()))).backend()
 ---
-" Leeroy  ● https://ci.example.com · Jenkins 2.504.1 · me                   ⟳ 0s "
-" F1 Jobs                                                                        "
+" Leeroy  ● https://ci.example.com · Jenkins 2.504.1 · me       h/?  help   ⟳ 0s "
+" 1 Jobs                                                              0 Settings "
 "backend/api/release-1.2 · #42 · 4 of 4 ─────────────────────────────────────────"
 " Result      ● failed                                                           "
 " Started     5m ago                                                             "
@@ -23,6 +23,6 @@ expression: render(&app_with_build(Some(finished_build()))).backend()
 "                                                                                "
 "                                                                                "
 "                                                                                "
+"                                                                                "
 "────────────────────────────────────────────────────────────────────────────────"
 " ←/→  older/newer   Home/End  first/last   c  console   Esc  back   ↑/↓  scroll "
-" q  quit   s  settings   ?  help   r  refresh   R  toggle auto-refresh          "

@@ -2,8 +2,8 @@
 source: tests/render.rs
 expression: screen
 ---
-" Leeroy  ○ not connected                                                        "
-" F1 Jobs   Settings                                                             "
+" Leeroy  ○ not connected                                              h/?  help "
+" 1 Jobs                                                              0 Settings "
 "Settings ───────────────────────────────────────────────────────────────────────"
 "   Config file       /home/user/.config/leeroy/config.toml                      "
 "                                                                                "
@@ -23,6 +23,6 @@ expression: screen
 "   socks5:// and socks4:// resolve DNS locally. HTTP(S) proxies always resolve  "
 "   remotely.                                                                    "
 "   Unset: HTTPS_PROXY / HTTP_PROXY / ALL_PROXY / NO_PROXY are used.             "
+"                                                                                "
 "────────────────────────────────────────────────────────────────────────────────"
-" ↑/↓  select   Enter  edit/toggle   Esc  back                                   "
-" q  quit   s  settings   ?  help   r  refresh   R  toggle auto-refresh          "
+" ↑/↓  select   Enter  edit/toggle                                               "

@@ -2,8 +2,8 @@
 source: tests/render.rs
 expression: "render_after(&[]).backend()"
 ---
-" Leeroy  ○ not connected                                                        "
-" F1 Jobs                                                                        "
+" Leeroy  ○ not connected                                              h/?  help "
+" 1 Jobs                                                              0 Settings "
 "Jobs ───────────────────────────────────────────────────────────────────────────"
 "                                                                                "
 "                         No Jenkins instance configured                         "
@@ -23,6 +23,6 @@ expression: "render_after(&[]).backend()"
 "                                                                                "
 "                                                                                "
 "                                                                                "
+"                                                                                "
 "────────────────────────────────────────────────────────────────────────────────"
 " ↑/↓  select   Enter  last build   /  filter                                    "
-" q  quit   s  settings   ?  help   r  refresh   R  toggle auto-refresh          "

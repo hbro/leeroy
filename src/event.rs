@@ -18,10 +18,11 @@ const fn bind(key: &'static str, desc: &'static str) -> Binding {
 }
 
 /// Bindings that work everywhere (bottom bar), except while typing text.
+/// Global keys, listed in the help popup (the header only hints at `h/?`).
 pub const GLOBAL_BINDINGS: &[Binding] = &[
     bind("q", "quit"),
     bind("s", "settings"),
-    bind("?", "help"),
+    bind("h/?", "help"),
     bind("r", "refresh"),
     bind("R", "toggle auto-refresh"),
 ];
@@ -60,11 +61,7 @@ pub fn context_bindings(context: Context) -> &'static [Binding] {
         bind("↑/↓", "select"),
         bind("C-u", "clear"),
     ];
-    const SETTINGS: &[Binding] = &[
-        bind("↑/↓", "select"),
-        bind("Enter", "edit/toggle"),
-        bind("Esc", "back"),
-    ];
+    const SETTINGS: &[Binding] = &[bind("↑/↓", "select"), bind("Enter", "edit/toggle")];
     const EDIT: &[Binding] = &[
         bind("Enter", "save"),
         bind("Esc", "cancel"),
@@ -136,10 +133,10 @@ pub fn map_key(app: &App, key: KeyEvent) -> Option<Action> {
     }
 
     match key.code {
-        KeyCode::F(n) => return Tab::from_f_key(n).map(Action::SwitchTab),
+        KeyCode::Char(c @ '0'..='9') => return Tab::from_key(c).map(Action::SwitchTab),
         KeyCode::Char('q') => return Some(Action::RequestQuit),
         KeyCode::Char('s') => return Some(Action::OpenSettings),
-        KeyCode::Char('?') => return Some(Action::ToggleHelp),
+        KeyCode::Char('?') | KeyCode::Char('h') => return Some(Action::ToggleHelp),
         // Some terminals report Shift+r as 'r' with SHIFT instead of 'R'.
         KeyCode::Char('R') => return Some(Action::ToggleAutoRefresh),
         KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::SHIFT) => {
@@ -264,6 +261,7 @@ mod tests {
                 "→" => key(KeyCode::Right),
                 "Home" => key(KeyCode::Home),
                 "y" => key(KeyCode::Char('y')),
+                "h" => key(KeyCode::Char('h')),
                 "n" => key(KeyCode::Char('n')),
                 "End" => key(KeyCode::End),
                 "PgUp" => key(KeyCode::PageUp),
@@ -278,16 +276,31 @@ mod tests {
     }
 
     #[test]
-    fn f_keys_switch_tabs() {
+    fn digits_switch_tabs() {
         for context in [Context::Jobs, Context::Settings, Context::Help] {
             let app = app_in(context);
             assert_eq!(
-                map_key(&app, key(KeyCode::F(1))),
+                map_key(&app, key(KeyCode::Char('1'))),
                 Some(Action::SwitchTab(Tab::Jobs)),
                 "{context:?}"
             );
-            assert_eq!(map_key(&app, key(KeyCode::F(12))), None, "no such tab");
+            assert_eq!(
+                map_key(&app, key(KeyCode::Char('0'))),
+                Some(Action::SwitchTab(Tab::Settings)),
+                "{context:?}"
+            );
+            assert_eq!(map_key(&app, key(KeyCode::Char('2'))), None, "no such tab");
+            assert_eq!(map_key(&app, key(KeyCode::F(1))), None, "F-keys unused");
         }
+        assert_eq!(
+            map_key(&app_in(Context::Jobs), key(KeyCode::Char('h'))),
+            Some(Action::ToggleHelp)
+        );
+        assert_eq!(
+            map_key(&app_in(Context::Settings), key(KeyCode::Esc)),
+            None,
+            "Settings is a tab: Esc doesn't leave it"
+        );
     }
 
     #[test]
@@ -388,7 +401,7 @@ mod tests {
         for code in [
             KeyCode::Char('s'),
             KeyCode::Char('r'),
-            KeyCode::F(1),
+            KeyCode::Char('1'),
             KeyCode::Down,
         ] {
             assert_eq!(map_key(&app, key(code)), None, "{code:?}");
@@ -444,9 +457,9 @@ mod tests {
             Some(Action::SelectPageDown)
         );
         assert_eq!(
-            map_key(&app, key(KeyCode::F(1))),
-            None,
-            "F-keys off while typing"
+            map_key(&app, key(KeyCode::Char('1'))),
+            Some(Action::Input('1')),
+            "digits are typed, not tab keys, while typing"
         );
     }
 

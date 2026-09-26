@@ -2,8 +2,8 @@
 source: tests/render.rs
 expression: render(&app).backend()
 ---
-" Leeroy  ● https://ci.example.com · Jenkins 2.504.1 · me                 ⟳ 1m ✕ "
-" F1 Jobs                                                                        "
+" Leeroy  ● https://ci.example.com · Jenkins 2.504.1 · me     h/?  help   ⟳ 1m ✕ "
+" 1 Jobs                                                              0 Settings "
 "Jobs ───────────────────────────────────────────────────────────────────────────"
 "                                                                                "
 "                               Could not load jobs                              "
@@ -23,6 +23,6 @@ expression: render(&app).backend()
 "                                                                                "
 "                                                                                "
 "                                                                                "
+"                                                                                "
 "────────────────────────────────────────────────────────────────────────────────"
 " ↑/↓  select   Enter  last build   /  filter                                    "
-" q  quit   s  settings   ?  help   r  refresh   R  toggle auto-refresh          "

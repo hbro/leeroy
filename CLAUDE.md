@@ -45,13 +45,15 @@ Elm-style: pure core, thin IO shell.
 Rules:
 - New behaviour = new `Action` variant + `update` arm + tests.
 - Header: app name + connected Jenkins instance (`App::connection`).
-- Tabs: `app::Tab` (`ALL`, F-key = position + 1), tab bar under the header. New
-  content = new `Tab` + `View` variant. F-keys work everywhere except text input.
+- Tabs: `app::Tab`, selected with digits: content tabs `1`–`9` (`Tab::key`),
+  Settings `0`, right-aligned in the tab bar. New content = new `Tab` + `View`
+  variant. Tab keys work everywhere except text input (digits are typed there).
+  Tabs aren't closable: `Esc` doesn't leave them.
 - Selected rows use `SELECTED_BG` (dark gray); a cell colour equal to it is
   swapped to `SELECTED_FG_ON_BG` on that row. Test
   `selected_row_status_stays_readable` checks every status stays fg != bg.
-- Global keys (`GLOBAL_BINDINGS`, bottom bar): q, s, ?, r (refresh), R (toggle
-  auto-refresh). The refresh status is a compact `⟳ 4s` at the right end of the
+- Global keys (`GLOBAL_BINDINGS`; no bottom bar, listed in the help popup, the
+  header shows an `h/?` hint): q, s, h/?, r (refresh), R (toggle auto-refresh). The refresh status is a compact `⟳ 4s` at the right end of the
   header (icon green = auto-refresh on, gray = off; `…` fetching, `✕` failed).
 - Build view (`View::Build`, part of the Jobs tab): `Enter` on a job opens it
   and fetches unconditionally. `BuildRef::Latest` fetches the job's build numbers
@@ -76,16 +78,15 @@ Rules:
   Never more than one fetch in flight: `fetch_jobs()` is a no-op while
   `JobsState::fetch_in_flight()` (manual `r` included); only a new connection
   (new generation) resets that.
-- Bottom of screen = two bars. Global bar (last line): app-wide commands
-  (`GLOBAL_BINDINGS`). Context bar above it: keys of
+- Bottom of screen = the context bar: keys of
   whatever has focus, from `context_bindings(App::context())`. A new view or overlay
   = new `View`/`Context` variant, its bindings in `event.rs`, handled in `map_key`.
   Test `advertised_bindings_are_mapped` fails if a shown key does nothing.
 - `Esc` = `Action::Back`: closes the current context (popup, sub-view) and is
   only mapped where `Context::closable()`. It must never quit the app.
 - Text input contexts (`Context::captures_input()`) receive every key except
-  `Ctrl-C`; global keys are off there and the global bar is dimmed (generally:
-  `Context::global_keys_off()`, which also covers the quit prompt).
+  `Ctrl-C`; global keys are off there (generally: `Context::global_keys_off()`,
+  which also covers the quit prompt).
 - Quit: `q` = `Action::RequestQuit` → "Quit Leeroy?" prompt (`Context::ConfirmQuit`,
   on top of everything; y/Enter/q quit, n/Esc stay) unless `ui.confirm_quit` (default
   on) is off. `Ctrl-C` = `Action::Quit`, immediate, everywhere. Editing uses

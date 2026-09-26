@@ -2,8 +2,8 @@
 source: tests/render.rs
 expression: screen
 ---
-" Leeroy  ◌ https://ci.example.com · connecting…                                 "
-" F1 Jobs   Settings                                                             "
+" Leeroy  ◌ https://ci.example.com · connecting…                       h/?  help "
+" 1 Jobs                                                              0 Settings "
 "Settings ───────────────────────────────────────────────────────────────────────"
 "   Config file       /home/user/.config/leeroy/config.toml                      "
 "                                                                                "
@@ -23,6 +23,6 @@ expression: screen
 "                                                                                "
 "   Base URL of the Jenkins instance, e.g. https://jenkins.example.com           "
 "   For authentication, add headers below rather than user:pass@ in the URL.     "
+"                                                                                "
 "────────────────────────────────────────────────────────────────────────────────"
-" ↑/↓  select   Enter  edit/toggle   Esc  back                                   "
-" q  quit   s  settings   ?  help   r  refresh   R  toggle auto-refresh          "
+" ↑/↓  select   Enter  edit/toggle                                               "

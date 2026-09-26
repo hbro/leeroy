@@ -2,9 +2,10 @@
 source: tests/render.rs
 expression: render(&app).backend()
 ---
-" Leeroy  ● https://ci.example.com · Jenkins 2.504.1 · me                   ⟳ 0s "
-" F1 Jobs                                                                        "
+" Leeroy  ● https://ci.example.com · Jenkins 2.504.1 · me       h/?  help   ⟳ 0s "
+" 1 Jobs                                                              0 Settings "
 "backend/api/release-1.2 · #42 · console · ⟳ following ──────────────────────────"
+"[INFO]  line 081 of the build                                                  ║"
 "[INFO]  line 082 of the build                                                  ║"
 "[INFO]  line 083 of the build                                                  ║"
 "[INFO]  line 084 of the build                                                  ║"
@@ -19,10 +20,9 @@ expression: render(&app).backend()
 "[INFO]  line 093 of the build                                                  ║"
 "[INFO]  line 094 of the build                                                  ║"
 "[INFO]  line 095 of the build                                                  ║"
-"[INFO]  line 096 of the build                                                  ║"
+"[INFO]  line 096 of the build                                                  █"
 "[INFO]  line 097 of the build                                                  █"
 "[INFO]  line 098 of the build                                                  █"
 "[INFO]  line 099 of the build                                                  █"
 "────────────────────────────────────────────────────────────────────────────────"
 " ↑/↓  line   PgUp/PgDn  page   Home/End  top/bottom   c/Esc  back   ←/→  sideway"
-" q  quit   s  settings   ?  help   r  refresh   R  toggle auto-refresh          "
