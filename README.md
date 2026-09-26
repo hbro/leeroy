@@ -14,6 +14,12 @@ An existing `~/.leeroy/config.toml` is still picked up when there's no file at
 step 3; new configs are always created in the XDG location. If both exist,
 Leeroy uses the XDG one and prints a warning to stderr.
 
+On **Windows**, step 3 is `%XDG_CONFIG_HOME%\leeroy\config.toml` only when that
+variable is set to an absolute path; otherwise the config lives in
+`%APPDATA%\leeroy\config.toml`. The log file defaults to
+`%LOCALAPPDATA%\leeroy\leeroy.log` there (`~/.local/state/leeroy/leeroy.log`
+elsewhere; `LEEROY_LOG` overrides both).
+
 ```toml
 [jenkins]
 url = "https://jenkins.example.com"

@@ -113,7 +113,10 @@ Rules:
   config file; env-set values are read-only in the TUI and never written to the file.
   Config path: `--config` > `$LEEROY_CONFIG` > `$XDG_CONFIG_HOME/leeroy/config.toml`
   (default `~/.config/...`); legacy `~/.leeroy/config.toml` only if it exists and
-  the XDG file doesn't. Empty env values count as unset.
+  the XDG file doesn't. Windows: `%APPDATA%\leeroy\config.toml` instead of the
+  `~` paths (log: `%LOCALAPPDATA%`). Path logic takes a `config::Platform`
+  parameter so every platform's rules are tested on Linux; never use `cfg!` for
+  it outside `Platform::current()`. Empty env values count as unset.
 - Auth is generic: `[jenkins.headers]` (`Settings::header`/`set_header`, names
   case-insensitive) sent with every request; env `LEEROY_JENKINS_HEADERS_<NAME>`
   (`_` → `-`). Settings view rows = `SettingsState::rows()`: fixed `SettingKey`s,

@@ -604,11 +604,63 @@ impl ConfigLocation {
     }
 }
 
+/// Which platform's conventions to follow for default locations. A parameter
+/// (rather than `cfg!`) so each platform's rules can be tested anywhere.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Platform {
+    /// Linux, macOS, BSDs: XDG base directories.
+    Unix,
+    /// `%APPDATA%` / `%LOCALAPPDATA%`.
+    Windows,
+}
+
+impl Platform {
+    pub fn current() -> Self {
+        if cfg!(windows) {
+            Platform::Windows
+        } else {
+            Platform::Unix
+        }
+    }
+
+    /// Absolute path by this platform's rules (checked on the string, since a
+    /// Windows path isn't absolute to `Path` on Unix and vice versa).
+    fn is_absolute(self, path: &str) -> bool {
+        match self {
+            Platform::Unix => path.starts_with('/'),
+            Platform::Windows => {
+                let bytes = path.as_bytes();
+                // C:\... / C:/... or \\server\share (UNC)
+                (bytes.len() >= 3
+                    && bytes[0].is_ascii_alphabetic()
+                    && bytes[1] == b':'
+                    && matches!(bytes[2], b'\\' | b'/'))
+                    || path.starts_with("\\\\")
+            }
+        }
+    }
+}
+
 /// Where the config file lives. `None` if no location can be determined
-/// (no `$HOME`), in which case the caller should ask for `--config`.
+/// (no `$HOME` / `%APPDATA%`), in which case the caller should ask for `--config`.
 ///
 /// `exists` reports whether a file exists (normally `Path::exists`).
 pub fn resolve_path(
+    cli: Option<PathBuf>,
+    env: impl Fn(&str) -> Option<OsString>,
+    exists: impl Fn(&Path) -> bool,
+) -> Option<ConfigLocation> {
+    resolve_path_for(Platform::current(), cli, env, exists)
+}
+
+/// [`resolve_path`] by the rules of `platform`:
+/// - both: `--config` > `$LEEROY_CONFIG` > `$XDG_CONFIG_HOME/leeroy/config.toml`
+///   (when set to an absolute path);
+/// - Unix: then `~/.config/leeroy/config.toml`, with an existing legacy
+///   `~/.leeroy/config.toml` used only when the XDG file doesn't exist;
+/// - Windows: then `%APPDATA%\leeroy\config.toml` (per-user, roaming).
+pub fn resolve_path_for(
+    platform: Platform,
     cli: Option<PathBuf>,
     env: impl Fn(&str) -> Option<OsString>,
     exists: impl Fn(&Path) -> bool,
@@ -619,16 +671,25 @@ pub fn resolve_path(
     if let Some(path) = non_empty(env(CONFIG_ENV)) {
         return Some(ConfigLocation::at(path.into()));
     }
-    let home = non_empty(env("HOME")).map(PathBuf::from);
-    // Per the XDG spec: relative $XDG_CONFIG_HOME is ignored, default ~/.config.
-    let xdg_dir = non_empty(env("XDG_CONFIG_HOME"))
-        .map(PathBuf::from)
-        .filter(|dir| dir.is_absolute())
-        .or_else(|| home.as_ref().map(|h| h.join(".config")));
-    let xdg = xdg_dir.map(|dir| dir.join("leeroy").join(FILE_NAME));
-    let legacy = home.map(|h| h.join(".leeroy").join(FILE_NAME));
+    // Per the XDG spec, a relative $XDG_CONFIG_HOME is ignored.
+    let xdg_home = non_empty(env("XDG_CONFIG_HOME"))
+        .filter(|dir| platform.is_absolute(dir))
+        .map(PathBuf::from);
+    let in_dir = |dir: PathBuf| dir.join("leeroy").join(FILE_NAME);
 
-    let legacy = legacy.filter(|legacy| exists(legacy));
+    if platform == Platform::Windows {
+        return xdg_home
+            .or_else(|| non_empty(env("APPDATA")).map(PathBuf::from))
+            .map(|dir| ConfigLocation::at(in_dir(dir)));
+    }
+
+    let home = non_empty(env("HOME")).map(PathBuf::from);
+    let xdg = xdg_home
+        .or_else(|| home.as_ref().map(|h| h.join(".config")))
+        .map(in_dir);
+    let legacy = home
+        .map(|h| h.join(".leeroy").join(FILE_NAME))
+        .filter(|legacy| exists(legacy));
     match (xdg, legacy) {
         (Some(xdg), Some(legacy)) if exists(&xdg) => Some(ConfigLocation {
             path: xdg,
@@ -637,6 +698,28 @@ pub fn resolve_path(
         (_, Some(legacy)) => Some(ConfigLocation::at(legacy)),
         (xdg, None) => xdg.map(ConfigLocation::at),
     }
+}
+
+/// Default log file: `$LEEROY_LOG`, else per platform
+/// `$XDG_STATE_HOME/leeroy/leeroy.log` (default `~/.local/state/…`) or
+/// `%LOCALAPPDATA%\leeroy\leeroy.log` (machine-local, not roaming), else the
+/// temp directory.
+pub fn log_path_for(platform: Platform, env: impl Fn(&str) -> Option<OsString>) -> PathBuf {
+    if let Some(path) = non_empty(env("LEEROY_LOG")) {
+        return path.into();
+    }
+    let dir = match platform {
+        Platform::Windows => non_empty(env("LOCALAPPDATA")).map(PathBuf::from),
+        Platform::Unix => non_empty(env("XDG_STATE_HOME"))
+            .filter(|dir| platform.is_absolute(dir))
+            .map(PathBuf::from)
+            .or_else(|| {
+                non_empty(env("HOME")).map(|h| PathBuf::from(h).join(".local").join("state"))
+            }),
+    };
+    dir.unwrap_or_else(std::env::temp_dir)
+        .join("leeroy")
+        .join("leeroy.log")
 }
 
 /// Load the config file. A missing file means default settings.
@@ -794,7 +877,7 @@ mod tests {
         env: impl Fn(&str) -> Option<OsString>,
         exists: impl Fn(&Path) -> bool,
     ) -> Option<PathBuf> {
-        resolve_path(cli, env, exists).map(|l| l.path)
+        resolve_path_for(Platform::Unix, cli, env, exists).map(|l| l.path)
     }
 
     /// `exists` stub: only the given paths exist.
@@ -862,13 +945,93 @@ mod tests {
         let legacy = "/home/u/.leeroy/config.toml";
         let xdg = "/home/u/.config/leeroy/config.toml";
 
-        let both = resolve_path(None, &home, files(&[legacy, xdg])).unwrap();
+        let both = resolve_path_for(Platform::Unix, None, &home, files(&[legacy, xdg])).unwrap();
         assert_eq!(both.ignored, Some(legacy.into()));
-        let only_legacy = resolve_path(None, &home, files(&[legacy])).unwrap();
+        let only_legacy = resolve_path_for(Platform::Unix, None, &home, files(&[legacy])).unwrap();
         assert_eq!(only_legacy.ignored, None);
         // An explicit choice isn't second-guessed.
-        let cli = resolve_path(Some("/cli.toml".into()), &home, files(&[legacy, xdg])).unwrap();
+        let cli = resolve_path_for(
+            Platform::Unix,
+            Some("/cli.toml".into()),
+            &home,
+            files(&[legacy, xdg]),
+        )
+        .unwrap();
         assert_eq!(cli.ignored, None);
+    }
+
+    fn windows(vars: &[(&str, &str)]) -> Option<PathBuf> {
+        resolve_path_for(Platform::Windows, None, env(vars), files(&[])).map(|l| l.path)
+    }
+
+    #[test]
+    fn windows_config_in_appdata() {
+        let appdata = r"C:\Users\me\AppData\Roaming";
+        let expected = PathBuf::from(appdata).join("leeroy").join("config.toml");
+        assert_eq!(windows(&[("APPDATA", appdata)]), Some(expected.clone()));
+        // $HOME (e.g. from Git Bash) doesn't change that; there's no ~/.leeroy.
+        assert_eq!(
+            windows(&[("APPDATA", appdata), ("HOME", "/c/Users/me")]),
+            Some(expected)
+        );
+        assert_eq!(windows(&[("HOME", "/c/Users/me")]), None, "no %APPDATA%");
+    }
+
+    #[test]
+    fn windows_precedence() {
+        let appdata = r"C:\Users\me\AppData\Roaming";
+        assert_eq!(
+            windows(&[("LEEROY_CONFIG", r"D:\leeroy.toml"), ("APPDATA", appdata)]),
+            Some(PathBuf::from(r"D:\leeroy.toml"))
+        );
+        // An absolute $XDG_CONFIG_HOME wins (some Git Bash / MSYS setups set it).
+        assert_eq!(
+            windows(&[("XDG_CONFIG_HOME", r"C:\cfg"), ("APPDATA", appdata)]),
+            Some(PathBuf::from(r"C:\cfg").join("leeroy").join("config.toml"))
+        );
+        // Relative (or Unix-style) values are ignored.
+        for xdg in ["cfg", "/home/me/.config"] {
+            assert_eq!(
+                windows(&[("XDG_CONFIG_HOME", xdg), ("APPDATA", appdata)]),
+                Some(PathBuf::from(appdata).join("leeroy").join("config.toml")),
+                "{xdg}"
+            );
+        }
+    }
+
+    #[test]
+    fn windows_absolute_paths() {
+        for path in [r"C:\x", "c:/x", r"\\server\share"] {
+            assert!(Platform::Windows.is_absolute(path), "{path}");
+        }
+        for path in ["x", r"\x", "C:x", "/x"] {
+            assert!(!Platform::Windows.is_absolute(path), "{path}");
+        }
+    }
+
+    #[test]
+    fn log_locations() {
+        assert_eq!(
+            log_path_for(Platform::Windows, env(&[("LOCALAPPDATA", r"C:\Local")])),
+            PathBuf::from(r"C:\Local").join("leeroy").join("leeroy.log")
+        );
+        assert_eq!(
+            log_path_for(Platform::Unix, env(&[("HOME", "/home/u")])),
+            PathBuf::from("/home/u/.local/state/leeroy/leeroy.log")
+        );
+        assert_eq!(
+            log_path_for(
+                Platform::Unix,
+                env(&[("XDG_STATE_HOME", "/state"), ("HOME", "/h")])
+            ),
+            PathBuf::from("/state/leeroy/leeroy.log")
+        );
+        assert_eq!(
+            log_path_for(Platform::Windows, env(&[("LEEROY_LOG", r"D:\l.log")])),
+            PathBuf::from(r"D:\l.log")
+        );
+        // Nothing set: the temp directory.
+        assert!(log_path_for(Platform::Windows, env(&[])).starts_with(std::env::temp_dir()));
     }
 
     #[test]

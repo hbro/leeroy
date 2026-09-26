@@ -38,7 +38,7 @@ const TICK_RATE: Duration = Duration::from_millis(250);
 struct Cli {
     /// Config file to use. Overrides $LEEROY_CONFIG
     /// [default: $XDG_CONFIG_HOME/leeroy/config.toml (~/.config/leeroy/config.toml),
-    /// or an existing ~/.leeroy/config.toml]
+    /// or an existing ~/.leeroy/config.toml; on Windows %APPDATA%\leeroy\config.toml]
     // $LEEROY_CONFIG is handled by config::resolve_path rather than clap's
     // `env`, which rejects an empty value instead of ignoring it.
     #[arg(short, long, value_name = "FILE")]
@@ -56,7 +56,10 @@ async fn main() -> Result<()> {
 
     let location = config::resolve_path(cli.config, |name| std::env::var_os(name), Path::exists)
         .ok_or_else(|| {
-            eyre!("cannot determine config location: set $HOME or $LEEROY_CONFIG, or pass --config")
+            eyre!(
+                "cannot determine config location (no $HOME, or %APPDATA% on Windows): \
+                 set LEEROY_CONFIG or pass --config"
+            )
         })?;
     if let Some(ignored) = &location.ignored {
         // Printed before the alternate screen, so it's visible after quitting.
@@ -285,18 +288,10 @@ impl Executor {
     }
 }
 
-/// Log to a file: stdout belongs to the TUI.
-/// Path: `$LEEROY_LOG`, else `$XDG_STATE_HOME/leeroy/leeroy.log`
-/// (defaulting to `~/.local/state`). Filter via `RUST_LOG` (default `info`).
+/// Log to a file: stdout belongs to the TUI. Location: see
+/// `config::log_path_for`. Filter via `RUST_LOG` (default `info`).
 fn init_logging() -> Result<WorkerGuard> {
-    let path = match std::env::var_os("LEEROY_LOG") {
-        Some(p) => PathBuf::from(p),
-        None => std::env::var_os("XDG_STATE_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state")))
-            .unwrap_or_else(std::env::temp_dir)
-            .join("leeroy/leeroy.log"),
-    };
+    let path = config::log_path_for(config::Platform::current(), |name| std::env::var_os(name));
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
