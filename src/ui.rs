@@ -3,20 +3,25 @@ use ratatui::{
     layout::{Alignment, Constraint, Flex, Layout, Rect},
     style::{Color, Modifier, Style, Stylize},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap},
+    widgets::{
+        Block, BorderType, Borders, Cell, Clear, HighlightSpacing, Paragraph, Row, Table,
+        TableState, Wrap,
+    },
 };
 
 use crate::{
-    app::{App, ConnectionStatus, SettingsRow, SettingsState, StatusMessage, View},
-    config::{HEADERS_DOC, SettingKey, header_env_var, redact_url},
+    app::{App, ConnectionStatus, SettingsRow, SettingsState, StatusMessage, Tab, View},
+    config::{DEFAULT_REFRESH_SECS, HEADERS_DOC, SettingKey, header_env_var, redact_url},
     event::{Binding, GLOBAL_BINDINGS, context_bindings},
+    jobs::{JobStatus, JobsLoad},
     proxy::SystemProxy,
 };
 
 /// Draw the whole UI. Keep this deterministic (no clock, no randomness):
 /// snapshot tests depend on it.
 pub fn render(frame: &mut Frame, app: &App) {
-    let [header, body, context_bar, global_bar] = Layout::vertical([
+    let [header, tabs, body, context_bar, global_bar] = Layout::vertical([
+        Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Min(0),
         Constraint::Length(1),
@@ -25,6 +30,7 @@ pub fn render(frame: &mut Frame, app: &App) {
     .areas(frame.area());
 
     render_header(frame, header, app);
+    render_tabs(frame, tabs, app);
     match app.view {
         View::Jobs => render_jobs(frame, body, app),
         View::Settings => render_settings(frame, body, &app.settings),
@@ -94,8 +100,38 @@ fn view_block(title: &str) -> Block<'_> {
         .border_style(Style::new().fg(Color::Blue))
 }
 
+/// Tab bar: `F1 Jobs  F2 …`, the active one highlighted. Settings isn't a
+/// tab but shows up as active while open, so it's clear where you are.
+fn render_tabs(frame: &mut Frame, area: Rect, app: &App) {
+    let active = Style::new().black().on_blue().bold();
+    let inactive = Style::new().gray();
+    let mut spans = vec![Span::raw(" ")];
+    for tab in Tab::ALL {
+        let style = if app.view.tab() == Some(tab) {
+            active
+        } else {
+            inactive
+        };
+        spans.push(Span::styled(
+            format!(" F{} {} ", tab.f_key(), tab.title()),
+            style,
+        ));
+        spans.push(Span::raw(" "));
+    }
+    if app.view == View::Settings {
+        spans.push(Span::styled(" Settings ", active));
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
 fn render_jobs(frame: &mut Frame, area: Rect, app: &App) {
     let hint = Style::new().dark_gray();
+    let centered_message = |lines: Vec<Line<'static>>| {
+        Paragraph::new(lines)
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: true })
+            .block(view_block("Jobs"))
+    };
     let lines = match &app.connection {
         ConnectionStatus::NotConfigured => vec![
             Line::raw(""),
@@ -106,36 +142,120 @@ fn render_jobs(frame: &mut Frame, area: Rect, app: &App) {
             Line::raw(""),
             Line::styled(format!("Connecting to {url}…"), Style::new().italic()),
         ],
-        ConnectionStatus::Connected { info, .. } => {
-            let mut lines = vec![
-                Line::raw(""),
-                Line::styled(format!("Connected as {}", info.user), Style::new().italic()),
-            ];
-            if app
-                .settings
-                .connection_config()
-                .is_some_and(|c| c.headers.is_empty())
-            {
-                lines.push(Line::styled(
-                    "Add an Authorization header in settings (s) to log in",
-                    hint,
-                ));
-            }
-            lines.push(Line::styled("Job list is not implemented yet", hint));
-            lines
-        }
         ConnectionStatus::Failed { url, error } => vec![
             Line::raw(""),
             Line::styled(format!("Cannot reach {url}"), Style::new().italic()),
-            Line::styled(error.as_str(), Style::new().red()),
-            Line::styled("Check the settings (s)", hint),
+            Line::styled(error.clone(), Style::new().red()),
+            Line::styled("Check the settings (s), or press r to retry", hint),
         ],
+        ConnectionStatus::Connected { .. } => match &app.jobs.load {
+            JobsLoad::NotLoaded | JobsLoad::Loading => vec![
+                Line::raw(""),
+                Line::styled("Loading jobs…", Style::new().italic()),
+            ],
+            JobsLoad::Failed(error) => vec![
+                Line::raw(""),
+                Line::styled("Could not load jobs", Style::new().italic()),
+                Line::styled(error.clone(), Style::new().red()),
+                Line::styled("Press r to retry", hint),
+            ],
+            JobsLoad::Loaded(_) => return render_job_list(frame, area, app),
+        },
     };
-    let placeholder = Paragraph::new(lines)
-        .alignment(Alignment::Center)
-        .wrap(Wrap { trim: true })
-        .block(view_block("Jobs"));
-    frame.render_widget(placeholder, area);
+    frame.render_widget(centered_message(lines), area);
+}
+
+fn render_job_list(frame: &mut Frame, area: Rect, app: &App) {
+    let jobs = &app.jobs;
+    let visible = jobs.visible();
+    let mut title = if jobs.active_filter().trim().is_empty() {
+        format!("Jobs ({})", jobs.total())
+    } else {
+        format!("Jobs ({}/{})", visible.len(), jobs.total())
+    };
+    if jobs.refreshing {
+        title.push_str(" · refreshing…");
+    }
+    let block = view_block(&title);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    // Filter line on top while typing or while a filter is applied.
+    let show_filter = jobs.filter_input.is_some() || !jobs.filter.is_empty();
+    let [filter_area, list_area] = Layout::vertical([
+        Constraint::Length(u16::from(show_filter)),
+        Constraint::Min(0),
+    ])
+    .areas(inner);
+    if let Some(input) = &jobs.filter_input {
+        let mut spans = vec![Span::styled(" / ", Style::new().yellow().bold())];
+        let shown: Vec<char> = input.value().chars().collect();
+        spans.extend(input_spans(&shown, input.cursor()));
+        frame.render_widget(Paragraph::new(Line::from(spans)), filter_area);
+    } else if show_filter {
+        let line = Line::from(vec![
+            Span::styled(" filter: ", Style::new().dark_gray()),
+            Span::styled(jobs.filter.clone(), Style::new().yellow()),
+        ]);
+        frame.render_widget(Paragraph::new(line), filter_area);
+    }
+
+    if visible.is_empty() {
+        let text = if jobs.total() == 0 {
+            "This Jenkins instance has no jobs".to_owned()
+        } else {
+            format!("No jobs match \"{}\"", jobs.active_filter().trim())
+        };
+        let message = Paragraph::new(vec![
+            Line::raw(""),
+            Line::styled(text, Style::new().italic()),
+        ])
+        .alignment(Alignment::Center);
+        frame.render_widget(message, list_area);
+        return;
+    }
+
+    let rows = visible.iter().map(|job| {
+        let (symbol, color) = status_symbol(job.status);
+        Row::new(vec![
+            Cell::from(Span::styled(symbol, Style::new().fg(color))),
+            Cell::from(Span::styled(job.status.label(), Style::new().fg(color))),
+            Cell::from(if job.building {
+                Span::styled("⟳", Style::new().yellow().bold())
+            } else {
+                Span::raw("")
+            }),
+            Cell::from(job.full_name.as_str()),
+        ])
+    });
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(1),
+            Constraint::Length(9),
+            Constraint::Length(1),
+            Constraint::Min(0),
+        ],
+    )
+    .column_spacing(1)
+    .row_highlight_style(Style::new().bg(Color::DarkGray).bold())
+    .highlight_symbol("▶ ")
+    .highlight_spacing(HighlightSpacing::Always);
+    let mut state = TableState::default().with_selected(Some(jobs.selected));
+    frame.render_stateful_widget(table, list_area, &mut state);
+}
+
+/// Symbol + color per status; the status word is shown too (not color alone).
+fn status_symbol(status: JobStatus) -> (&'static str, Color) {
+    match status {
+        JobStatus::Success => ("●", Color::Green),
+        JobStatus::Unstable => ("●", Color::Yellow),
+        JobStatus::Failed => ("●", Color::Red),
+        JobStatus::Aborted => ("●", Color::Gray),
+        JobStatus::NotBuilt => ("○", Color::DarkGray),
+        JobStatus::Disabled => ("⊘", Color::DarkGray),
+        JobStatus::Unknown => ("?", Color::DarkGray),
+    }
 }
 
 const SECRET_MASK: &str = "••••••••";
@@ -193,12 +313,15 @@ fn render_settings(frame: &mut Frame, area: Rect, s: &SettingsState) {
             SettingsRow::Setting(key) => {
                 let key = *key;
                 spans.push(match effective.get(key) {
-                    _ if key.is_bool() => {
-                        if effective.is_on(key) {
+                    _ if key.is_bool() => match effective.is_on(key) {
+                        true if key == SettingKey::JenkinsSkipTlsVerify => {
                             Span::styled("on (insecure)", Style::new().red().bold())
-                        } else {
-                            Span::raw("off")
                         }
+                        true => Span::raw("on"),
+                        false => Span::raw("off"),
+                    },
+                    None if key == SettingKey::RefreshInterval => {
+                        Span::styled(format!("{} s (default)", DEFAULT_REFRESH_SECS), dim)
                     }
                     None if key == SettingKey::ProxyUrl => {
                         Span::styled(system_proxy_note(&s.system_proxy()), dim)
@@ -315,8 +438,8 @@ fn render_context_bar(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-/// Global bar: application-wide commands. Dimmed while typing text, since
-/// the keys then go to the input instead.
+/// Global bar: application-wide commands (dimmed while typing text, since
+/// the keys then go to the input) and the refresh status on the right.
 fn render_global_bar(frame: &mut Frame, area: Rect, app: &App) {
     let captured = app.context().captures_input();
     let key_style = if captured {
@@ -328,7 +451,52 @@ fn render_global_bar(frame: &mut Frame, area: Rect, app: &App) {
     if captured {
         commands = commands.gray().italic();
     }
-    frame.render_widget(Paragraph::new(commands).on_dark_gray(), area);
+    let status = refresh_status(app);
+    let [left, right] = Layout::horizontal([
+        Constraint::Min(0),
+        Constraint::Length(status.width() as u16),
+    ])
+    .areas(area);
+    frame.render_widget(Paragraph::new(commands).on_dark_gray(), left);
+    frame.render_widget(Paragraph::new(status).on_dark_gray(), right);
+}
+
+/// `auto 30s · updated 12s ago`: whether auto-refresh is on and how old the
+/// data is. Only shown when connected (there's nothing to refresh otherwise).
+fn refresh_status(app: &App) -> Line<'static> {
+    if !matches!(app.connection, ConnectionStatus::Connected { .. }) {
+        return Line::default();
+    }
+    let dim = Style::new().gray();
+    let mut spans = vec![if app.auto_refresh {
+        let secs = app.settings.effective().refresh_interval().as_secs();
+        Span::styled(format!("⟳ auto {secs}s"), Style::new().green())
+    } else {
+        Span::styled("auto off", dim)
+    }];
+    let busy = app.jobs.refreshing || app.jobs.load == JobsLoad::Loading;
+    if busy {
+        spans.push(Span::styled(" · refreshing…", Style::new().yellow()));
+    } else if let Some(at) = app.jobs.fetched_at {
+        let age = app.now.saturating_duration_since(at);
+        spans.push(Span::styled(format!(" · updated {}", format_age(age)), dim));
+    }
+    if matches!(app.jobs.load, JobsLoad::Failed(_)) && !busy {
+        spans.push(Span::styled(" · last refresh failed", Style::new().red()));
+    }
+    spans.push(Span::raw(" "));
+    Line::from(spans)
+}
+
+/// `just now`, `12s ago`, `4m ago`, `2h ago`, `3d ago`.
+fn format_age(age: std::time::Duration) -> String {
+    match age.as_secs() {
+        0 => "just now".into(),
+        s @ 1..60 => format!("{s}s ago"),
+        s @ 60..3600 => format!("{}m ago", s / 60),
+        s @ 3600..86_400 => format!("{}h ago", s / 3600),
+        s => format!("{}d ago", s / 86_400),
+    }
 }
 
 fn render_help(frame: &mut Frame, area: Rect, app: &App) {
@@ -350,6 +518,16 @@ fn render_help(frame: &mut Frame, area: Rect, app: &App) {
     let view_context = app.view.context();
     let mut lines = vec![section("Global")];
     lines.extend(rows(GLOBAL_BINDINGS));
+    lines.push(Line::raw(""));
+    lines.push(section("Tabs"));
+    let tab_bindings: Vec<Binding> = Tab::ALL
+        .iter()
+        .map(|tab| Binding {
+            key: TAB_KEYS[usize::from(tab.f_key()) - 1],
+            desc: tab.title(),
+        })
+        .collect();
+    lines.extend(rows(&tab_bindings));
     let view_bindings = context_bindings(view_context);
     if !view_bindings.is_empty() {
         lines.push(Line::raw(""));
@@ -365,6 +543,11 @@ fn render_help(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(Clear, popup);
     frame.render_widget(Paragraph::new(lines).block(block), popup);
 }
+
+/// Labels for F-keys, indexed by `Tab::f_key() - 1`.
+const TAB_KEYS: [&str; 12] = [
+    "F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10", "F11", "F12",
+];
 
 fn centered(area: Rect, width: u16, height: u16) -> Rect {
     let [area] = Layout::vertical([Constraint::Length(height)])

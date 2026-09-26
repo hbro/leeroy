@@ -24,6 +24,10 @@ Authorization = "Basic bWU6czNjcmV0"
 
 [proxy]
 url = "socks5h://user:pass@bastion.example.com:1080"
+
+[refresh]
+auto = true    # default: start with auto-refresh on (toggle with R at any time)
+interval = 10  # default; seconds between automatic refreshes, minimum 1
 ```
 
 Every setting can be overridden by an env var, which wins over the file (and
@@ -35,6 +39,8 @@ can't be edited in the TUI while set):
 | Header `<Name>` | `LEEROY_JENKINS_HEADERS_<NAME>` (`-` written as `_`, e.g. `LEEROY_JENKINS_HEADERS_X_API_KEY`) |
 | Skip TLS verify | `LEEROY_JENKINS_SKIP_TLS_VERIFY` (`true`/`false`, `1`/`0`, `yes`/`no`, `on`/`off`) |
 | Proxy    | `LEEROY_PROXY_URL`        |
+| Auto-refresh | `LEEROY_REFRESH_AUTO` |
+| Refresh interval | `LEEROY_REFRESH_INTERVAL` (seconds, ≥ 1) |
 
 Saving from the TUI keeps comments and unknown keys in the file.
 
@@ -125,3 +131,31 @@ invalid certificates, `skip_tls_verify = true` (toggle "Skip TLS verify" in the
 settings) disables verification. **This is insecure**: anyone between you and
 Jenkins can read your credentials. It's off by default, and while it's on the
 header shows `⚠ TLS NOT VERIFIED`.
+
+## Using Leeroy
+
+Content lives in tabs, switched with the F-keys (shown in the tab bar):
+
+| Key | Tab |
+| --- | --- |
+| `F1` | Jobs |
+
+### Jobs
+
+All jobs of the instance, with folders and multibranch projects flattened into
+`folder/sub/job` names, their last result (colour *and* word) and `⟳` while a
+build runs.
+
+| Key | Action |
+| --- | --- |
+| `↑/↓` `j/k`, `PgUp/PgDn`, `g/G` | move |
+| `/` | filter (live, case-insensitive; space-separated words must all match) |
+| `Enter` / `Esc` while filtering | apply / cancel |
+| `Esc` | clear an applied filter |
+| `r` | refresh now |
+| `R` | auto-refresh on/off for this session |
+
+The status bar (bottom right) shows whether auto-refresh is on, its interval,
+and how long ago the data was fetched (`⟳ auto 10s · updated 4s ago`). The
+default and the interval are in the settings (`[refresh]`); a failed refresh is
+retried after a full interval, never in a tight loop.

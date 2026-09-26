@@ -3,6 +3,7 @@ source: tests/render.rs
 expression: render(&app).backend()
 ---
 " Leeroy  ◌ https://ci.example.com · connecting…                                 "
+"  F1 Jobs                                                                       "
 "╭ Jobs ────────────────────────────────────────────────────────────────────────╮"
 "│                                                                              │"
 "│                     Connecting to https://ci.example.com…                    │"
@@ -22,7 +23,6 @@ expression: render(&app).backend()
 "│                                                                              │"
 "│                                                                              │"
 "│                                                                              │"
-"│                                                                              │"
 "╰──────────────────────────────────────────────────────────────────────────────╯"
-" Jobs                                                                           "
+" Jobs   ↑/↓  select   /  filter   r  refresh   R  auto-refresh                  "
 " q  quit   s  settings   ?  help                                                "

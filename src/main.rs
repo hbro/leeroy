@@ -29,7 +29,8 @@ const TICK_RATE: Duration = Duration::from_millis(250);
 ///
 /// Every setting can also be set with an env var, which takes precedence over
 /// the config file: LEEROY_JENKINS_URL, LEEROY_JENKINS_SKIP_TLS_VERIFY,
-/// LEEROY_PROXY_URL, and LEEROY_JENKINS_HEADERS_<NAME> per HTTP header (e.g.
+/// LEEROY_PROXY_URL, LEEROY_REFRESH_AUTO, LEEROY_REFRESH_INTERVAL, and
+/// LEEROY_JENKINS_HEADERS_<NAME> per HTTP header (e.g.
 /// LEEROY_JENKINS_HEADERS_AUTHORIZATION). Without a proxy setting, the usual
 /// HTTPS_PROXY / HTTP_PROXY / ALL_PROXY / NO_PROXY env vars apply.
 #[derive(Debug, Parser)]
@@ -95,6 +96,7 @@ async fn run(mut terminal: DefaultTerminal, mut app: App) -> Result<()> {
     let mut executor = Executor {
         tx: action_tx,
         connect_task: None,
+        fetch_task: None,
     };
     for effect in app.start() {
         executor.run(effect);
@@ -104,7 +106,7 @@ async fn run(mut terminal: DefaultTerminal, mut app: App) -> Result<()> {
         terminal.draw(|frame| ui::render(frame, &app))?;
 
         let action = tokio::select! {
-            _ = tick.tick() => Some(Action::Tick),
+            now = tick.tick() => Some(Action::Tick(now.into_std())),
             Some(action) = action_rx.recv() => Some(action),
             maybe_event = events.next() => match maybe_event {
                 Some(Ok(Event::Key(key))) => map_key(&app, key),
@@ -117,7 +119,7 @@ async fn run(mut terminal: DefaultTerminal, mut app: App) -> Result<()> {
 
         if let Some(action) = action {
             // Input chars may be part of a secret: don't log them.
-            if !matches!(action, Action::Tick | Action::Input(_)) {
+            if !matches!(action, Action::Tick(_) | Action::Input(_)) {
                 tracing::debug!(?action, "update");
             }
             for effect in app.update(action) {
@@ -134,6 +136,8 @@ struct Executor {
     tx: UnboundedSender<Action>,
     /// The in-flight connection check, aborted when a newer one starts.
     connect_task: Option<AbortHandle>,
+    /// The in-flight job list fetch, aborted when a newer one starts.
+    fetch_task: Option<AbortHandle>,
 }
 
 impl Executor {
@@ -165,6 +169,21 @@ impl Executor {
                     let _ = tx.send(Action::ConnectFinished { generation, result });
                 });
                 self.connect_task = Some(task.abort_handle());
+            }
+            Effect::FetchJobs { generation, config } => {
+                if let Some(previous) = self.fetch_task.take() {
+                    previous.abort();
+                }
+                let tx = tx.clone();
+                let task = tokio::spawn(async move {
+                    let result = jenkins::fetch_jobs(&config).await;
+                    match &result {
+                        Ok(jobs) => tracing::info!(count = jobs.len(), generation, "fetched jobs"),
+                        Err(err) => tracing::warn!(%err, generation, "fetching jobs failed"),
+                    }
+                    let _ = tx.send(Action::JobsFetched { generation, result });
+                });
+                self.fetch_task = Some(task.abort_handle());
             }
         }
     }

@@ -19,7 +19,8 @@ Verify the current state of Leeroy. Stop and report at the first failure, quotin
    Runs are isolated (own config, no inherited `LEEROY_*`/`*_proxy` vars); pass env with
    `scripts/tui.sh start -e VAR=VAL`, a config with `-- --config FILE`.
    For connection features, run `scripts/fake-jenkins.py` in the background
-   (`--auth`, `--delay`, `--status`, `--tls` simulate cases) and point the URL at it.
+   (`--auth`, `--delay`, `--status`, `--tls`, `--jobs N`, `--churn` simulate cases)
+   and point the URL at it, e.g. `start -e LEEROY_JENKINS_URL=http://127.0.0.1:8099`.
    Exercise the feature with `scripts/tui.sh keys <tmux-key-names>` (`Escape`, not `Esc`)
    and `capture` after each step. Check `scripts/tui.sh status` and `target/tui.log` for
    crashes. Always finish with `scripts/tui.sh stop`.

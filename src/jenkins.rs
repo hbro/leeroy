@@ -4,7 +4,10 @@ use std::{fmt, time::Duration};
 
 use serde::Deserialize;
 
-use crate::config::redact_url;
+use crate::{
+    config::redact_url,
+    jobs::{self, Job},
+};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
@@ -80,8 +83,33 @@ pub fn client(config: &ConnectionConfig) -> Result<reqwest::Client, String> {
 /// Uses `whoAmI/api/json`, which also works for anonymous users, so a
 /// successful result with user `anonymous` means "reachable, not logged in".
 pub async fn check(config: &ConnectionConfig) -> Result<ServerInfo, String> {
+    let response = get(config, "whoAmI/api/json").await?;
+    let who: WhoAmI = serde_json::from_str(&response.body)
+        .map_err(|_| "unexpected response: not a Jenkins API (is the URL right?)".to_owned())?;
+    Ok(ServerInfo {
+        version: response.version,
+        user: who.name,
+    })
+}
+
+/// All jobs, folders flattened (see [`crate::jobs::parse_jobs`]).
+pub async fn fetch_jobs(config: &ConnectionConfig) -> Result<Vec<Job>, String> {
+    let path = format!("api/json?tree={}", jobs::tree_query());
+    let response = get(config, &path).await?;
+    jobs::parse_jobs(&response.body)
+}
+
+struct Response {
+    body: String,
+    /// From the `X-Jenkins` header.
+    version: Option<String>,
+}
+
+/// GET `path` (relative to the Jenkins URL) with the configured headers.
+/// Non-2xx answers become errors; 401/403 explain who refused and why.
+async fn get(config: &ConnectionConfig, path: &str) -> Result<Response, String> {
     let client = client(config)?;
-    let endpoint = api_url(&config.url, "whoAmI/api/json")?;
+    let endpoint = api_url(&config.url, path)?;
     let mut request = client.get(endpoint);
     for (name, value) in &config.headers {
         let name = reqwest::header::HeaderName::from_bytes(name.as_bytes())
@@ -108,12 +136,13 @@ pub async fn check(config: &ConnectionConfig) -> Result<ServerInfo, String> {
     let version = header("X-Jenkins");
     // Names only: values may be credentials.
     tracing::debug!(
+        path,
         sent_headers = ?header_names,
         %status,
         final_url = %redact_url(final_url.as_str()),
         jenkins = ?version,
         www_authenticate = ?header("WWW-Authenticate"),
-        "whoAmI response"
+        "response"
     );
     if matches!(status.as_u16(), 401 | 403) {
         return Err(auth_failure(
@@ -127,14 +156,8 @@ pub async fn check(config: &ConnectionConfig) -> Result<ServerInfo, String> {
     if !status.is_success() {
         return Err(format!("unexpected response: HTTP {status}"));
     }
-    let who: WhoAmI = response
-        .json()
-        .await
-        .map_err(|_| "unexpected response: not a Jenkins API (is the URL right?)".to_owned())?;
-    Ok(ServerInfo {
-        version,
-        user: who.name,
-    })
+    let body = response.text().await.map_err(describe)?;
+    Ok(Response { body, version })
 }
 
 /// Explain a 401/403: who refused, and whether a redirect dropped our headers.
@@ -387,6 +410,31 @@ mod tests {
         // Using the target directly works.
         config.url = target.uri();
         assert_eq!(check(&config).await.unwrap().user, "me");
+    }
+
+    #[tokio::test]
+    async fn fetches_jobs_with_headers_and_tree() {
+        let server = MockServer::start().await;
+        Mock::given(path("/ci/api/json"))
+            .and(wiremock::matchers::query_param("tree", jobs::tree_query()))
+            .and(header("x-forwarded-user", "me"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jobs": [
+                    {"name": "b", "fullName": "b", "url": "u/b", "color": "red"},
+                    {"name": "f", "fullName": "f", "url": "u/f", "jobs": [
+                        {"name": "a", "fullName": "f/a", "url": "u/a", "color": "blue_anime"}
+                    ]}
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        let mut config = config(&format!("{}/ci", server.uri()));
+        config.headers = vec![("X-Forwarded-User".into(), "me".into())];
+        let jobs = fetch_jobs(&config).await.unwrap();
+        let names: Vec<&str> = jobs.iter().map(|j| j.full_name.as_str()).collect();
+        assert_eq!(names, ["b", "f/a"]);
+        assert!(jobs[1].building);
     }
 
     #[tokio::test]

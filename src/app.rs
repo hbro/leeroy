@@ -1,9 +1,10 @@
-use std::path::PathBuf;
+use std::{path::PathBuf, time::Instant};
 
 use crate::{
     config::{SettingKey, Settings, header_env_var, parse_header, redact_url},
     input::TextInput,
     jenkins::{ConnectionConfig, ServerInfo},
+    jobs::{Job, JobsLoad, JobsState},
     proxy::{ProxyEnv, SystemProxy},
 };
 
@@ -18,10 +19,23 @@ pub enum Action {
     ToggleHelp,
     /// Close the current context (overlay, edit, sub-view). No-op at the root view.
     Back,
-    Tick,
+    /// Timer tick with the current time: drives auto-refresh and "updated
+    /// N ago". The only way time enters the core, so tests control it.
+    Tick(Instant),
     OpenSettings,
+    SwitchTab(Tab),
     SelectNext,
     SelectPrev,
+    SelectPageDown,
+    SelectPageUp,
+    SelectFirst,
+    SelectLast,
+    /// Jobs tab: open the `/` filter input.
+    StartFilter,
+    /// Reload the job list (or reconnect if the connection failed).
+    Refresh,
+    /// `R`: turn auto-refresh on/off for this session.
+    ToggleAutoRefresh,
     /// Start editing the selected setting.
     StartEdit,
     /// Insert a char at the cursor. Never logged: may be part of a secret.
@@ -44,6 +58,11 @@ pub enum Action {
         generation: u64,
         result: Result<ServerInfo, String>,
     },
+    /// Outcome of [`Effect::FetchJobs`] for connection `generation`.
+    JobsFetched {
+        generation: u64,
+        result: Result<Vec<Job>, String>,
+    },
 }
 
 /// Side effects requested by [`App::update`]. The IO shell (`main.rs`) runs
@@ -60,7 +79,47 @@ pub enum Effect {
         generation: u64,
         config: ConnectionConfig,
     },
+    /// Load the job list; answer with [`Action::JobsFetched`]. `generation`
+    /// is the connection it belongs to.
+    FetchJobs {
+        generation: u64,
+        config: ConnectionConfig,
+    },
 }
+
+/// Content tabs, switched with F-keys (`F1` = first).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tab {
+    Jobs,
+}
+
+impl Tab {
+    pub const ALL: [Tab; 1] = [Tab::Jobs];
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Tab::Jobs => "Jobs",
+        }
+    }
+
+    /// The F-key number: `Tab::ALL[n - 1]`.
+    pub fn f_key(self) -> u8 {
+        Tab::ALL.iter().position(|t| *t == self).unwrap_or(0) as u8 + 1
+    }
+
+    pub fn from_f_key(n: u8) -> Option<Tab> {
+        Tab::ALL.get(usize::from(n).checked_sub(1)?).copied()
+    }
+
+    fn view(self) -> View {
+        match self {
+            Tab::Jobs => View::Jobs,
+        }
+    }
+}
+
+/// Rows moved by PgUp/PgDn.
+pub const PAGE: isize = 10;
 
 /// The main view being displayed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,6 +129,14 @@ pub enum View {
 }
 
 impl View {
+    /// The tab this view belongs to (`None` for settings).
+    pub fn tab(self) -> Option<Tab> {
+        match self {
+            View::Jobs => Some(Tab::Jobs),
+            View::Settings => None,
+        }
+    }
+
     /// The context this view provides when nothing is overlaid on it.
     pub fn context(self) -> Context {
         match self {
@@ -84,6 +151,10 @@ impl View {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Context {
     Jobs,
+    /// Jobs tab with a filter applied (Esc clears it).
+    JobsFiltered,
+    /// Typing the `/` filter.
+    JobsFilter,
     Settings,
     EditSetting,
     Help,
@@ -92,7 +163,8 @@ pub enum Context {
 impl Context {
     pub fn title(self) -> &'static str {
         match self {
-            Context::Jobs => "Jobs",
+            Context::Jobs | Context::JobsFiltered => "Jobs",
+            Context::JobsFilter => "Filter",
             Context::Settings => "Settings",
             Context::EditSetting => "Edit",
             Context::Help => "Help",
@@ -103,13 +175,17 @@ impl Context {
     pub fn closable(self) -> bool {
         match self {
             Context::Jobs => false,
-            Context::Settings | Context::EditSetting | Context::Help => true,
+            Context::JobsFiltered
+            | Context::JobsFilter
+            | Context::Settings
+            | Context::EditSetting
+            | Context::Help => true,
         }
     }
 
     /// Text input: all printable keys go to the input, global keys are off.
     pub fn captures_input(self) -> bool {
-        matches!(self, Context::EditSetting)
+        matches!(self, Context::EditSetting | Context::JobsFilter)
     }
 }
 
@@ -243,6 +319,11 @@ pub struct App {
     /// Id of the latest connection attempt; results of older ones are stale.
     pub connection_generation: u64,
     pub settings: SettingsState,
+    pub jobs: JobsState,
+    /// Time of the latest [`Action::Tick`].
+    pub now: Instant,
+    /// Auto-refresh for this session; starts from the `refresh.auto` setting.
+    pub auto_refresh: bool,
 }
 
 impl Default for App {
@@ -263,7 +344,10 @@ impl App {
             show_help: false,
             connection: ConnectionStatus::NotConfigured,
             connection_generation: 0,
+            auto_refresh: settings.effective().is_on(SettingKey::RefreshAuto),
             settings,
+            jobs: JobsState::default(),
+            now: Instant::now(),
         }
     }
 
@@ -275,6 +359,9 @@ impl App {
     /// Start a new connection attempt with the current settings.
     fn connect(&mut self) -> Option<Effect> {
         self.connection_generation += 1;
+        // Jobs of the previous connection may belong to another instance.
+        self.jobs.load = JobsLoad::NotLoaded;
+        self.jobs.refreshing = false;
         let Some(config) = self.settings.connection_config() else {
             self.connection = ConnectionStatus::NotConfigured;
             return None;
@@ -294,6 +381,10 @@ impl App {
             Context::Help
         } else if self.view == View::Settings && self.settings.editing.is_some() {
             Context::EditSetting
+        } else if self.view == View::Jobs && self.jobs.filter_input.is_some() {
+            Context::JobsFilter
+        } else if self.view == View::Jobs && !self.jobs.filter.is_empty() {
+            Context::JobsFiltered
         } else {
             self.view.context()
         }
@@ -302,16 +393,55 @@ impl App {
     /// Apply an action. Must stay free of IO so tests can drive it directly;
     /// IO is requested by returning [`Effect`]s.
     pub fn update(&mut self, action: Action) -> Vec<Effect> {
+        let context = self.context();
         let s = &mut self.settings;
         match action {
             Action::Quit => self.running = false,
             Action::ToggleHelp => self.show_help = !self.show_help,
             Action::Back => self.back(),
-            Action::Tick => {}
+            Action::Tick(now) => {
+                self.now = now;
+                return self.auto_refresh_if_due();
+            }
+            Action::ToggleAutoRefresh => {
+                self.auto_refresh = !self.auto_refresh;
+                // Turning it on refreshes right away when the data is stale.
+                return self.auto_refresh_if_due();
+            }
             Action::OpenSettings => {
                 self.view = View::Settings;
                 self.show_help = false;
             }
+            Action::SwitchTab(tab) => {
+                self.view = tab.view();
+                self.show_help = false;
+            }
+            Action::StartFilter => {
+                self.jobs.filter_input = Some(TextInput::new(&self.jobs.filter));
+            }
+            Action::Refresh => return self.refresh(),
+            Action::SelectNext
+            | Action::SelectPrev
+            | Action::SelectPageDown
+            | Action::SelectPageUp
+            | Action::SelectFirst
+            | Action::SelectLast
+                if self.view == View::Jobs =>
+            {
+                let delta = match action {
+                    Action::SelectNext => 1,
+                    Action::SelectPrev => -1,
+                    Action::SelectPageDown => PAGE,
+                    Action::SelectPageUp => -PAGE,
+                    Action::SelectFirst => isize::MIN / 2,
+                    _ => isize::MAX / 2,
+                };
+                self.jobs.move_selection(delta);
+            }
+            Action::SelectPageDown
+            | Action::SelectPageUp
+            | Action::SelectFirst
+            | Action::SelectLast => {}
             Action::SelectNext | Action::SelectPrev => {
                 // While editing, moving away saves the field first; an invalid
                 // value keeps the edit open instead of moving.
@@ -334,8 +464,10 @@ impl App {
                         s.message = Some(read_only(key.label(), key.env_var()));
                     }
                     SettingsRow::Setting(key) if key.is_bool() => {
-                        // On/off settings toggle directly; off = unset (the default).
-                        let value = (!s.file.is_on(key)).then(|| "true".to_owned());
+                        // On/off settings toggle directly. Back to the default =
+                        // unset, so the file only holds deviations from it.
+                        let on = !s.file.is_on(key);
+                        let value = (on != key.default_on()).then(|| on.to_string());
                         return self.commit(|settings| settings.set(key, value));
                     }
                     SettingsRow::Setting(key) => {
@@ -359,7 +491,14 @@ impl App {
             | Action::CursorHome
             | Action::CursorEnd
             | Action::ClearInput => {
-                if let Some(input) = &mut s.editing {
+                let filtering = context == Context::JobsFilter;
+                let target = if filtering {
+                    self.jobs.filter_input.as_mut()
+                } else {
+                    self.settings.editing.as_mut()
+                };
+                if let Some(input) = target {
+                    let before = input.value().to_owned();
                     match action {
                         Action::Input(c) => input.insert(c),
                         Action::DeleteChar => input.backspace(),
@@ -370,6 +509,16 @@ impl App {
                         Action::CursorEnd => input.end(),
                         _ => input.clear(),
                     }
+                    // A changed filter starts from the top, like fzf.
+                    if filtering && input.value() != before {
+                        self.jobs.selected = 0;
+                    }
+                }
+            }
+            Action::ConfirmEdit if context == Context::JobsFilter => {
+                if let Some(input) = self.jobs.filter_input.take() {
+                    self.jobs.filter = input.value().trim().to_owned();
+                    self.jobs.clamp_selection();
                 }
             }
             Action::ConfirmEdit => return self.confirm_edit(),
@@ -394,9 +543,90 @@ impl App {
                     Ok(info) => ConnectionStatus::Connected { url, info },
                     Err(error) => ConnectionStatus::Failed { url, error },
                 };
+                if matches!(self.connection, ConnectionStatus::Connected { .. }) {
+                    return self.fetch_jobs();
+                }
+            }
+            Action::JobsFetched { generation, result } => {
+                if generation != self.connection_generation {
+                    return Vec::new(); // belongs to an older connection
+                }
+                // Keep the same job selected across reloads when possible.
+                let previous = self
+                    .jobs
+                    .visible()
+                    .get(self.jobs.selected)
+                    .map(|job| job.full_name.clone());
+                self.jobs.refreshing = false;
+                self.jobs.attempted_at = Some(self.now);
+                if result.is_ok() {
+                    self.jobs.fetched_at = Some(self.now);
+                }
+                self.jobs.load = match result {
+                    Ok(jobs) => JobsLoad::Loaded(jobs),
+                    Err(error) => JobsLoad::Failed(error),
+                };
+                let visible = self.jobs.visible();
+                self.jobs.selected = previous
+                    .and_then(|name| visible.iter().position(|job| job.full_name == name))
+                    .unwrap_or(self.jobs.selected);
+                self.jobs.clamp_selection();
             }
         }
         Vec::new()
+    }
+
+    /// Load the job list for the current connection.
+    /// Load the job list for the current connection, unless a fetch is
+    /// already in flight: then this is a no-op and the running one is left to
+    /// finish, so slow fetches never pile up or get restarted forever. (A new
+    /// connection resets the in-flight state; see [`Self::connect`].)
+    fn fetch_jobs(&mut self) -> Vec<Effect> {
+        if self.jobs.fetch_in_flight() {
+            return Vec::new();
+        }
+        let Some(config) = self.settings.connection_config() else {
+            return Vec::new();
+        };
+        // Keep showing the current list while it reloads (no flicker, and the
+        // selection can be restored afterwards).
+        if matches!(self.jobs.load, JobsLoad::Loaded(_)) {
+            self.jobs.refreshing = true;
+        } else {
+            self.jobs.load = JobsLoad::Loading;
+        }
+        vec![Effect::FetchJobs {
+            generation: self.connection_generation,
+            config,
+        }]
+    }
+
+    /// Start a fetch when auto-refresh is on, we're connected, nothing is in
+    /// flight and the last attempt is at least one interval old.
+    fn auto_refresh_if_due(&mut self) -> Vec<Effect> {
+        let idle = !self.jobs.fetch_in_flight();
+        let connected = matches!(self.connection, ConnectionStatus::Connected { .. });
+        let interval = self.settings.effective().refresh_interval();
+        let due = self
+            .jobs
+            .attempted_at
+            .is_none_or(|last| self.now.saturating_duration_since(last) >= interval);
+        if self.auto_refresh && connected && idle && due {
+            self.fetch_jobs()
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// `r`: reload jobs when connected; otherwise (re)connect.
+    fn refresh(&mut self) -> Vec<Effect> {
+        match self.connection {
+            ConnectionStatus::Connected { .. } => self.fetch_jobs(),
+            ConnectionStatus::Connecting { .. } => Vec::new(),
+            ConnectionStatus::NotConfigured | ConnectionStatus::Failed { .. } => {
+                self.connect().into_iter().collect()
+            }
+        }
     }
 
     /// Validate and store the value being edited. An invalid value keeps the
@@ -476,7 +706,14 @@ impl App {
     fn commit(&mut self, change: impl FnOnce(&mut Settings)) -> Vec<Effect> {
         let s = &mut self.settings;
         let before = s.connection_config();
+        let auto_before = s.effective().is_on(SettingKey::RefreshAuto);
         change(&mut s.file);
+        // Changing the default applies to the running session right away.
+        let auto_after = s.effective().is_on(SettingKey::RefreshAuto);
+        if auto_after != auto_before {
+            self.auto_refresh = auto_after;
+        }
+        let s = &mut self.settings;
         s.message = Some(StatusMessage::Info("Saving…".into()));
         let mut effects = vec![Effect::SaveSettings {
             path: s.path.clone(),
@@ -493,6 +730,12 @@ impl App {
         match self.context() {
             Context::Help => self.show_help = false,
             Context::EditSetting => self.settings.editing = None,
+            // Cancel typing: the previously applied filter stays.
+            Context::JobsFilter => self.jobs.filter_input = None,
+            Context::JobsFiltered => {
+                self.jobs.filter.clear();
+                self.jobs.clamp_selection();
+            }
             Context::Settings => {
                 self.view = View::Jobs;
                 self.settings.message = None;
@@ -1010,5 +1253,319 @@ mod tests {
             app.settings.message,
             Some(StatusMessage::Error(_))
         ));
+    }
+
+    fn job(name: &str) -> Job {
+        Job {
+            full_name: name.into(),
+            url: String::new(),
+            status: crate::jobs::JobStatus::Success,
+            building: false,
+        }
+    }
+
+    /// An app connected to https://ci, with the given jobs loaded.
+    fn connected_with_jobs(names: &[&str]) -> App {
+        let mut app = App::default();
+        app.settings
+            .file
+            .set(SettingKey::JenkinsUrl, Some("https://ci".into()));
+        app.start();
+        let generation = app.connection_generation;
+        let effects = app.update(Action::ConnectFinished {
+            generation,
+            result: Ok(info("me")),
+        });
+        assert!(matches!(effects.as_slice(), [Effect::FetchJobs { .. }]));
+        assert_eq!(app.jobs.load, JobsLoad::Loading);
+        app.update(Action::JobsFetched {
+            generation,
+            result: Ok(names.iter().map(|n| job(n)).collect()),
+        });
+        app
+    }
+
+    fn visible_names(app: &App) -> Vec<String> {
+        app.jobs
+            .visible()
+            .iter()
+            .map(|j| j.full_name.clone())
+            .collect()
+    }
+
+    #[test]
+    fn jobs_are_fetched_after_connecting() {
+        let app = connected_with_jobs(&["a", "b"]);
+        assert_eq!(visible_names(&app), ["a", "b"]);
+    }
+
+    #[test]
+    fn jobs_of_an_old_connection_are_ignored_and_cleared() {
+        let mut app = connected_with_jobs(&["old"]);
+        let old = app.connection_generation;
+        app.update(Action::OpenSettings);
+        set_url(&mut app, "https://other");
+        assert_eq!(app.jobs.load, JobsLoad::NotLoaded, "cleared on reconnect");
+        app.update(Action::JobsFetched {
+            generation: old,
+            result: Ok(vec![job("stale")]),
+        });
+        assert_eq!(app.jobs.load, JobsLoad::NotLoaded);
+    }
+
+    #[test]
+    fn refresh_keeps_the_selected_job() {
+        let mut app = connected_with_jobs(&["a", "b", "c"]);
+        app.update(Action::SelectNext);
+        app.update(Action::SelectNext); // "c"
+        let effects = app.update(Action::Refresh);
+        assert!(matches!(effects.as_slice(), [Effect::FetchJobs { .. }]));
+        assert!(app.jobs.refreshing);
+        assert_eq!(
+            visible_names(&app).len(),
+            3,
+            "old list stays while reloading"
+        );
+        app.update(Action::JobsFetched {
+            generation: app.connection_generation,
+            result: Ok(vec![job("0-new"), job("a"), job("b"), job("c")]),
+        });
+        assert_eq!(app.jobs.visible()[app.jobs.selected].full_name, "c");
+    }
+
+    #[test]
+    fn refresh_reconnects_after_a_failure() {
+        let mut app = App::default();
+        app.settings
+            .file
+            .set(SettingKey::JenkinsUrl, Some("https://ci".into()));
+        app.start();
+        app.update(Action::ConnectFinished {
+            generation: app.connection_generation,
+            result: Err("down".into()),
+        });
+        let effects = app.update(Action::Refresh);
+        assert!(matches!(effects.as_slice(), [Effect::Connect { .. }]));
+    }
+
+    #[test]
+    fn fetch_failure_is_shown() {
+        let mut app = connected_with_jobs(&[]);
+        app.update(Action::Refresh);
+        app.update(Action::JobsFetched {
+            generation: app.connection_generation,
+            result: Err("HTTP 500".into()),
+        });
+        assert_eq!(app.jobs.load, JobsLoad::Failed("HTTP 500".into()));
+    }
+
+    #[test]
+    fn filter_flow() {
+        let mut app = connected_with_jobs(&["api/main", "api/release", "web/main"]);
+        app.update(Action::SelectLast);
+        app.update(Action::StartFilter);
+        assert_eq!(app.context(), Context::JobsFilter);
+        type_str(&mut app, "main");
+        assert_eq!(visible_names(&app), ["api/main", "web/main"], "live");
+        assert_eq!(app.jobs.selected, 0, "typing resets the selection");
+        app.update(Action::SelectNext); // arrows move the list while typing
+        assert_eq!(app.jobs.selected, 1);
+
+        app.update(Action::ConfirmEdit);
+        assert_eq!(app.context(), Context::JobsFiltered);
+        assert_eq!(app.jobs.filter, "main");
+
+        // Editing again and cancelling keeps the applied filter.
+        app.update(Action::StartFilter);
+        type_str(&mut app, " api");
+        assert_eq!(visible_names(&app), ["api/main"]);
+        app.update(Action::Back);
+        assert_eq!(app.jobs.filter, "main");
+        assert_eq!(visible_names(&app).len(), 2);
+
+        // Esc in the list clears it.
+        app.update(Action::Back);
+        assert_eq!(app.context(), Context::Jobs);
+        assert_eq!(visible_names(&app).len(), 3);
+    }
+
+    #[test]
+    fn page_and_edge_selection() {
+        let names: Vec<String> = (0..25).map(|i| format!("job-{i:02}")).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let mut app = connected_with_jobs(&refs);
+        app.update(Action::SelectPageDown);
+        assert_eq!(app.jobs.selected, PAGE as usize);
+        app.update(Action::SelectLast);
+        assert_eq!(app.jobs.selected, 24);
+        app.update(Action::SelectPageDown);
+        assert_eq!(app.jobs.selected, 24, "clamped");
+        app.update(Action::SelectFirst);
+        assert_eq!(app.jobs.selected, 0);
+    }
+
+    #[test]
+    fn f_key_leaves_settings() {
+        let mut app = settings_app();
+        app.update(Action::SwitchTab(Tab::Jobs));
+        assert_eq!(app.view, View::Jobs);
+        assert_eq!(Tab::from_f_key(1), Some(Tab::Jobs));
+        assert_eq!(Tab::from_f_key(0), None);
+        assert_eq!(Tab::Jobs.f_key(), 1);
+    }
+
+    use std::time::Duration;
+
+    fn fetches(effects: &[Effect]) -> usize {
+        effects
+            .iter()
+            .filter(|e| matches!(e, Effect::FetchJobs { .. }))
+            .count()
+    }
+
+    fn tick(app: &mut App, after: Duration) -> Vec<Effect> {
+        let now = app.now + after;
+        app.update(Action::Tick(now))
+    }
+
+    fn finish_fetch(app: &mut App, result: Result<Vec<Job>, String>) {
+        app.update(Action::JobsFetched {
+            generation: app.connection_generation,
+            result,
+        });
+    }
+
+    #[test]
+    fn auto_refresh_on_by_default_every_10s() {
+        let mut app = connected_with_jobs(&["a"]);
+        assert!(app.auto_refresh);
+        assert_eq!(fetches(&tick(&mut app, Duration::from_secs(9))), 0);
+        assert_eq!(fetches(&tick(&mut app, Duration::from_secs(1))), 1);
+    }
+
+    #[test]
+    fn auto_refresh_every_interval_without_overlap() {
+        let mut app = connected_with_jobs(&["a"]);
+        app.settings
+            .file
+            .set(SettingKey::RefreshInterval, Some("5".into()));
+        app.auto_refresh = true;
+
+        assert_eq!(
+            fetches(&tick(&mut app, Duration::from_secs(4))),
+            0,
+            "not yet due"
+        );
+        assert_eq!(
+            fetches(&tick(&mut app, Duration::from_secs(1))),
+            1,
+            "due at 5s"
+        );
+        assert_eq!(
+            fetches(&tick(&mut app, Duration::from_secs(60))),
+            0,
+            "one in flight: no overlap"
+        );
+        finish_fetch(&mut app, Ok(vec![job("a")]));
+        assert_eq!(app.jobs.fetched_at, Some(app.now));
+        assert_eq!(fetches(&tick(&mut app, Duration::from_secs(4))), 0);
+        assert_eq!(fetches(&tick(&mut app, Duration::from_secs(1))), 1);
+    }
+
+    #[test]
+    fn failed_refresh_waits_a_full_interval() {
+        let mut app = connected_with_jobs(&["a"]);
+        let good = app.jobs.fetched_at;
+        assert_eq!(fetches(&tick(&mut app, Duration::from_secs(10))), 1);
+        finish_fetch(&mut app, Err("HTTP 502".into()));
+        assert_eq!(app.jobs.fetched_at, good, "last good fetch time kept");
+        assert_eq!(fetches(&tick(&mut app, Duration::from_secs(9))), 0);
+        assert_eq!(fetches(&tick(&mut app, Duration::from_secs(1))), 1);
+    }
+
+    #[test]
+    fn toggling_on_refreshes_stale_data_right_away() {
+        let mut app = connected_with_jobs(&["a"]);
+        assert_eq!(app.update(Action::ToggleAutoRefresh), Vec::new(), "off");
+        assert!(!app.auto_refresh);
+        assert_eq!(fetches(&tick(&mut app, Duration::from_secs(120))), 0);
+        assert_eq!(
+            fetches(&app.update(Action::ToggleAutoRefresh)),
+            1,
+            "on + stale"
+        );
+        assert!(app.auto_refresh);
+    }
+
+    #[test]
+    fn auto_refresh_setting_applies_to_running_session() {
+        let mut app = settings_app();
+        assert!(app.auto_refresh, "default on");
+        select(&mut app, SettingsRow::Setting(SettingKey::RefreshAuto));
+        app.update(Action::StartEdit); // off: stored explicitly
+        assert_eq!(
+            app.settings.file.get(SettingKey::RefreshAuto),
+            Some("false")
+        );
+        assert!(!app.auto_refresh);
+        app.update(Action::StartEdit); // back to the default: unset
+        assert_eq!(app.settings.file.get(SettingKey::RefreshAuto), None);
+        assert!(app.auto_refresh);
+    }
+
+    #[test]
+    fn skip_tls_toggle_still_defaults_off() {
+        let mut app = settings_app();
+        select(
+            &mut app,
+            SettingsRow::Setting(SettingKey::JenkinsSkipTlsVerify),
+        );
+        app.update(Action::StartEdit);
+        assert_eq!(
+            app.settings.file.get(SettingKey::JenkinsSkipTlsVerify),
+            Some("true")
+        );
+        app.update(Action::StartEdit);
+        assert_eq!(
+            app.settings.file.get(SettingKey::JenkinsSkipTlsVerify),
+            None
+        );
+    }
+
+    #[test]
+    fn no_auto_refresh_while_disconnected() {
+        let mut app = App {
+            auto_refresh: true,
+            ..App::default()
+        };
+        assert_eq!(tick(&mut app, Duration::from_secs(3600)), Vec::new());
+    }
+
+    #[test]
+    fn refresh_while_fetching_waits_for_the_running_fetch() {
+        let mut app = connected_with_jobs(&["a"]);
+        assert_eq!(fetches(&app.update(Action::Refresh)), 1);
+        // Hammering r (or auto-refresh coming due) while it runs: nothing new.
+        for _ in 0..5 {
+            assert_eq!(app.update(Action::Refresh), Vec::new());
+        }
+        app.auto_refresh = true;
+        assert_eq!(tick(&mut app, Duration::from_secs(3600)), Vec::new());
+        // Once it finishes, refreshing works again.
+        finish_fetch(&mut app, Ok(vec![job("a")]));
+        assert_eq!(fetches(&app.update(Action::Refresh)), 1);
+    }
+
+    #[test]
+    fn new_connection_does_not_wait_for_the_old_fetch() {
+        let mut app = connected_with_jobs(&["a"]);
+        app.update(Action::Refresh); // in flight, for the old connection
+        app.update(Action::OpenSettings);
+        set_url(&mut app, "https://other");
+        let effects = app.update(Action::ConnectFinished {
+            generation: app.connection_generation,
+            result: Ok(info("me")),
+        });
+        assert_eq!(fetches(&effects), 1);
     }
 }

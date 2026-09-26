@@ -1,6 +1,6 @@
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
-use crate::app::{Action, App, Context};
+use crate::app::{Action, App, Context, Tab};
 
 /// A keybinding as shown to the user. Display-only: keep in sync with
 /// [`map_key`] (the tests below check the advertised keys).
@@ -20,7 +20,25 @@ pub const GLOBAL_BINDINGS: &[Binding] =
 
 /// Bindings that only apply in the given context (context bar).
 pub fn context_bindings(context: Context) -> &'static [Binding] {
-    const JOBS: &[Binding] = &[];
+    const JOBS: &[Binding] = &[
+        bind("↑/↓", "select"),
+        bind("/", "filter"),
+        bind("r", "refresh"),
+        bind("R", "auto-refresh"),
+    ];
+    const JOBS_FILTERED: &[Binding] = &[
+        bind("↑/↓", "select"),
+        bind("/", "filter"),
+        bind("Esc", "clear"),
+        bind("r", "refresh"),
+        bind("R", "auto-refresh"),
+    ];
+    const JOBS_FILTER: &[Binding] = &[
+        bind("Enter", "apply"),
+        bind("Esc", "cancel"),
+        bind("↑/↓", "select"),
+        bind("C-u", "clear"),
+    ];
     const SETTINGS: &[Binding] = &[
         bind("↑/↓", "select"),
         bind("Enter", "edit/toggle"),
@@ -36,6 +54,8 @@ pub fn context_bindings(context: Context) -> &'static [Binding] {
     const HELP: &[Binding] = &[bind("Esc", "close")];
     match context {
         Context::Jobs => JOBS,
+        Context::JobsFiltered => JOBS_FILTERED,
+        Context::JobsFilter => JOBS_FILTER,
         Context::Settings => SETTINGS,
         Context::EditSetting => EDIT,
         Context::Help => HELP,
@@ -59,8 +79,11 @@ pub fn map_key(app: &App, key: KeyEvent) -> Option<Action> {
         return match key.code {
             KeyCode::Enter => Some(Action::ConfirmEdit),
             KeyCode::Esc => Some(Action::Back),
+            // Settings: save the field and move; filter: move the list selection.
             KeyCode::Up => Some(Action::SelectPrev),
             KeyCode::Down => Some(Action::SelectNext),
+            KeyCode::PageUp if context == Context::JobsFilter => Some(Action::SelectPageUp),
+            KeyCode::PageDown if context == Context::JobsFilter => Some(Action::SelectPageDown),
             KeyCode::Left => Some(Action::CursorLeft),
             KeyCode::Right => Some(Action::CursorRight),
             KeyCode::Home => Some(Action::CursorHome),
@@ -78,6 +101,7 @@ pub fn map_key(app: &App, key: KeyEvent) -> Option<Action> {
     }
 
     match key.code {
+        KeyCode::F(n) => return Tab::from_f_key(n).map(Action::SwitchTab),
         KeyCode::Char('q') => return Some(Action::Quit),
         KeyCode::Char('s') => return Some(Action::OpenSettings),
         KeyCode::Char('?') => return Some(Action::ToggleHelp),
@@ -89,6 +113,22 @@ pub fn map_key(app: &App, key: KeyEvent) -> Option<Action> {
         (Context::Settings, KeyCode::Down | KeyCode::Char('j')) => Some(Action::SelectNext),
         (Context::Settings, KeyCode::Up | KeyCode::Char('k')) => Some(Action::SelectPrev),
         (Context::Settings, KeyCode::Enter) => Some(Action::StartEdit),
+        (Context::Jobs | Context::JobsFiltered, code) => match code {
+            KeyCode::Down | KeyCode::Char('j') => Some(Action::SelectNext),
+            KeyCode::Up | KeyCode::Char('k') => Some(Action::SelectPrev),
+            KeyCode::PageDown => Some(Action::SelectPageDown),
+            KeyCode::PageUp => Some(Action::SelectPageUp),
+            KeyCode::Home | KeyCode::Char('g') => Some(Action::SelectFirst),
+            KeyCode::End | KeyCode::Char('G') => Some(Action::SelectLast),
+            KeyCode::Char('/') => Some(Action::StartFilter),
+            // Some terminals report Shift+r as 'r' with SHIFT instead of 'R'.
+            KeyCode::Char('R') => Some(Action::ToggleAutoRefresh),
+            KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                Some(Action::ToggleAutoRefresh)
+            }
+            KeyCode::Char('r') => Some(Action::Refresh),
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -98,8 +138,10 @@ mod tests {
     use super::*;
     use crate::app::View;
 
-    const ALL_CONTEXTS: [Context; 4] = [
+    const ALL_CONTEXTS: [Context; 6] = [
         Context::Jobs,
+        Context::JobsFiltered,
+        Context::JobsFilter,
         Context::Settings,
         Context::EditSetting,
         Context::Help,
@@ -117,6 +159,8 @@ mod tests {
         let mut app = App::default();
         match context {
             Context::Jobs => {}
+            Context::JobsFiltered => app.jobs.filter = "api".into(),
+            Context::JobsFilter => app.jobs.filter_input = Some(Default::default()),
             Context::Settings => app.view = View::Settings,
             Context::EditSetting => {
                 app.view = View::Settings;
@@ -130,6 +174,9 @@ mod tests {
 
     /// Parse a displayed key label back into the key events it stands for.
     fn keys_of(label: &str) -> Vec<KeyEvent> {
+        if label == "/" {
+            return vec![key(KeyCode::Char('/'))];
+        }
         label
             .split('/')
             .map(|part| match part {
@@ -146,6 +193,60 @@ mod tests {
                 other => panic!("unknown key label {other:?}; extend keys_of"),
             })
             .collect()
+    }
+
+    #[test]
+    fn f_keys_switch_tabs() {
+        for context in [Context::Jobs, Context::Settings, Context::Help] {
+            let app = app_in(context);
+            assert_eq!(
+                map_key(&app, key(KeyCode::F(1))),
+                Some(Action::SwitchTab(Tab::Jobs)),
+                "{context:?}"
+            );
+            assert_eq!(map_key(&app, key(KeyCode::F(12))), None, "no such tab");
+        }
+    }
+
+    #[test]
+    fn jobs_keys() {
+        let app = app_in(Context::Jobs);
+        for (code, action) in [
+            (KeyCode::Char('/'), Action::StartFilter),
+            (KeyCode::Char('r'), Action::Refresh),
+            (KeyCode::Char('R'), Action::ToggleAutoRefresh),
+            (KeyCode::Char('j'), Action::SelectNext),
+            (KeyCode::PageDown, Action::SelectPageDown),
+            (KeyCode::Char('G'), Action::SelectLast),
+            (KeyCode::Home, Action::SelectFirst),
+        ] {
+            assert_eq!(map_key(&app, key(code)), Some(action), "{code:?}");
+        }
+        assert_eq!(
+            map_key(&app, KeyEvent::new(KeyCode::Char('r'), KeyModifiers::SHIFT)),
+            Some(Action::ToggleAutoRefresh)
+        );
+        assert_eq!(map_key(&app, key(KeyCode::Esc)), None, "nothing to clear");
+        let filtered = app_in(Context::JobsFiltered);
+        assert_eq!(map_key(&filtered, key(KeyCode::Esc)), Some(Action::Back));
+    }
+
+    #[test]
+    fn filter_input_takes_letters() {
+        let app = app_in(Context::JobsFilter);
+        for c in ['q', 's', 'r', 'j', '/'] {
+            assert_eq!(map_key(&app, key(KeyCode::Char(c))), Some(Action::Input(c)));
+        }
+        assert_eq!(map_key(&app, key(KeyCode::Down)), Some(Action::SelectNext));
+        assert_eq!(
+            map_key(&app, key(KeyCode::PageDown)),
+            Some(Action::SelectPageDown)
+        );
+        assert_eq!(
+            map_key(&app, key(KeyCode::F(1))),
+            None,
+            "F-keys off while typing"
+        );
     }
 
     #[test]

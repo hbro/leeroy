@@ -2,13 +2,13 @@
 source: tests/render.rs
 expression: render(&app).backend()
 ---
-" Leeroy  ✕ https://ci.example.com · cannot connect: dns error: failed to lookup "
+" Leeroy  ● https://ci.example.com · Jenkins 2.504.1 · me                        "
 "  F1 Jobs                                                                       "
-"╭ Jobs ────────────────────────────────────────────────────────────────────────╮"
+"╭ Jobs (0/6) ──────────────────────────────────────────────────────────────────╮"
+"│ filter: nope                                                                 │"
 "│                                                                              │"
-"│                      Cannot reach https://ci.example.com                     │"
-"│        cannot connect: dns error: failed to lookup address information       │"
-"│                  Check the settings (s), or press r to retry                 │"
+"│                             No jobs match "nope"                             │"
+"│                                                                              │"
 "│                                                                              │"
 "│                                                                              │"
 "│                                                                              │"
@@ -24,5 +24,5 @@ expression: render(&app).backend()
 "│                                                                              │"
 "│                                                                              │"
 "╰──────────────────────────────────────────────────────────────────────────────╯"
-" Jobs   ↑/↓  select   /  filter   r  refresh   R  auto-refresh                  "
-" q  quit   s  settings   ?  help                                                "
+" Jobs   ↑/↓  select   /  filter   Esc  clear   r  refresh   R  auto-refresh     "
+" q  quit   s  settings   ?  help                  ⟳ auto 10s · updated just now "

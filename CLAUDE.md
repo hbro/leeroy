@@ -16,14 +16,17 @@ Elm-style: pure core, thin IO shell.
   **No IO**: side effects (saving config, connecting) are returned as `Effect`s, which
   `main.rs`'s `Executor` runs and answers with an `Action` (`SettingsSaved`,
   `ConnectFinished`). `App::start()` returns the startup effects.
-- `src/jenkins.rs` — reqwest client + `check()` (`GET whoAmI/api/json`). Proxy is
-  always passed in explicitly (`.no_proxy()` on the builder), so behaviour matches
-  what the settings view shows.
+- `src/jenkins.rs` — reqwest client; `get()` (headers, auth diagnostics, logging)
+  behind `check()` (`whoAmI/api/json`) and `fetch_jobs()` (`api/json?tree=…`). Proxy
+  is always passed in explicitly (`.no_proxy()`), so behaviour matches the UI.
+- `src/jobs.rs` — job model, `/api/json` parsing (folders flattened, not listed),
+  filter matching, `JobsState` (load state, filter, selection). Pure.
 - `src/config.rs` — config file location, load/save, env var overrides. Takes the
   environment as a parameter (never reads `std::env` itself) so it's testable.
 - `src/event.rs` — `map_key(&App, KeyEvent) -> Option<Action>`.
 - `src/ui.rs` — `render(&mut Frame, &App)`. **Deterministic**: no clock, randomness,
-  or env reads; anything time-based must come in through `App` fields.
+  or env reads. Time enters only via `Action::Tick(Instant)` → `App::now`; ages
+  ("updated 12s ago") are computed from that, so tests control time.
 - `src/main.rs` — terminal setup, `tokio::select!` loop over key events, a tick
   interval and an `mpsc<Action>` channel. Async work (Jenkins API calls) should run
   in spawned tasks that send `Action`s back through that channel.
@@ -31,6 +34,17 @@ Elm-style: pure core, thin IO shell.
 Rules:
 - New behaviour = new `Action` variant + `update` arm + tests.
 - Header: app name + connected Jenkins instance (`App::connection`).
+- Tabs: `app::Tab` (`ALL`, F-key = position + 1), tab bar under the header. New
+  content = new `Tab` + `View` variant. F-keys work everywhere except text input.
+- Jobs: fetched after each successful connect and on `r`, tagged with the
+  connection generation (stale results ignored; list cleared on reconnect). A
+  reload keeps the old list visible (`refreshing`) and restores the selection by
+  name. Auto-refresh (`R`, runtime `App::auto_refresh`, default from
+  `refresh.auto`) fetches on `Tick` when connected, idle and one
+  `refresh.interval` after the last *attempt* (so failures back off).
+  Never more than one fetch in flight: `fetch_jobs()` is a no-op while
+  `JobsState::fetch_in_flight()` (manual `r` included); only a new connection
+  (new generation) resets that.
 - Bottom of screen = two bars. Global bar (last line): app-wide commands
   (`GLOBAL_BINDINGS`). Context bar above it: keys of
   whatever has focus, from `context_bindings(App::context())`. A new view or overlay
@@ -70,7 +84,8 @@ Rules:
 - Connection: every attempt bumps `App::connection_generation`; `ConnectFinished`
   for an older generation is ignored and the executor aborts the previous task.
   Reconnect happens only when `SettingsState::connection_config()` changes.
-- Bool settings (`SettingKey::is_bool`): Enter toggles, off = key removed, stored
+- Bool settings (`SettingKey::is_bool`): Enter toggles; the default value
+  (`SettingKey::default_on`) = key removed, the other value is stored
   as TOML bool, env accepts true/false/1/0/yes/no/on/off. `skip_tls_verify` must
   stay off by default and show the header warning when on.
 - Proxy: `proxy.url`, scheme decides type/DNS (`socks5h`/`socks4a` = remote DNS).
@@ -109,7 +124,9 @@ Run all three layers for UI changes; layer 1 is mandatory for every change.
    Gotcha: `Esc` is NOT a tmux key name (it types E, s, c) — use `Escape`.
    App log for the run: `target/tui.log` (RUST_LOG=debug).
    Fake Jenkins for connection tests: `scripts/fake-jenkins.py [--port 8099]
-   [--auth USER:TOKEN] [--delay SECS] [--status CODE] [--tls]` (self-signed HTTPS).
+   [--auth USER:TOKEN] [--delay SECS] [--status CODE] [--tls] [--jobs N] [--churn]`
+   (job tree with folders/multibranch/all statuses; `--churn` changes a status per
+   request to watch auto-refresh).
    Run it in the background with its own process group; don't `pkill -f` it (the
    pattern can match unrelated shells).
    Isolation: all `LEEROY_*` and `*_proxy` vars from your shell are cleared and the config is a

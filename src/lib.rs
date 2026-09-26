@@ -13,5 +13,6 @@ pub mod config;
 pub mod event;
 pub mod input;
 pub mod jenkins;
+pub mod jobs;
 pub mod proxy;
 pub mod ui;

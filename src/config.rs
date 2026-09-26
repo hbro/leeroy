@@ -33,13 +33,17 @@ pub enum SettingKey {
     JenkinsUrl,
     JenkinsSkipTlsVerify,
     ProxyUrl,
+    RefreshAuto,
+    RefreshInterval,
 }
 
 impl SettingKey {
-    pub const ALL: [SettingKey; 3] = [
+    pub const ALL: [SettingKey; 5] = [
         SettingKey::JenkinsUrl,
         SettingKey::JenkinsSkipTlsVerify,
         SettingKey::ProxyUrl,
+        SettingKey::RefreshAuto,
+        SettingKey::RefreshInterval,
     ];
 
     pub fn label(self) -> &'static str {
@@ -47,6 +51,8 @@ impl SettingKey {
             SettingKey::JenkinsUrl => "Jenkins URL",
             SettingKey::JenkinsSkipTlsVerify => "Skip TLS verify",
             SettingKey::ProxyUrl => "Proxy URL",
+            SettingKey::RefreshAuto => "Auto-refresh",
+            SettingKey::RefreshInterval => "Refresh every",
         }
     }
 
@@ -56,6 +62,8 @@ impl SettingKey {
             SettingKey::JenkinsUrl => ("jenkins", "url"),
             SettingKey::JenkinsSkipTlsVerify => ("jenkins", "skip_tls_verify"),
             SettingKey::ProxyUrl => ("proxy", "url"),
+            SettingKey::RefreshAuto => ("refresh", "auto"),
+            SettingKey::RefreshInterval => ("refresh", "interval"),
         }
     }
 
@@ -65,13 +73,28 @@ impl SettingKey {
             SettingKey::JenkinsUrl => "LEEROY_JENKINS_URL",
             SettingKey::JenkinsSkipTlsVerify => "LEEROY_JENKINS_SKIP_TLS_VERIFY",
             SettingKey::ProxyUrl => "LEEROY_PROXY_URL",
+            SettingKey::RefreshAuto => "LEEROY_REFRESH_AUTO",
+            SettingKey::RefreshInterval => "LEEROY_REFRESH_INTERVAL",
         }
     }
 
     /// On/off settings: toggled instead of edited, stored as TOML booleans,
     /// and exposed through [`Settings::get`] as `"true"` / `"false"`.
     pub fn is_bool(self) -> bool {
-        matches!(self, SettingKey::JenkinsSkipTlsVerify)
+        matches!(
+            self,
+            SettingKey::JenkinsSkipTlsVerify | SettingKey::RefreshAuto
+        )
+    }
+
+    /// Value of an on/off setting when it isn't set.
+    pub fn default_on(self) -> bool {
+        matches!(self, SettingKey::RefreshAuto)
+    }
+
+    /// Whole seconds, stored as a TOML integer.
+    pub fn is_seconds(self) -> bool {
+        matches!(self, SettingKey::RefreshInterval)
     }
 
     /// User-facing documentation, one line per `\n`. Shown in the settings
@@ -93,6 +116,14 @@ impl SettingKey {
                 "SOCKS: socks5h:// or socks4a:// resolve DNS on the proxy (remote DNS);\n",
                 "socks5:// and socks4:// resolve DNS locally. HTTP(S) proxies always resolve remotely.\n",
                 "Unset: HTTPS_PROXY / HTTP_PROXY / ALL_PROXY / NO_PROXY are used.",
+            ),
+            SettingKey::RefreshAuto => concat!(
+                "Start with auto-refresh on (the default). Toggle it any time with R for the\n",
+                "running session; turn this off to start with auto-refresh off.",
+            ),
+            SettingKey::RefreshInterval => concat!(
+                "Seconds between automatic refreshes (minimum 1). Default: 10.\n",
+                "After a failed refresh, the next attempt also waits a full interval.",
             ),
         }
     }
@@ -122,7 +153,15 @@ impl SettingKey {
                 }
                 Ok(value.to_owned())
             }
-            SettingKey::JenkinsSkipTlsVerify => parse_bool(value)
+            SettingKey::RefreshInterval => match value.parse::<u64>() {
+                Ok(secs) if (MIN_REFRESH_SECS..=MAX_REFRESH_SECS).contains(&secs) => {
+                    Ok(secs.to_string())
+                }
+                _ => Err(format!(
+                    "expected whole seconds between {MIN_REFRESH_SECS} and {MAX_REFRESH_SECS}, got {value:?}"
+                )),
+            },
+            SettingKey::JenkinsSkipTlsVerify | SettingKey::RefreshAuto => parse_bool(value)
                 .map(|b| b.to_string())
                 .ok_or_else(|| format!("expected true or false, got {value:?}")),
         }
@@ -133,6 +172,7 @@ impl SettingKey {
     pub fn display(self, value: &str) -> String {
         match self {
             SettingKey::JenkinsUrl | SettingKey::ProxyUrl => redact_url(value),
+            _ if self.is_seconds() => format!("{value} s"),
             _ if self.is_bool() => match parse_bool(value) {
                 Some(true) => "on".into(),
                 _ => "off".into(),
@@ -293,6 +333,26 @@ pub fn redact_url(value: &str) -> String {
 pub struct Settings {
     pub jenkins: JenkinsSettings,
     pub proxy: ProxySettings,
+    pub refresh: RefreshSettings,
+}
+
+pub const DEFAULT_REFRESH_SECS: u64 = 10;
+pub const MIN_REFRESH_SECS: u64 = 1;
+pub const MAX_REFRESH_SECS: u64 = 86_400;
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct RefreshSettings {
+    pub auto: Option<bool>,
+    /// Seconds, kept as text like the other settings (see [`Settings::get`]);
+    /// a TOML integer in the file.
+    #[serde(deserialize_with = "seconds_from_toml")]
+    pub interval: Option<String>,
+}
+
+/// Accept a TOML integer for a seconds setting (range checked by `validate`).
+fn seconds_from_toml<'de, D: serde::Deserializer<'de>>(de: D) -> Result<Option<String>, D::Error> {
+    Option::<i64>::deserialize(de).map(|secs| secs.map(|s| s.to_string()))
 }
 
 #[derive(Clone, Default, PartialEq, Eq, Deserialize)]
@@ -340,7 +400,19 @@ impl Settings {
                 .skip_tls_verify
                 .map(|b| if b { "true" } else { "false" }),
             SettingKey::ProxyUrl => self.proxy.url.as_deref(),
+            SettingKey::RefreshAuto => self.refresh.auto.map(|b| if b { "true" } else { "false" }),
+            SettingKey::RefreshInterval => self.refresh.interval.as_deref(),
         }
+    }
+
+    /// Effective auto-refresh interval (the default when unset).
+    pub fn refresh_interval(&self) -> std::time::Duration {
+        let secs = self
+            .get(SettingKey::RefreshInterval)
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(DEFAULT_REFRESH_SECS)
+            .clamp(MIN_REFRESH_SECS, MAX_REFRESH_SECS);
+        std::time::Duration::from_secs(secs)
     }
 
     /// Store a value. It must have passed [`SettingKey::validate`]; for
@@ -353,6 +425,11 @@ impl Settings {
                 return;
             }
             SettingKey::ProxyUrl => &mut self.proxy.url,
+            SettingKey::RefreshAuto => {
+                self.refresh.auto = value.as_deref().and_then(parse_bool);
+                return;
+            }
+            SettingKey::RefreshInterval => &mut self.refresh.interval,
         };
         *slot = value;
     }
@@ -378,7 +455,9 @@ impl Settings {
 
     /// Settings whose value is on (for boolean keys).
     pub fn is_on(&self, key: SettingKey) -> bool {
-        self.get(key).and_then(parse_bool).unwrap_or(false)
+        self.get(key)
+            .and_then(parse_bool)
+            .unwrap_or(key.default_on())
     }
 
     /// Settings given through env vars (all of them, e.g. `std::env::vars_os()`).
@@ -548,6 +627,8 @@ pub fn save(path: &Path, settings: &Settings) -> Result<()> {
                 let is_new = doc[table].get(name).is_none();
                 doc[table][name] = if key.is_bool() {
                     toml_edit::value(parse_bool(value).unwrap_or(false))
+                } else if key.is_seconds() {
+                    toml_edit::value(value.parse::<i64>().unwrap_or(DEFAULT_REFRESH_SECS as i64))
                 } else {
                     toml_edit::value(value)
                 };
@@ -985,6 +1066,55 @@ mod tests {
         // A string in the file is a parse error, not silently "off".
         fs::write(&path, "[jenkins]\nskip_tls_verify = \"yes\"\n").unwrap();
         assert!(load(&path).is_err());
+    }
+
+    #[test]
+    fn refresh_settings() {
+        let defaults = Settings::default();
+        assert!(
+            defaults.is_on(SettingKey::RefreshAuto),
+            "auto-refresh on by default"
+        );
+        assert!(
+            !defaults.is_on(SettingKey::JenkinsSkipTlsVerify),
+            "TLS checks stay on"
+        );
+        assert_eq!(defaults.refresh_interval().as_secs(), DEFAULT_REFRESH_SECS);
+
+        let key = SettingKey::RefreshInterval;
+        assert_eq!(key.validate(" 5 "), Ok("5".into()));
+        for bad in ["0", "-3", "1.5", "soon", "86401"] {
+            assert!(key.validate(bad).is_err(), "{bad} accepted");
+        }
+        let env = Settings::from_env(vars(&[
+            ("LEEROY_REFRESH_AUTO", "yes"),
+            ("LEEROY_REFRESH_INTERVAL", "7"),
+        ]))
+        .unwrap();
+        assert!(env.is_on(SettingKey::RefreshAuto));
+        assert_eq!(env.refresh_interval().as_secs(), 7);
+        assert!(Settings::from_env(vars(&[("LEEROY_REFRESH_INTERVAL", "0")])).is_err());
+    }
+
+    #[test]
+    fn refresh_settings_saved_as_toml_types() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(FILE_NAME);
+        let mut settings = Settings::default();
+        settings.set(SettingKey::RefreshAuto, Some("true".into()));
+        settings.set(SettingKey::RefreshInterval, Some("15".into()));
+        save(&path, &settings).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.contains("auto = true\n"), "{text}");
+        assert!(text.contains("interval = 15\n"), "{text}");
+        assert_eq!(load(&path).unwrap(), settings);
+
+        // Out-of-range values in the file fail validation at startup.
+        fs::write(&path, "[refresh]\ninterval = 0\n").unwrap();
+        let loaded = load(&path).unwrap();
+        assert!(loaded.validate(|k| format!("{:?}", k.toml_path())).is_err());
+        fs::write(&path, "[refresh]\ninterval = \"30\"\n").unwrap();
+        assert!(load(&path).is_err(), "a string is a type error");
     }
 
     #[test]

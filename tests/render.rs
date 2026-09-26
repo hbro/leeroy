@@ -5,6 +5,7 @@ use leeroy::{
     app::{Action, App, ConnectionStatus, SettingsState},
     config::{SettingKey, Settings},
     jenkins::ServerInfo,
+    jobs::{Job, JobStatus},
     ui,
 };
 use ratatui::{Terminal, backend::TestBackend};
@@ -234,4 +235,147 @@ fn settings_editing_proxy_cursor_mid_text() {
         !screen.contains('█'),
         "cursor block shown although cursor is mid-text"
     );
+}
+
+fn job(name: &str, status: JobStatus, building: bool) -> Job {
+    Job {
+        full_name: name.into(),
+        url: String::new(),
+        status,
+        building,
+    }
+}
+
+/// Connected to a fake instance with a mix of job states.
+fn app_with_jobs() -> App {
+    let mut app = test_app();
+    app.settings.file.set(
+        SettingKey::JenkinsUrl,
+        Some("https://ci.example.com".into()),
+    );
+    app.start();
+    let generation = app.connection_generation;
+    app.update(Action::ConnectFinished {
+        generation,
+        result: Ok(ServerInfo {
+            version: Some("2.504.1".into()),
+            user: "me".into(),
+        }),
+    });
+    app.update(Action::JobsFetched {
+        generation,
+        result: Ok(vec![
+            job("backend/api/main", JobStatus::Success, false),
+            job("backend/api/release-1.2", JobStatus::Failed, true),
+            job("backend/worker", JobStatus::Unstable, false),
+            job("docs", JobStatus::Disabled, false),
+            job("frontend/web/main", JobStatus::Aborted, false),
+            job("frontend/web/pr-42", JobStatus::NotBuilt, false),
+        ]),
+    });
+    app
+}
+
+#[test]
+fn jobs_list() {
+    let mut app = app_with_jobs();
+    apply(&mut app, &[Action::SelectNext]);
+    insta::assert_snapshot!(render(&app).backend());
+}
+
+#[test]
+fn jobs_loading() {
+    let mut app = app_with_jobs();
+    // First load: placeholder.
+    let mut fresh = test_app();
+    fresh.settings.file.set(
+        SettingKey::JenkinsUrl,
+        Some("https://ci.example.com".into()),
+    );
+    fresh.start();
+    let generation = fresh.connection_generation;
+    apply(
+        &mut fresh,
+        &[Action::ConnectFinished {
+            generation,
+            result: Ok(ServerInfo {
+                version: None,
+                user: "me".into(),
+            }),
+        }],
+    );
+    let screen = format!("{}", render(&fresh).backend());
+    assert!(screen.contains("Loading jobs…"), "{screen}");
+
+    // Reload: list stays, title says so.
+    apply(&mut app, &[Action::Refresh]);
+    let screen = format!("{}", render(&app).backend());
+    assert!(screen.contains("Jobs (6) · refreshing…"), "{screen}");
+    assert!(screen.contains("backend/api/main"), "{screen}");
+}
+
+#[test]
+fn jobs_filter_typing() {
+    let mut app = app_with_jobs();
+    let mut actions = vec![Action::StartFilter];
+    actions.extend(type_str("api"));
+    apply(&mut app, &actions);
+    insta::assert_snapshot!(render(&app).backend());
+}
+
+#[test]
+fn jobs_filter_applied_no_match() {
+    let mut app = app_with_jobs();
+    let mut actions = vec![Action::StartFilter];
+    actions.extend(type_str("nope"));
+    actions.push(Action::ConfirmEdit);
+    apply(&mut app, &actions);
+    insta::assert_snapshot!(render(&app).backend());
+}
+
+#[test]
+fn tab_bar_marks_settings_while_open() {
+    let mut app = app_with_jobs();
+    let row = |app: &App| -> String {
+        let terminal = render(app);
+        terminal.backend().buffer().content()[WIDTH as usize..2 * WIDTH as usize]
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>()
+            .trim_end()
+            .to_owned()
+    };
+    assert_eq!(row(&app), "  F1 Jobs");
+    apply(&mut app, &[Action::OpenSettings]);
+    assert_eq!(row(&app), "  F1 Jobs   Settings");
+}
+
+#[test]
+fn refresh_status_in_global_bar() {
+    use std::time::Duration;
+    let last_line = |app: &App| -> String {
+        let terminal = render(app);
+        let content = terminal.backend().buffer().content();
+        content[content.len() - WIDTH as usize..]
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>()
+    };
+    let mut app = app_with_jobs();
+    let base = app.now;
+    let ends = |app: &App, tail: &str| {
+        let line = last_line(app);
+        assert!(line.ends_with(tail), "expected …{tail:?} in {line:?}");
+    };
+    ends(&app, "⟳ auto 10s · updated just now ");
+
+    // R: off; the age keeps counting.
+    apply(&mut app, &[Action::ToggleAutoRefresh]);
+    apply(&mut app, &[Action::Tick(base + Duration::from_secs(75))]);
+    ends(&app, "auto off · updated 1m ago ");
+
+    // R again: stale data is refreshed right away, and the bar says so.
+    apply(&mut app, &[Action::ToggleAutoRefresh]);
+    ends(&app, "⟳ auto 10s · refreshing… ");
+    insta::assert_snapshot!(render(&app).backend());
 }
