@@ -4,7 +4,7 @@ Output target/screenshots/headers.gif
 Hide
 Type "target/debug/leeroy" Enter
 Sleep 1s
-Type "s"
+Type "0"
 Enter
 Type "http://127.0.0.1:8099"
 Enter

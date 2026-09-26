@@ -4,7 +4,7 @@ Output target/screenshots/settings.gif
 Hide
 Type "target/debug/leeroy" Enter
 Sleep 1s
-Type "s"
+Type "0"
 Sleep 300ms
 Show
 Screenshot target/screenshots/settings.png

@@ -8,7 +8,7 @@ expression: render(&app).backend()
 "                                                                                "
 "                       Cannot reach https://ci.example.com                      "
 "         cannot connect: dns error: failed to lookup address information        "
-"                   Check the settings (s), or press r to retry                  "
+"                   Check the settings (0), or press r to retry                  "
 "                                                                                "
 "                                                                                "
 "                                                                                "

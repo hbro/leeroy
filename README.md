@@ -37,7 +37,7 @@ Or build from source: `cargo install --git https://github.com/hbro/leeroy`.
 
 ## Configuration
 
-Settings can be edited in the TUI (Settings tab: `0`, or `s`) and are saved to a TOML file:
+Settings can be edited in the TUI (Settings tab: `0`) and are saved to a TOML file:
 
 1. `--config FILE`, if given
 2. else `$LEEROY_CONFIG`
@@ -201,7 +201,6 @@ is in the help popup, `h` or `?`, hinted at the right of the header):
 | --- | --- |
 | `q` | quit (asks first: `y`/`Enter`/`q` quits, `n`/`Esc` stays; setting `ui.confirm_quit`) |
 | `Ctrl-C` | quit immediately, from anywhere |
-| `s` | settings (same as `0`) |
 | `h` / `?` | help |
 | `r` | refresh now (reconnects if the connection failed) |
 | `R` | toggle auto-refresh for this session |

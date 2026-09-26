@@ -66,7 +66,7 @@ Rules:
   text colours go through `t.on_selected()` there. Tests in `theme.rs` check
   every theme for fg != bg; `selected_row_status_stays_readable` renders both.
 - Global keys (`GLOBAL_BINDINGS`; no bottom bar, listed in the help popup, the
-  header shows an `h/?` hint): q, s, h/?, r (refresh), R (toggle auto-refresh). The refresh status is a compact `⟳ 4s` at the right end of the
+  header shows an `h/?` hint): q, h/?, r (refresh), R (toggle auto-refresh). The refresh status is a compact `⟳ 4s` at the right end of the
   header (icon green = auto-refresh on, gray = off; `…` fetching, `✕` failed).
 - Build view (`View::Build`, part of the Jobs tab): `Enter` on a job opens it
   and fetches unconditionally. `BuildRef::Latest` fetches the job's build numbers

@@ -21,7 +21,6 @@ const fn bind(key: &'static str, desc: &'static str) -> Binding {
 /// Global keys, listed in the help popup (the header only hints at `h/?`).
 pub const GLOBAL_BINDINGS: &[Binding] = &[
     bind("q", "quit"),
-    bind("s", "settings"),
     bind("h/?", "help"),
     bind("r", "refresh"),
     bind("R", "toggle auto-refresh"),
@@ -148,7 +147,6 @@ pub fn map_key(app: &App, key: KeyEvent) -> Option<Action> {
     match key.code {
         KeyCode::Char(c @ '0'..='9') => return Tab::from_key(c).map(Action::SwitchTab),
         KeyCode::Char('q') => return Some(Action::RequestQuit),
-        KeyCode::Char('s') => return Some(Action::OpenSettings),
         KeyCode::Char('?') | KeyCode::Char('h') => return Some(Action::ToggleHelp),
         // Some terminals report Shift+r as 'r' with SHIFT instead of 'R'.
         KeyCode::Char('R') => return Some(Action::ToggleAutoRefresh),
@@ -427,7 +425,7 @@ mod tests {
         }
         // Everything else is ignored while asking, global keys included.
         for code in [
-            KeyCode::Char('s'),
+            KeyCode::Char('0'),
             KeyCode::Char('r'),
             KeyCode::Char('1'),
             KeyCode::Down,
@@ -556,6 +554,20 @@ mod tests {
             assert_eq!(map_key(&app, key(KeyCode::Char(c))), Some(Action::Input(c)));
         }
         assert_eq!(map_key(&app, ctrl('c')), Some(Action::Quit));
+    }
+
+    #[test]
+    fn settings_only_via_their_tab_key() {
+        let app = app_in(Context::Jobs);
+        assert_eq!(
+            map_key(&app, key(KeyCode::Char('s'))),
+            None,
+            "no s shortcut"
+        );
+        assert_eq!(
+            map_key(&app, key(KeyCode::Char('0'))),
+            Some(Action::SwitchTab(Tab::Settings))
+        );
     }
 
     #[test]

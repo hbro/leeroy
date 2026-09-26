@@ -4,7 +4,7 @@ Output target/screenshots/editing.gif
 Hide
 Type "target/debug/leeroy" Enter
 Sleep 1s
-Type "s"
+Type "0"
 Down 2
 Enter
 Type "socks5h://me:hunter2@bastion:1080"

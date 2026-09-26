@@ -33,7 +33,6 @@ pub enum Action {
     /// and wall clock (build start times). The only way time enters the
     /// core, so tests control it.
     Tick(Instant, SystemTime),
-    OpenSettings,
     SwitchTab(Tab),
     SelectNext,
     SelectPrev,
@@ -610,10 +609,6 @@ impl App {
                 self.auto_refresh = !self.auto_refresh;
                 // Turning it on refreshes right away when the data is stale.
                 return self.auto_refresh_if_due();
-            }
-            Action::OpenSettings => {
-                self.view = View::Settings;
-                self.show_help = false;
             }
             Action::SwitchTab(tab) => {
                 if self.view == View::Settings && tab != Tab::Settings {
@@ -1371,7 +1366,7 @@ mod tests {
 
     fn settings_app() -> App {
         let mut app = App::default();
-        app.update(Action::OpenSettings);
+        app.update(Action::SwitchTab(Tab::Settings));
         app
     }
 
@@ -1916,7 +1911,7 @@ mod tests {
     fn jobs_of_an_old_connection_are_ignored_and_cleared() {
         let mut app = connected_with_jobs(&["old"]);
         let old = app.connection_generation;
-        app.update(Action::OpenSettings);
+        app.update(Action::SwitchTab(Tab::Settings));
         set_url(&mut app, "https://other");
         assert_eq!(app.jobs.load, JobsLoad::NotLoaded, "cleared on reconnect");
         app.update(Action::JobsFetched {
@@ -2178,7 +2173,7 @@ mod tests {
     fn new_connection_does_not_wait_for_the_old_fetch() {
         let mut app = connected_with_jobs(&["a"]);
         app.update(Action::Refresh); // in flight, for the old connection
-        app.update(Action::OpenSettings);
+        app.update(Action::SwitchTab(Tab::Settings));
         set_url(&mut app, "https://other");
         let effects = app.update(Action::ConnectFinished {
             generation: app.connection_generation,

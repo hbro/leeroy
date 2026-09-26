@@ -16,6 +16,10 @@ A release's section is used as its GitHub release notes.
   the terminal's background colour. Setting `ui.theme` (`LEEROY_UI_THEME`),
   switchable live in the settings view.
 
+### Removed
+
+- The `s` shortcut for the settings: open them with `0`, their tab key.
+
 ## [0.1.1] - 2026-09-26
 
 ### Added

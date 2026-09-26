@@ -18,5 +18,5 @@
 - [ ] **Pipelines tab** that draws diagrams of how jobs relate (upstream/downstream etc.).
   - Probably also needs a **pipeline runs** tab.
 
-- [ ] **Remove the `s` shortcut for settings**: the help popup still lists `s`
+- [x] **Remove the `s` shortcut for settings**: the help popup still lists `s`
   for opening the settings, but that's `0` now; `s` shouldn't do it anymore.

@@ -160,7 +160,7 @@ fn render_jobs(frame: &mut Frame, area: Rect, app: &App) {
         ConnectionStatus::NotConfigured => vec![
             Line::raw(""),
             Line::styled("No Jenkins instance configured", Style::new().italic()),
-            Line::styled("Press s to open settings", hint),
+            Line::styled("Press 0 to open the settings", hint),
         ],
         ConnectionStatus::Connecting { url } => vec![
             Line::raw(""),
@@ -170,7 +170,7 @@ fn render_jobs(frame: &mut Frame, area: Rect, app: &App) {
             Line::raw(""),
             Line::styled(format!("Cannot reach {url}"), Style::new().italic()),
             Line::styled(error.clone(), Style::new().fg(t.error)),
-            Line::styled("Check the settings (s), or press r to retry", hint),
+            Line::styled("Check the settings (0), or press r to retry", hint),
         ],
         ConnectionStatus::Connected { .. } => match &app.jobs.load {
             JobsLoad::NotLoaded | JobsLoad::Loading => vec![

@@ -87,7 +87,7 @@ fn header_shows_connected_instance() {
 
 #[test]
 fn settings_empty() {
-    insta::assert_snapshot!(render_after(&[Action::OpenSettings]).backend());
+    insta::assert_snapshot!(render_after(&[Action::SwitchTab(Tab::Settings)]).backend());
 }
 
 #[test]
@@ -95,7 +95,10 @@ fn settings_theme_selected() {
     let mut app = test_app();
     app.terminal_appearance = Some(Appearance::Light);
     // The last row: Theme, with its docs below.
-    apply(&mut app, &[Action::OpenSettings, Action::SelectPrev]);
+    apply(
+        &mut app,
+        &[Action::SwitchTab(Tab::Settings), Action::SelectPrev],
+    );
     let screen = format!("{}", render(&app).backend());
     assert!(
         screen.contains("auto (default; light terminal detected)"),
@@ -109,7 +112,10 @@ fn switching_theme_recolours_right_away() {
     let bar_bg = |app: &App| render(app).backend().buffer()[(0, 0)].bg;
     let mut app = test_app();
     app.terminal_appearance = Some(Appearance::Dark);
-    apply(&mut app, &[Action::OpenSettings, Action::SelectPrev]);
+    apply(
+        &mut app,
+        &[Action::SwitchTab(Tab::Settings), Action::SelectPrev],
+    );
     assert_eq!(bar_bg(&app), Color::White, "auto on a dark terminal");
     apply(&mut app, &[Action::StartEdit, Action::StartEdit]); // auto → dark → light
     assert_eq!(app.settings.file.get(SettingKey::Theme), Some("light"));
@@ -119,7 +125,7 @@ fn switching_theme_recolours_right_away() {
 #[test]
 fn settings_editing_header() {
     let mut actions = vec![
-        Action::OpenSettings,
+        Action::SwitchTab(Tab::Settings),
         Action::SelectNext,
         Action::SelectNext,
         Action::SelectNext, // "+ add header", after URL / TLS / proxy
@@ -142,7 +148,7 @@ fn settings_saved_with_env_header() {
     app.settings
         .file
         .set_header("X-Forwarded-User", Some("me".into()));
-    let mut actions = vec![Action::OpenSettings, Action::StartEdit];
+    let mut actions = vec![Action::SwitchTab(Tab::Settings), Action::StartEdit];
     actions.extend(type_str("https://ci.example.com"));
     actions.extend([Action::ConfirmEdit, Action::SettingsSaved(Ok(()))]);
     apply(&mut app, &actions);
@@ -154,7 +160,7 @@ fn settings_saved_with_env_header() {
 #[test]
 fn url_credentials_masked_except_while_editing() {
     let mut app = test_app();
-    let mut actions = vec![Action::OpenSettings, Action::StartEdit];
+    let mut actions = vec![Action::SwitchTab(Tab::Settings), Action::StartEdit];
     actions.extend(type_str("https://me:s3cret@ci.example.com"));
     apply(&mut app, &actions);
     let editing = format!("{}", render(&app).backend());
@@ -228,7 +234,11 @@ fn settings_proxy_selected_with_system_fallback() {
     });
     apply(
         &mut app,
-        &[Action::OpenSettings, Action::SelectNext, Action::SelectNext],
+        &[
+            Action::SwitchTab(Tab::Settings),
+            Action::SelectNext,
+            Action::SelectNext,
+        ],
     );
     let screen = format!("{}", render(&app).backend());
     assert!(!screen.contains("hunter2"), "proxy password shown");
@@ -238,7 +248,7 @@ fn settings_proxy_selected_with_system_fallback() {
 #[test]
 fn settings_invalid_proxy() {
     let mut actions = vec![
-        Action::OpenSettings,
+        Action::SwitchTab(Tab::Settings),
         Action::SelectNext,
         Action::SelectNext, // proxy
         Action::StartEdit,
@@ -251,7 +261,7 @@ fn settings_invalid_proxy() {
 #[test]
 fn settings_editing_proxy_cursor_mid_text() {
     let mut actions = vec![
-        Action::OpenSettings,
+        Action::SwitchTab(Tab::Settings),
         Action::SelectNext,
         Action::SelectNext, // proxy
         Action::StartEdit,
