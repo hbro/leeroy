@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Render VHS tapes to PNG screenshots in target/screenshots/.
+# Render VHS tapes to PNG screenshots in target/screenshots/ (readme.tape:
+# docs/screenshots/, committed and shown in the README).
 #
 #   scripts/screenshot.sh            run every tapes/*.tape
 #   scripts/screenshot.sh help       run tapes/help.tape only
@@ -39,6 +40,7 @@ for tape in "${tapes[@]}"; do
     # expected screenshots first and check they exist afterwards.
     mapfile -t shots < <(sed -n 's/^Screenshot "\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$tape")
     rm -f "${shots[@]}"
+    for shot in "${shots[@]}"; do mkdir -p "$(dirname "$shot")"; done
     rm -rf target/vhs && mkdir -p target/vhs
     run vhs --quiet "$tape"
     for shot in "${shots[@]}"; do

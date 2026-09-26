@@ -218,6 +218,9 @@ Run all three layers for UI changes; layer 1 is mandatory for every change.
    VHS 0.11 has no `Home`/`End` commands (they get typed as text): use `Left N`.
    VHS is pinned to 0.11.0 in `flake.nix`: 0.12.0 silently writes nothing
    (charmbracelet/vhs#787). The script checks that screenshots were produced.
+   `tapes/readme.tape` writes the README screenshots to `docs/screenshots/`
+   (committed, 960x540, mock instance `jenkins.example.com` via the fake as a
+   proxy): regenerate them with `scripts/screenshot.sh readme` when the UI changes.
    Tapes run with a fresh `target/vhs/config.toml` and no `LEEROY_*`/`*_proxy` vars,
    against a fake Jenkins on http://127.0.0.1:8099 started by the script (never
    the real network).

@@ -1,6 +1,8 @@
 # A light terminal scheme; the theme stays on auto, so this also shows that
 # Leeroy detects the light background.
 Set Theme "Catppuccin Latte"
+Set Width 1200
+Set Height 720
 Source tapes/_common.tape
 Output target/screenshots/light.gif
 Env LEEROY_JENKINS_URL "http://127.0.0.1:8099"

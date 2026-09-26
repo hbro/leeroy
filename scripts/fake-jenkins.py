@@ -13,7 +13,11 @@ Serves (under any path prefix, with an X-Jenkins header):
   GET /job/../lastBuild/api/json   the job's last build (404 if never built)
   GET /job/../<n>/logText/progressiveText?start=B   console output from byte B;
       a running build's log grows by a line every 0.3s (X-More-Data: true)
---auth      require HTTP basic auth, 401 otherwise; the user is echoed back
+--auth      require HTTP basic auth, 401 otherwise; the user is echoed back.
+            Without it, any request is allowed and a basic-auth user, if sent,
+            is echoed back too (to show a user name in screenshots).
+Also works as an HTTP proxy for any host (absolute request URLs), so Leeroy
+can be pointed at e.g. http://jenkins.example.com via proxy.url.
 --delay     sleep before answering (to see "connecting" / "refreshing")
 --status    always answer with this HTTP status
 --tls       serve HTTPS with a throwaway self-signed cert (needs openssl)
@@ -290,13 +294,21 @@ def main() -> None:
             time.sleep(args.delay)
             if args.status:
                 return self.reply(args.status, {"error": "forced"})
+            # Proxy requests carry an absolute URL: keep only its path.
+            self.path = re.sub(r"^https?://[^/]+", "", self.path) or "/"
             path = self.path.split("?")[0]
             user = "anonymous"
+            auth = self.headers.get("Authorization", "")
             if args.auth:
                 expected = "Basic " + base64.b64encode(args.auth.encode()).decode()
-                if self.headers.get("Authorization") != expected:
+                if auth != expected:
                     return self.reply(401, {"error": "unauthorized"})
                 user = args.auth.split(":", 1)[0]
+            elif auth.startswith("Basic "):
+                try:
+                    user = base64.b64decode(auth[6:]).decode().split(":", 1)[0]
+                except ValueError:
+                    pass
             if path.endswith("/whoAmI/api/json"):
                 return self.reply(
                     200, {"name": user, "authenticated": user != "anonymous"}
