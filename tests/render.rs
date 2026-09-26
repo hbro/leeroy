@@ -395,3 +395,35 @@ fn refresh_status_in_header() {
     let line = header_line(&test_app());
     assert!(!line.contains('⟳'), "{line}");
 }
+
+/// Every status must stay readable on the selected row: its colour may not
+/// equal the highlight background (dark-gray statuses used to vanish there).
+#[test]
+fn selected_row_status_stays_readable() {
+    let mut app = app_with_jobs();
+    let rows = app.jobs.visible().len();
+    for row in 0..rows {
+        apply(&mut app, &[Action::SelectFirst]);
+        for _ in 0..row {
+            apply(&mut app, &[Action::SelectNext]);
+        }
+        let label = app.jobs.visible()[row].status.label();
+        let terminal = render(&app);
+        let buffer = terminal.backend().buffer();
+        // The selected row is marked with "▶"; check its status cells.
+        let y = (0..HEIGHT)
+            .find(|&y| buffer[(1, y)].symbol() == "▶")
+            .expect("selected row");
+        let line: String = (0..WIDTH).map(|x| buffer[(x, y)].symbol()).collect();
+        let start = line.find(label).expect("status label on the row");
+        let x = line[..start].chars().count() as u16;
+        for dx in 0..label.chars().count() as u16 {
+            let cell = &buffer[(x + dx, y)];
+            assert_ne!(
+                cell.fg, cell.bg,
+                "{label:?} unreadable on the selected row (fg == bg == {:?})",
+                cell.bg
+            );
+        }
+    }
+}

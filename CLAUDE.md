@@ -36,6 +36,9 @@ Rules:
 - Header: app name + connected Jenkins instance (`App::connection`).
 - Tabs: `app::Tab` (`ALL`, F-key = position + 1), tab bar under the header. New
   content = new `Tab` + `View` variant. F-keys work everywhere except text input.
+- Selected rows use `SELECTED_BG` (dark gray); a cell colour equal to it is
+  swapped to `SELECTED_FG_ON_BG` on that row. Test
+  `selected_row_status_stays_readable` checks every status stays fg != bg.
 - Global keys (`GLOBAL_BINDINGS`, bottom bar): q, s, ?, r (refresh), R (toggle
   auto-refresh). The refresh status is a compact `⟳ 4s` at the right end of the
   header (icon green = auto-refresh on, gray = off; `…` fetching, `✕` failed).

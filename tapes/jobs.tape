@@ -17,6 +17,12 @@ Show
 Screenshot target/screenshots/jobs-auto-off.png
 Sleep 500ms
 Hide
+Down 5
+Sleep 300ms
+Show
+Screenshot target/screenshots/jobs-selected-not-built.png
+Sleep 500ms
+Hide
 Type "/"
 Type "main"
 Sleep 300ms

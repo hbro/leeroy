@@ -223,8 +223,12 @@ fn render_job_list(frame: &mut Frame, area: Rect, app: &App) {
         return;
     }
 
-    let rows = visible.iter().map(|job| {
-        let (symbol, color) = status_symbol(job.status);
+    let rows = visible.iter().enumerate().map(|(i, job)| {
+        let (symbol, mut color) = status_symbol(job.status);
+        // Text in the highlight colour would vanish on the selected row.
+        if i == jobs.selected && color == SELECTED_BG {
+            color = SELECTED_FG_ON_BG;
+        }
         Row::new(vec![
             Cell::from(Span::styled(symbol, Style::new().fg(color))),
             Cell::from(Span::styled(job.status.label(), Style::new().fg(color))),
@@ -246,12 +250,17 @@ fn render_job_list(frame: &mut Frame, area: Rect, app: &App) {
         ],
     )
     .column_spacing(1)
-    .row_highlight_style(Style::new().bg(Color::DarkGray).bold())
+    .row_highlight_style(Style::new().bg(SELECTED_BG).bold())
     .highlight_symbol("▶ ")
     .highlight_spacing(HighlightSpacing::Always);
     let mut state = TableState::default().with_selected(Some(jobs.selected));
     frame.render_stateful_widget(table, list_area, &mut state);
 }
+
+/// Background of the selected job row.
+const SELECTED_BG: Color = Color::DarkGray;
+/// Replaces status colours equal to [`SELECTED_BG`] on the selected row.
+const SELECTED_FG_ON_BG: Color = Color::Gray;
 
 /// Symbol + color per status; the status word is shown too (not color alone).
 fn status_symbol(status: JobStatus) -> (&'static str, Color) {
