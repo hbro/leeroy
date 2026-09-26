@@ -25,6 +25,11 @@ Elm-style: pure core, thin IO shell.
   are built from the job's full name (`job/a/job/b/lastBuild/…`) against the
   configured URL, never from Jenkins' `url` field (may be an internal address
   behind a reverse proxy). 404 on lastBuild = never built (`Ok(None)`).
+- `src/history.rs` — Builds tab: one request asks every job for its newest N
+  builds (`builds[…]{0,N}` in the jobs tree), merged by start time; only the first
+  N are shown (exact). N = visible rows (`App::list_rows`, recorded by the
+  renderer); moving past the end fetches N + one page. Job-name/`#number` filters
+  are complete client-side.
 - `src/console.rs` — console output: `ConsoleView` buffer fed by
   `logText/progressiveText?start=<byte>` chunks (`X-Text-Size` = next offset,
   `X-More-Data` = still running), UTF-8 carried across chunk boundaries, lines
@@ -63,6 +68,10 @@ Rules:
   also matched on `which`, so quick steps ignore builds left behind; `r`/auto-refresh re-fetch what's on screen (build
   view: the build, not the job list) under the same one-in-flight rule. Results
   are tagged with connection generation + job name; mismatches are ignored.
+- Build views remember where they came from (`BuildView::origin`: Jobs or
+  Builds): Esc returns there and `App::tab()` highlights that tab. Opened at a
+  number (from Builds), the first fetch also gets the job's build numbers
+  (`want_numbers`) so ←/→ work.
 - Console view (`View::Console`, under the build view): `c` toggles it (opens it
   from the build view, `c`/`Esc` go back) for the
   shown build's *number*. Polled every `CONSOLE_POLL` (1s) while shown and the
@@ -163,7 +172,8 @@ Run all three layers for UI changes; layer 1 is mandatory for every change.
    App log for the run: `target/tui.log` (RUST_LOG=debug).
    Fake Jenkins for connection tests: `scripts/fake-jenkins.py [--port 8099]
    [--auth USER:TOKEN] [--delay SECS] [--status CODE] [--tls] [--jobs N] [--churn]`
-   (job tree with folders/multibranch/all statuses; `lastBuild` per job: 404 for
+   (job tree with folders/multibranch/all statuses, each job's builds when the tree
+   asks for `builds[…]{0,N}`; `lastBuild` per job: 404 for
    never built, running builds progress in real time and their console log grows
    a line every 0.3s (ANSI, `\r`, UTF-8, long lines); `--churn` changes a status
    per request to watch auto-refresh).

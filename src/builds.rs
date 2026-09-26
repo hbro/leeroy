@@ -64,6 +64,14 @@ pub fn build_path(full_name: &str, which: BuildRef) -> String {
     }
 }
 
+/// Request path for just a job's build numbers.
+pub fn numbers_path(full_name: &str) -> String {
+    format!(
+        "{}api/json?tree=allBuilds[number],builds[number]",
+        job_path(full_name)
+    )
+}
+
 /// What a build fetch returns: the build (`None`: not found / never built)
 /// and, for [`BuildRef::Latest`], all build numbers (ascending).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -315,6 +323,8 @@ pub struct BuildView {
     pub attempted_at: Option<std::time::Instant>,
     /// Lines scrolled down.
     pub scroll: u16,
+    /// The view Esc returns to (Jobs or Builds).
+    pub origin: crate::app::View,
     /// Largest useful `scroll`, recorded by the renderer (which knows the
     /// content and screen height) so scrolling can be clamped.
     pub max_scroll: std::cell::Cell<u16>,
@@ -331,6 +341,7 @@ impl BuildView {
             fetched_at: None,
             attempted_at: None,
             scroll: 0,
+            origin: crate::app::View::Jobs,
             max_scroll: std::cell::Cell::new(0),
         }
     }

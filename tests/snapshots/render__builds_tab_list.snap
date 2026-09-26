@@ -1,16 +1,16 @@
 ---
 source: tests/render.rs
-expression: render(&app).backend()
+expression: screen
 ---
 " Leeroy  ● https://ci.example.com · Jenkins 2.504.1 · me       h/?  help   ⟳ 0s "
 " 1 Jobs   2 Builds                                                   0 Settings "
-"Jobs (6) ───────────────────────────────────────────────────────────────────────"
-"  ● success     backend/api/main                                                "
-"▶ ● failed    ⟳ backend/api/release-1.2                                         "
-"  ● unstable    backend/worker                                                  "
-"  ⊘ disabled    docs                                                            "
-"  ● aborted     frontend/web/main                                               "
-"  ○ not built   frontend/web/pr-42                                              "
+"Builds (5 newest) · ↓ at the end loads more ────────────────────────────────────"
+"▶ ⟳ running   backend/api/release-1.2 #46                       2m ago   2m 30s…"
+"  ● success   backend/api/main #56                             10m ago    1m 35s"
+"  ● failed    frontend/web/main #12                             1h ago    5m 12s"
+"  ● aborted   docs #7                                           1d ago       12s"
+"  ● unstable  backend/worker #88                                1d ago    1m 01s"
+"                                                                                "
 "                                                                                "
 "                                                                                "
 "                                                                                "
@@ -25,4 +25,4 @@ expression: render(&app).backend()
 "                                                                                "
 "                                                                                "
 "────────────────────────────────────────────────────────────────────────────────"
-" ↑/↓  select   Enter  last build   /  filter                                    "
+" ↑/↓  select   Enter  open build   /  filter                                    "

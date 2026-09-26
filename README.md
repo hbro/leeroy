@@ -143,6 +143,7 @@ Content lives in tabs, selected with the digit keys shown in the tab bar:
 | Key | Tab |
 | --- | --- |
 | `1` | Jobs |
+| `2` | Builds (build history) |
 | `0` | Settings (far right of the tab bar) |
 
 Global keys, available everywhere except while typing in a field (the full list
@@ -214,3 +215,16 @@ and followed at the bottom. Scrolling up pauses following (the title says so);
 
 Colour codes are removed, `\r` progress bars show their final state, and at
 most the last 100 000 lines are kept.
+
+### Builds
+
+The build history of all jobs, newest first: status, job and build number, when
+it started and how long it took (`…` while running). `Enter` opens the build (with
+`←/→`, `c` etc. as usual); `Esc` comes back here. `/` filters like on the Jobs tab.
+
+Jenkins has no "newest builds overall" API, so Leeroy asks every job for its
+newest *N* builds in **one** request (`tree=jobs[…,builds[…]{0,N}]`), where *N* is
+the number of rows that fit on your screen, and merges them. That's exact for the
+*N* rows shown. Moving down past the last row loads the next screenful (again one
+request). Filtering by job name or `#number` is complete without extra requests;
+filtering by result (e.g. "failed") only searches what's loaded.

@@ -8,6 +8,7 @@ use crate::{
     builds::{self, BuildPage, BuildRef},
     config::redact_url,
     console::{self, ConsoleChunk},
+    history::{self, HistoryEntry},
     jobs::{self, Job},
 };
 
@@ -103,6 +104,17 @@ pub async fn fetch_jobs(config: &ConnectionConfig) -> Result<Vec<Job>, String> {
     jobs::parse_jobs(&response.body)
 }
 
+/// Build history across all jobs, newest first: every job's newest `limit`
+/// builds in one request (see [`crate::history`]).
+pub async fn fetch_history(
+    config: &ConnectionConfig,
+    limit: usize,
+) -> Result<Vec<HistoryEntry>, String> {
+    let path = format!("api/json?tree={}", history::tree_query(limit));
+    let response = get(config, &path, false).await?.ok_or("not found")?;
+    history::parse_history(&response.body)
+}
+
 /// Console output of build `number` of a job, from byte offset `start`.
 pub async fn fetch_console(
     config: &ConnectionConfig,
@@ -135,24 +147,36 @@ pub async fn fetch_console(
 /// `which` build of a job. For [`BuildRef::Latest`] this also returns the
 /// job's build numbers; a never-built job gives `build: None`. For a number,
 /// `build: None` means that build doesn't exist (deleted).
+///
+/// With `want_numbers`, a numbered build also comes with the job's build
+/// numbers (one extra request), needed to step between builds when the view
+/// was opened at a specific build (e.g. from the Builds tab).
 pub async fn fetch_build(
     config: &ConnectionConfig,
     full_name: &str,
     which: BuildRef,
+    want_numbers: bool,
 ) -> Result<BuildPage, String> {
     let response = get(config, &builds::build_path(full_name, which), true).await?;
-    match (which, response) {
-        (BuildRef::Latest, Some(response)) => builds::parse_job_builds(&response.body),
-        (BuildRef::Latest, None) => Err(format!("job {full_name} no longer exists")),
-        (BuildRef::Number(_), Some(response)) => Ok(BuildPage {
+    let mut page = match (which, response) {
+        (BuildRef::Latest, Some(response)) => return builds::parse_job_builds(&response.body),
+        (BuildRef::Latest, None) => return Err(format!("job {full_name} no longer exists")),
+        (BuildRef::Number(_), Some(response)) => BuildPage {
             build: Some(builds::parse_build(&response.body)?),
             numbers: None,
-        }),
-        (BuildRef::Number(_), None) => Ok(BuildPage {
+        },
+        (BuildRef::Number(_), None) => BuildPage {
             build: None,
             numbers: None,
-        }),
+        },
+    };
+    if want_numbers {
+        let path = builds::numbers_path(full_name);
+        if let Some(response) = get(config, &path, true).await? {
+            page.numbers = builds::parse_job_builds(&response.body)?.numbers;
+        }
     }
+    Ok(page)
 }
 
 struct Response {
@@ -537,22 +561,22 @@ mod tests {
             .await;
 
         let config = config(&server.uri());
-        let latest = fetch_build(&config, "team/my svc", BuildRef::Latest)
+        let latest = fetch_build(&config, "team/my svc", BuildRef::Latest, false)
             .await
             .unwrap();
         assert_eq!(latest.numbers, Some(vec![1, 3]));
         assert_eq!(latest.build.unwrap().number, 3);
-        let first = fetch_build(&config, "team/my svc", BuildRef::Number(1))
+        let first = fetch_build(&config, "team/my svc", BuildRef::Number(1), false)
             .await
             .unwrap();
         assert_eq!(first.build.unwrap().number, 1);
         assert_eq!(first.numbers, None);
         // Deleted build: not found, not an error.
-        let gone = fetch_build(&config, "team/my svc", BuildRef::Number(2))
+        let gone = fetch_build(&config, "team/my svc", BuildRef::Number(2), false)
             .await
             .unwrap();
         assert_eq!(gone.build, None);
-        let never = fetch_build(&config, "never", BuildRef::Latest)
+        let never = fetch_build(&config, "never", BuildRef::Latest, false)
             .await
             .unwrap();
         assert_eq!(
@@ -564,7 +588,7 @@ mod tests {
         );
         // A job that's gone is an error.
         assert!(
-            fetch_build(&config, "gone", BuildRef::Latest)
+            fetch_build(&config, "gone", BuildRef::Latest, false)
                 .await
                 .is_err()
         );
@@ -611,6 +635,52 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn fetches_history_in_one_request() {
+        let server = MockServer::start().await;
+        Mock::given(path("/api/json"))
+            .and(wiremock::matchers::query_param("tree", history::tree_query(3)))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jobs": [
+                    {"fullName": "a", "builds": [
+                        {"number": 2, "result": "SUCCESS", "timestamp": 2000, "duration": 1},
+                        {"number": 1, "result": "FAILURE", "timestamp": 500, "duration": 1}
+                    ]},
+                    {"fullName": "b", "builds": [
+                        {"number": 7, "result": null, "building": true, "timestamp": 1000, "duration": 0}
+                    ]}
+                ]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let entries = fetch_history(&config(&server.uri()), 3).await.unwrap();
+        let ids: Vec<(&str, u64)> = entries.iter().map(|e| (e.job.as_str(), e.number)).collect();
+        assert_eq!(ids, [("a", 2), ("b", 7), ("a", 1)]);
+    }
+
+    #[tokio::test]
+    async fn numbered_build_with_numbers() {
+        let server = MockServer::start().await;
+        Mock::given(path("/job/a/4/api/json"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "number": 4, "result": "SUCCESS", "timestamp": 0, "duration": 0
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(path("/job/a/api/json"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "allBuilds": [{"number": 5}, {"number": 4}, {"number": 2}]
+            })))
+            .mount(&server)
+            .await;
+        let page = fetch_build(&config(&server.uri()), "a", BuildRef::Number(4), true)
+            .await
+            .unwrap();
+        assert_eq!(page.build.unwrap().number, 4);
+        assert_eq!(page.numbers, Some(vec![2, 4, 5]));
     }
 
     #[tokio::test]

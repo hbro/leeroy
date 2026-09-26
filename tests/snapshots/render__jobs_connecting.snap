@@ -3,7 +3,7 @@ source: tests/render.rs
 expression: render(&app).backend()
 ---
 " Leeroy  ◌ https://ci.example.com · connecting…                       h/?  help "
-" 1 Jobs                                                              0 Settings "
+" 1 Jobs   2 Builds                                                   0 Settings "
 "Jobs ───────────────────────────────────────────────────────────────────────────"
 "                                                                                "
 "                      Connecting to https://ci.example.com…                     "

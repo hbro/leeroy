@@ -15,6 +15,7 @@ use crate::{
     config::{DEFAULT_REFRESH_SECS, HEADERS_DOC, SettingKey, header_env_var, redact_url},
     console::ConsoleLoad,
     event::{Binding, GLOBAL_BINDINGS, context_bindings},
+    history::HistoryLoad,
     jobs::{JobStatus, JobsLoad},
     proxy::SystemProxy,
 };
@@ -34,6 +35,7 @@ pub fn render(frame: &mut Frame, app: &App) {
     render_tabs(frame, tabs, app);
     match app.view {
         View::Jobs => render_jobs(frame, body, app),
+        View::Builds => render_history(frame, body, app),
         View::Build => render_build(frame, body, app),
         View::Console => render_console(frame, body, app),
         View::Settings => render_settings(frame, body, &app.settings),
@@ -132,7 +134,7 @@ fn render_tabs(frame: &mut Frame, area: Rect, app: &App) {
     let active = Style::new().fg(Color::Black).bg(TAB_BLUE).bold();
     let inactive = Style::new().fg(Color::Gray);
     let label = |tab: Tab| {
-        let style = if app.view.tab() == Some(tab) {
+        let style = if app.tab() == Some(tab) {
             active
         } else {
             inactive
@@ -275,6 +277,151 @@ fn render_job_list(frame: &mut Frame, area: Rect, app: &App) {
     .highlight_symbol("▶ ")
     .highlight_spacing(HighlightSpacing::Always);
     let mut state = TableState::default().with_selected(Some(jobs.selected));
+    frame.render_stateful_widget(table, list_area, &mut state);
+    app.list_rows.set(list_area.height);
+}
+
+fn render_history(frame: &mut Frame, area: Rect, app: &App) {
+    let hint = Style::new().fg(Color::DarkGray);
+    let message = |lines: Vec<Line<'static>>| {
+        Paragraph::new(lines)
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: true })
+            .block(view_block("Builds"))
+    };
+    let lines = match (&app.connection, &app.history.load) {
+        (ConnectionStatus::Connected { .. }, HistoryLoad::Loaded) => {
+            return render_history_list(frame, area, app);
+        }
+        (ConnectionStatus::Connected { .. }, HistoryLoad::Failed(error)) => vec![
+            Line::raw(""),
+            Line::styled("Could not load the build history", Style::new().italic()),
+            Line::styled(error.clone(), Style::new().red()),
+            Line::styled("Press r to retry", hint),
+        ],
+        (ConnectionStatus::Connected { .. }, _) => vec![
+            Line::raw(""),
+            Line::styled("Loading build history…", Style::new().italic()),
+        ],
+        _ => vec![
+            Line::raw(""),
+            Line::styled("Not connected", Style::new().italic()),
+            Line::styled("See the Jobs tab (1) or the settings (0)", hint),
+        ],
+    };
+    frame.render_widget(message(lines), area);
+}
+
+fn render_history_list(frame: &mut Frame, area: Rect, app: &App) {
+    let history = &app.history;
+    let visible = history.visible();
+    let mut title = format!("Builds ({} newest", visible.len());
+    if !history.active_filter().trim().is_empty() {
+        title.push_str(" matching");
+    }
+    title.push(')');
+    if history.has_more() {
+        title.push_str(" · ↓ at the end loads more");
+    }
+    if history.refreshing {
+        title.push_str(" · refreshing…");
+    }
+    let block = view_block(&title);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let show_filter = history.filter_input.is_some() || !history.filter.is_empty();
+    let [filter_area, list_area] = Layout::vertical([
+        Constraint::Length(u16::from(show_filter)),
+        Constraint::Min(0),
+    ])
+    .areas(inner);
+    app.list_rows.set(list_area.height);
+    if let Some(input) = &history.filter_input {
+        let mut spans = vec![Span::styled(" / ", Style::new().yellow().bold())];
+        let shown: Vec<char> = input.value().chars().collect();
+        spans.extend(input_spans(&shown, input.cursor()));
+        frame.render_widget(Paragraph::new(Line::from(spans)), filter_area);
+    } else if show_filter {
+        let line = Line::from(vec![
+            Span::styled(" filter: ", Style::new().fg(Color::DarkGray)),
+            Span::styled(history.filter.clone(), Style::new().yellow()),
+        ]);
+        frame.render_widget(Paragraph::new(line), filter_area);
+    }
+
+    if visible.is_empty() {
+        let text = if history.active_filter().trim().is_empty() {
+            "No builds yet".to_owned()
+        } else {
+            format!(
+                "No builds of jobs matching \"{}\"",
+                history.active_filter().trim()
+            )
+        };
+        let message = Paragraph::new(vec![
+            Line::raw(""),
+            Line::styled(text, Style::new().italic()),
+        ])
+        .alignment(Alignment::Center);
+        frame.render_widget(message, list_area);
+        return;
+    }
+
+    let dim = Style::new().fg(Color::DarkGray);
+    let rows = visible.iter().enumerate().map(|(i, entry)| {
+        let (symbol, mut color, label) = if entry.building {
+            ("⟳", Color::Yellow, "running")
+        } else {
+            let status = entry.result.unwrap_or(JobStatus::Unknown);
+            let (symbol, color) = status_symbol(status);
+            (symbol, color, status.label())
+        };
+        // Text in the highlight colour would vanish on the selected row.
+        let selected = i == history.selected;
+        if selected && color == SELECTED_BG {
+            color = SELECTED_FG_ON_BG;
+        }
+        let dim = if selected {
+            Style::new().fg(SELECTED_FG_ON_BG)
+        } else {
+            dim
+        };
+        let age = app
+            .wall_now
+            .duration_since(entry.started)
+            .unwrap_or_default();
+        let took = if entry.building {
+            format!("{}…", format_duration(age))
+        } else {
+            format_duration(entry.duration)
+        };
+        Row::new(vec![
+            Cell::from(Span::styled(symbol, Style::new().fg(color))),
+            Cell::from(Span::styled(label, Style::new().fg(color))),
+            Cell::from(Line::from(vec![
+                Span::raw(entry.job.clone()),
+                Span::styled(format!(" #{}", entry.number), dim),
+            ])),
+            Cell::from(Line::from(format!("{} ago", format_age(age))).right_aligned()),
+            Cell::from(Line::from(took).right_aligned()),
+        ])
+    });
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(1),
+            Constraint::Length(9),
+            Constraint::Min(0),
+            Constraint::Length(8),
+            Constraint::Length(9),
+        ],
+    )
+    .column_spacing(1)
+    .row_highlight_style(Style::new().bg(SELECTED_BG).add_modifier(Modifier::BOLD))
+    .highlight_symbol("▶ ")
+    .highlight_spacing(HighlightSpacing::Always);
+    let mut state = TableState::default().with_selected(Some(history.selected));
     frame.render_stateful_widget(table, list_area, &mut state);
 }
 
@@ -757,6 +904,11 @@ fn refresh_status(app: &App) -> Line<'static> {
                 console.last_error.is_some() || matches!(console.load, ConsoleLoad::Failed(_)),
             )
         }
+        (View::Builds, _) => (
+            app.history.fetch_in_flight(),
+            app.history.fetched_at,
+            matches!(app.history.load, HistoryLoad::Failed(_)),
+        ),
         (View::Build, Some(build)) => (
             build.fetch_in_flight(),
             build.fetched_at,

@@ -55,6 +55,17 @@ pub fn context_bindings(context: Context) -> &'static [Binding] {
         bind("c/Esc", "back"),
         bind("←/→", "sideways"),
     ];
+    const BUILDS: &[Binding] = &[
+        bind("↑/↓", "select"),
+        bind("Enter", "open build"),
+        bind("/", "filter"),
+    ];
+    const BUILDS_FILTERED: &[Binding] = &[
+        bind("↑/↓", "select"),
+        bind("Enter", "open build"),
+        bind("/", "filter"),
+        bind("Esc", "clear filter"),
+    ];
     const JOBS_FILTER: &[Binding] = &[
         bind("Enter", "apply"),
         bind("Esc", "cancel"),
@@ -75,7 +86,9 @@ pub fn context_bindings(context: Context) -> &'static [Binding] {
         Context::ConfirmQuit => CONFIRM_QUIT,
         Context::Jobs => JOBS,
         Context::JobsFiltered => JOBS_FILTERED,
-        Context::JobsFilter => JOBS_FILTER,
+        Context::JobsFilter | Context::BuildsFilter => JOBS_FILTER,
+        Context::Builds => BUILDS,
+        Context::BuildsFiltered => BUILDS_FILTERED,
         Context::Build => BUILD,
         Context::Console => CONSOLE,
         Context::Settings => SETTINGS,
@@ -114,8 +127,8 @@ pub fn map_key(app: &App, key: KeyEvent) -> Option<Action> {
             // Settings: save the field and move; filter: move the list selection.
             KeyCode::Up => Some(Action::SelectPrev),
             KeyCode::Down => Some(Action::SelectNext),
-            KeyCode::PageUp if context == Context::JobsFilter => Some(Action::SelectPageUp),
-            KeyCode::PageDown if context == Context::JobsFilter => Some(Action::SelectPageDown),
+            KeyCode::PageUp if context != Context::EditSetting => Some(Action::SelectPageUp),
+            KeyCode::PageDown if context != Context::EditSetting => Some(Action::SelectPageDown),
             KeyCode::Left => Some(Action::CursorLeft),
             KeyCode::Right => Some(Action::CursorRight),
             KeyCode::Home => Some(Action::CursorHome),
@@ -151,7 +164,10 @@ pub fn map_key(app: &App, key: KeyEvent) -> Option<Action> {
         (Context::Settings, KeyCode::Down | KeyCode::Char('j')) => Some(Action::SelectNext),
         (Context::Settings, KeyCode::Up | KeyCode::Char('k')) => Some(Action::SelectPrev),
         (Context::Settings, KeyCode::Enter) => Some(Action::StartEdit),
-        (Context::Jobs | Context::JobsFiltered, code) => match code {
+        (
+            Context::Jobs | Context::JobsFiltered | Context::Builds | Context::BuildsFiltered,
+            code,
+        ) => match code {
             KeyCode::Down | KeyCode::Char('j') => Some(Action::SelectNext),
             KeyCode::Up | KeyCode::Char('k') => Some(Action::SelectPrev),
             KeyCode::PageDown => Some(Action::SelectPageDown),
@@ -199,11 +215,14 @@ mod tests {
     use super::*;
     use crate::app::View;
 
-    const ALL_CONTEXTS: [Context; 9] = [
+    const ALL_CONTEXTS: [Context; 12] = [
         Context::ConfirmQuit,
         Context::Jobs,
         Context::JobsFiltered,
         Context::JobsFilter,
+        Context::Builds,
+        Context::BuildsFiltered,
+        Context::BuildsFilter,
         Context::Build,
         Context::Console,
         Context::Settings,
@@ -226,6 +245,15 @@ mod tests {
             Context::ConfirmQuit => app.confirm_quit = true,
             Context::JobsFiltered => app.jobs.filter = "api".into(),
             Context::JobsFilter => app.jobs.filter_input = Some(Default::default()),
+            Context::Builds => app.view = View::Builds,
+            Context::BuildsFiltered => {
+                app.view = View::Builds;
+                app.history.filter = "api".into();
+            }
+            Context::BuildsFilter => {
+                app.view = View::Builds;
+                app.history.filter_input = Some(Default::default());
+            }
             Context::Build => {
                 app.view = View::Build;
                 app.build = Some(crate::builds::BuildView::new("job".into()));
@@ -289,7 +317,7 @@ mod tests {
                 Some(Action::SwitchTab(Tab::Settings)),
                 "{context:?}"
             );
-            assert_eq!(map_key(&app, key(KeyCode::Char('2'))), None, "no such tab");
+            assert_eq!(map_key(&app, key(KeyCode::Char('3'))), None, "no such tab");
             assert_eq!(map_key(&app, key(KeyCode::F(1))), None, "F-keys unused");
         }
         assert_eq!(

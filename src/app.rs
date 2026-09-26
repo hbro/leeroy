@@ -7,6 +7,7 @@ use crate::{
     builds::{BuildLoad, BuildPage, BuildRef, BuildStep, BuildView},
     config::{Section, SettingKey, Settings, header_env_var, parse_header, redact_url},
     console::{ConsoleChunk, ConsoleLoad, ConsoleView},
+    history::{HistoryEntry, HistoryLoad, HistoryState},
     input::TextInput,
     jenkins::{ConnectionConfig, ServerInfo},
     jobs::{Job, JobsLoad, JobsState},
@@ -81,6 +82,12 @@ pub enum Action {
         generation: u64,
         result: Result<Vec<Job>, String>,
     },
+    /// Outcome of [`Effect::FetchHistory`] (made with `limit` builds per job).
+    HistoryFetched {
+        generation: u64,
+        limit: usize,
+        result: Result<Vec<HistoryEntry>, String>,
+    },
     /// Outcome of [`Effect::FetchConsole`] (the chunk from `start`).
     ConsoleFetched {
         generation: u64,
@@ -128,10 +135,19 @@ pub enum Effect {
         config: ConnectionConfig,
     },
     /// Load `which` build of `job`; answer with [`Action::BuildFetched`].
+    /// `want_numbers`: also get the job's build numbers (for a numbered build).
     FetchBuild {
         generation: u64,
         job: String,
         which: BuildRef,
+        want_numbers: bool,
+        config: ConnectionConfig,
+    },
+    /// Load the build history: every job's newest `limit` builds; answer with
+    /// [`Action::HistoryFetched`].
+    FetchHistory {
+        generation: u64,
+        limit: usize,
         config: ConnectionConfig,
     },
 }
@@ -140,16 +156,18 @@ pub enum Effect {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
     Jobs,
+    Builds,
     Settings,
 }
 
 impl Tab {
     /// In tab-bar order.
-    pub const ALL: [Tab; 2] = [Tab::Jobs, Tab::Settings];
+    pub const ALL: [Tab; 3] = [Tab::Jobs, Tab::Builds, Tab::Settings];
 
     pub fn title(self) -> &'static str {
         match self {
             Tab::Jobs => "Jobs",
+            Tab::Builds => "Builds",
             Tab::Settings => "Settings",
         }
     }
@@ -159,6 +177,7 @@ impl Tab {
     pub fn key(self) -> char {
         match self {
             Tab::Jobs => '1',
+            Tab::Builds => '2',
             Tab::Settings => '0',
         }
     }
@@ -167,6 +186,7 @@ impl Tab {
     pub fn key_label(self) -> &'static str {
         match self {
             Tab::Jobs => "1",
+            Tab::Builds => "2",
             Tab::Settings => "0",
         }
     }
@@ -178,6 +198,7 @@ impl Tab {
     fn view(self) -> View {
         match self {
             Tab::Jobs => View::Jobs,
+            Tab::Builds => View::Builds,
             Tab::Settings => View::Settings,
         }
     }
@@ -186,6 +207,9 @@ impl Tab {
 /// How often a running build's console output is polled while shown.
 pub const CONSOLE_POLL: std::time::Duration = std::time::Duration::from_secs(1);
 
+/// Builds per page before the renderer has measured the screen.
+pub const DEFAULT_HISTORY_PAGE: usize = 30;
+
 /// Rows moved by PgUp/PgDn.
 pub const PAGE: isize = 10;
 
@@ -193,6 +217,8 @@ pub const PAGE: isize = 10;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum View {
     Jobs,
+    /// Build history across all jobs.
+    Builds,
     /// A job's most recent build (within the Jobs tab).
     Build,
     /// A build's console output (within the Jobs tab).
@@ -204,6 +230,8 @@ impl View {
     /// The tab this view belongs to.
     pub fn tab(self) -> Option<Tab> {
         match self {
+            View::Builds => Some(Tab::Builds),
+            // Opened from the Jobs tab unless said otherwise (see `App::tab`).
             View::Jobs | View::Build | View::Console => Some(Tab::Jobs),
             View::Settings => Some(Tab::Settings),
         }
@@ -213,6 +241,7 @@ impl View {
     pub fn context(self) -> Context {
         match self {
             View::Jobs => Context::Jobs,
+            View::Builds => Context::Builds,
             View::Build => Context::Build,
             View::Console => Context::Console,
             View::Settings => Context::Settings,
@@ -231,6 +260,11 @@ pub enum Context {
     JobsFiltered,
     /// Typing the `/` filter.
     JobsFilter,
+    Builds,
+    /// Builds tab with a filter applied.
+    BuildsFiltered,
+    /// Typing the Builds tab's `/` filter.
+    BuildsFilter,
     Build,
     Console,
     Settings,
@@ -242,7 +276,8 @@ impl Context {
     pub fn title(self) -> &'static str {
         match self {
             Context::Jobs | Context::JobsFiltered => "Jobs",
-            Context::JobsFilter => "Filter",
+            Context::JobsFilter | Context::BuildsFilter => "Filter",
+            Context::Builds | Context::BuildsFiltered => "Builds",
             Context::ConfirmQuit => "Quit?",
             Context::Build => "Build",
             Context::Console => "Console",
@@ -256,9 +291,11 @@ impl Context {
     pub fn closable(self) -> bool {
         match self {
             // Tabs aren't closed with Esc; they're switched with F-keys.
-            Context::Jobs | Context::Settings => false,
+            Context::Jobs | Context::Builds | Context::Settings => false,
             Context::JobsFiltered
             | Context::JobsFilter
+            | Context::BuildsFiltered
+            | Context::BuildsFilter
             | Context::ConfirmQuit
             | Context::Build
             | Context::Console
@@ -269,7 +306,10 @@ impl Context {
 
     /// Text input: all printable keys go to the input, global keys are off.
     pub fn captures_input(self) -> bool {
-        matches!(self, Context::EditSetting | Context::JobsFilter)
+        matches!(
+            self,
+            Context::EditSetting | Context::JobsFilter | Context::BuildsFilter
+        )
     }
 
     /// Global keys (bottom bar) don't work here: text input, or a prompt
@@ -429,6 +469,10 @@ pub struct App {
     pub connection_generation: u64,
     pub settings: SettingsState,
     pub jobs: JobsState,
+    pub history: HistoryState,
+    /// Height of the list area, recorded by the renderer: how many builds the
+    /// Builds tab asks for per page.
+    pub list_rows: std::cell::Cell<u16>,
     /// The open build view (with [`View::Build`] and [`View::Console`]).
     pub build: Option<BuildView>,
     /// The open console view (with [`View::Console`]).
@@ -463,6 +507,8 @@ impl App {
             auto_refresh: settings.effective().is_on(SettingKey::RefreshAuto),
             settings,
             jobs: JobsState::default(),
+            history: HistoryState::default(),
+            list_rows: std::cell::Cell::new(0),
             build: None,
             console: None,
             now: Instant::now(),
@@ -481,10 +527,12 @@ impl App {
         // Jobs of the previous connection may belong to another instance.
         self.jobs.load = JobsLoad::NotLoaded;
         self.jobs.refreshing = false;
+        self.history.load = HistoryLoad::NotLoaded;
+        self.history.refreshing = false;
         self.build = None;
         self.console = None;
         if matches!(self.view, View::Build | View::Console) {
-            self.view = View::Jobs;
+            self.view = self.build_origin();
         }
         let Some(config) = self.settings.connection_config() else {
             self.connection = ConnectionStatus::NotConfigured;
@@ -511,6 +559,10 @@ impl App {
             Context::JobsFilter
         } else if self.view == View::Jobs && !self.jobs.filter.is_empty() {
             Context::JobsFiltered
+        } else if self.view == View::Builds && self.history.filter_input.is_some() {
+            Context::BuildsFilter
+        } else if self.view == View::Builds && !self.history.filter.is_empty() {
+            Context::BuildsFiltered
         } else {
             self.view.context()
         }
@@ -554,9 +606,32 @@ impl App {
                 }
                 self.view = tab.view();
                 self.show_help = false;
+                if tab == Tab::Builds && self.history.load == HistoryLoad::NotLoaded {
+                    return self.fetch_history(self.history_page());
+                }
+            }
+            Action::StartFilter if self.view == View::Builds => {
+                self.history.filter_input = Some(TextInput::new(&self.history.filter));
             }
             Action::StartFilter => {
                 self.jobs.filter_input = Some(TextInput::new(&self.jobs.filter));
+            }
+            Action::OpenBuild if self.view == View::Builds => {
+                let Some((job, number)) = self
+                    .history
+                    .visible()
+                    .get(self.history.selected)
+                    .map(|e| (e.job.clone(), e.number))
+                else {
+                    return Vec::new();
+                };
+                // Straight to that build; Esc comes back here.
+                self.view = View::Build;
+                let mut view = BuildView::new(job);
+                view.target = BuildRef::Number(number);
+                view.origin = View::Builds;
+                self.build = Some(view);
+                return self.build_effect().into_iter().collect();
             }
             Action::OpenBuild => {
                 let Some(job) = self
@@ -591,6 +666,30 @@ impl App {
                     _ => isize::MAX / 2,
                 };
                 self.jobs.move_selection(delta);
+            }
+            Action::SelectNext
+            | Action::SelectPrev
+            | Action::SelectPageDown
+            | Action::SelectPageUp
+            | Action::SelectFirst
+            | Action::SelectLast
+                if self.view == View::Builds =>
+            {
+                let page = self.history_page() as isize;
+                let delta = match action {
+                    Action::SelectNext => 1,
+                    Action::SelectPrev => -1,
+                    Action::SelectPageDown => page,
+                    Action::SelectPageUp => -page,
+                    Action::SelectFirst => isize::MIN / 2,
+                    _ => isize::MAX / 2,
+                };
+                let was_at_end = self.history.at_end();
+                self.history.move_selection(delta);
+                // Moving down at the last row loads the next page.
+                if delta > 0 && was_at_end && self.history.has_more() {
+                    return self.fetch_history(self.history.limit + self.history_page());
+                }
             }
             Action::SelectNext
             | Action::SelectPrev
@@ -748,11 +847,11 @@ impl App {
             | Action::CursorHome
             | Action::CursorEnd
             | Action::ClearInput => {
-                let filtering = context == Context::JobsFilter;
-                let target = if filtering {
-                    self.jobs.filter_input.as_mut()
-                } else {
-                    self.settings.editing.as_mut()
+                let filtering = matches!(context, Context::JobsFilter | Context::BuildsFilter);
+                let target = match context {
+                    Context::JobsFilter => self.jobs.filter_input.as_mut(),
+                    Context::BuildsFilter => self.history.filter_input.as_mut(),
+                    _ => self.settings.editing.as_mut(),
                 };
                 if let Some(input) = target {
                     let before = input.value().to_owned();
@@ -769,7 +868,14 @@ impl App {
                     // A changed filter starts from the top, like fzf.
                     if filtering && input.value() != before {
                         self.jobs.selected = 0;
+                        self.history.selected = 0;
                     }
+                }
+            }
+            Action::ConfirmEdit if context == Context::BuildsFilter => {
+                if let Some(input) = self.history.filter_input.take() {
+                    self.history.filter = input.value().trim().to_owned();
+                    self.history.clamp_selection();
                 }
             }
             Action::ConfirmEdit if context == Context::JobsFilter => {
@@ -801,7 +907,11 @@ impl App {
                     Err(error) => ConnectionStatus::Failed { url, error },
                 };
                 if matches!(self.connection, ConnectionStatus::Connected { .. }) {
-                    return self.fetch_jobs();
+                    let mut effects = self.fetch_jobs();
+                    if self.view == View::Builds {
+                        effects.extend(self.fetch_history(self.history_page()));
+                    }
+                    return effects;
                 }
             }
             Action::BuildFetched {
@@ -845,6 +955,41 @@ impl App {
                 build.attempted_at = None;
                 build.scroll = 0;
                 return self.build_effect().into_iter().collect();
+            }
+            Action::HistoryFetched {
+                generation,
+                limit,
+                result,
+            } => {
+                if generation != self.connection_generation {
+                    return Vec::new();
+                }
+                let now = self.now;
+                let history = &mut self.history;
+                let previous = history
+                    .visible()
+                    .get(history.selected)
+                    .map(|e| (e.job.clone(), e.number));
+                history.refreshing = false;
+                history.attempted_at = Some(now);
+                match result {
+                    Ok(entries) => {
+                        history.set_entries(entries, limit);
+                        history.fetched_at = Some(now);
+                        history.load = HistoryLoad::Loaded;
+                        // Keep the same build selected when it's still listed.
+                        let visible = history.visible();
+                        if let Some(i) = previous.and_then(|(job, number)| {
+                            visible
+                                .iter()
+                                .position(|e| e.job == job && e.number == number)
+                        }) {
+                            history.selected = i;
+                        }
+                        history.clamp_selection();
+                    }
+                    Err(error) => history.load = HistoryLoad::Failed(error),
+                }
             }
             Action::JobsFetched { generation, result } => {
                 if generation != self.connection_generation {
@@ -921,6 +1066,7 @@ impl App {
             generation: self.connection_generation,
             job: build.job.clone(),
             which: build.target,
+            want_numbers: build.numbers.is_none() && matches!(build.target, BuildRef::Number(_)),
             config: self.settings.connection_config()?,
         })
     }
@@ -976,6 +1122,12 @@ impl App {
         match (&self.view, &self.build) {
             // Tailed separately (see `console_poll_if_due`).
             (View::Console, _) => Vec::new(),
+            (View::Builds, _) => {
+                if !self.history.fetch_in_flight() && due(self.history.attempted_at) {
+                    return self.fetch_history(self.history.limit.max(self.history_page()));
+                }
+                Vec::new()
+            }
             (View::Build, Some(build)) => {
                 if !build.fetch_in_flight() && due(build.attempted_at) {
                     return self.fetch_build();
@@ -987,6 +1139,50 @@ impl App {
         }
     }
 
+    /// Builds per page: the rows that fit (recorded by the renderer).
+    fn history_page(&self) -> usize {
+        match self.list_rows.get() {
+            0 => DEFAULT_HISTORY_PAGE,
+            rows => usize::from(rows),
+        }
+    }
+
+    /// Fetch the build history with `limit` builds per job, unless a fetch is
+    /// already in flight (same no-pile-up rule as elsewhere).
+    fn fetch_history(&mut self, limit: usize) -> Vec<Effect> {
+        let connected = matches!(self.connection, ConnectionStatus::Connected { .. });
+        if !connected || self.history.fetch_in_flight() {
+            return Vec::new();
+        }
+        let Some(config) = self.settings.connection_config() else {
+            return Vec::new();
+        };
+        if self.history.load == HistoryLoad::Loaded {
+            self.history.refreshing = true;
+        } else {
+            self.history.load = HistoryLoad::Loading;
+        }
+        vec![Effect::FetchHistory {
+            generation: self.connection_generation,
+            limit,
+            config,
+        }]
+    }
+
+    /// Where a build view goes back to.
+    fn build_origin(&self) -> View {
+        self.build.as_ref().map_or(View::Jobs, |b| b.origin)
+    }
+
+    /// The tab the current view belongs to (a build view opened from the
+    /// Builds tab belongs to Builds).
+    pub fn tab(&self) -> Option<Tab> {
+        match self.view {
+            View::Build | View::Console => self.build_origin().tab(),
+            view => view.tab(),
+        }
+    }
+
     /// `r`: reload what's on screen when connected; otherwise (re)connect.
     fn refresh(&mut self) -> Vec<Effect> {
         match self.connection {
@@ -994,6 +1190,9 @@ impl App {
                 self.fetch_console()
             }
             ConnectionStatus::Connected { .. } if self.view == View::Build => self.fetch_build(),
+            ConnectionStatus::Connected { .. } if self.view == View::Builds => {
+                self.fetch_history(self.history.limit.max(self.history_page()))
+            }
             ConnectionStatus::Connected { .. } => self.fetch_jobs(),
             ConnectionStatus::Connecting { .. } => Vec::new(),
             ConnectionStatus::NotConfigured | ConnectionStatus::Failed { .. } => {
@@ -1111,14 +1310,19 @@ impl App {
                 self.jobs.clamp_selection();
             }
             Context::Build => {
-                self.view = View::Jobs;
+                self.view = self.build_origin();
                 self.build = None;
+            }
+            Context::BuildsFilter => self.history.filter_input = None,
+            Context::BuildsFiltered => {
+                self.history.filter.clear();
+                self.history.clamp_selection();
             }
             Context::Console => {
                 self.view = View::Build;
                 self.console = None;
             }
-            Context::Jobs | Context::Settings => {}
+            Context::Jobs | Context::Builds | Context::Settings => {}
         }
     }
 }
@@ -1796,7 +2000,8 @@ mod tests {
         assert_eq!(app.view, View::Jobs);
         assert_eq!(Tab::from_key('1'), Some(Tab::Jobs));
         assert_eq!(Tab::from_key('0'), Some(Tab::Settings));
-        assert_eq!(Tab::from_key('2'), None);
+        assert_eq!(Tab::from_key('2'), Some(Tab::Builds));
+        assert_eq!(Tab::from_key('3'), None);
         for tab in Tab::ALL {
             assert_eq!(tab.key_label(), tab.key().to_string());
         }
@@ -2469,5 +2674,148 @@ mod tests {
             app.console.as_ref().unwrap().left,
             crate::console::HSCROLL_STEP
         );
+    }
+
+    use crate::history::HistoryEntry;
+
+    fn entry(job: &str, number: u64, age_secs: u64) -> HistoryEntry {
+        HistoryEntry {
+            job: job.into(),
+            number,
+            result: Some(crate::jobs::JobStatus::Success),
+            building: false,
+            started: SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000 - age_secs),
+            duration: Duration::from_secs(30),
+        }
+    }
+
+    fn history_fetch(effects: &[Effect]) -> Option<usize> {
+        effects.iter().find_map(|e| match e {
+            Effect::FetchHistory { limit, .. } => Some(*limit),
+            _ => None,
+        })
+    }
+
+    /// Connected, on the Builds tab with a 3-row list and `entries` loaded.
+    fn builds_tab(entries: Vec<HistoryEntry>) -> App {
+        let mut app = connected_with_jobs(&["a", "b"]);
+        app.list_rows.set(3);
+        let limit = history_fetch(&app.update(Action::SwitchTab(Tab::Builds))).unwrap();
+        assert_eq!(limit, 3, "as many as fit on screen");
+        assert_eq!(app.context(), Context::Builds);
+        let generation = app.connection_generation;
+        app.update(Action::HistoryFetched {
+            generation,
+            limit,
+            result: Ok(entries),
+        });
+        app
+    }
+
+    fn five_builds() -> Vec<HistoryEntry> {
+        vec![
+            entry("a", 5, 10),
+            entry("b", 9, 20),
+            entry("a", 4, 30),
+            entry("b", 8, 40),
+            entry("a", 3, 50),
+        ]
+    }
+
+    #[test]
+    fn builds_tab_fetches_one_page_and_only_once() {
+        let mut app = builds_tab(five_builds());
+        assert_eq!(app.history.visible().len(), 3, "only the guaranteed rows");
+        app.update(Action::SwitchTab(Tab::Jobs));
+        assert_eq!(
+            history_fetch(&app.update(Action::SwitchTab(Tab::Builds))),
+            None,
+            "already loaded"
+        );
+    }
+
+    #[test]
+    fn moving_past_the_end_loads_the_next_page() {
+        let mut app = builds_tab(five_builds());
+        app.update(Action::SelectNext);
+        app.update(Action::SelectNext);
+        assert!(app.history.at_end());
+        let effects = app.update(Action::SelectNext);
+        assert_eq!(history_fetch(&effects), Some(6), "one more page");
+        assert!(app.history.refreshing, "the loaded rows stay visible");
+        assert_eq!(
+            app.update(Action::SelectNext),
+            Vec::new(),
+            "one fetch at a time"
+        );
+    }
+
+    #[test]
+    fn builds_filter() {
+        let mut app = builds_tab(five_builds());
+        app.update(Action::StartFilter);
+        assert_eq!(app.context(), Context::BuildsFilter);
+        type_str(&mut app, "b");
+        let jobs: Vec<&str> = app
+            .history
+            .visible()
+            .iter()
+            .map(|e| e.job.as_str())
+            .collect();
+        assert_eq!(jobs, ["b", "b"]);
+        app.update(Action::ConfirmEdit);
+        assert_eq!(app.context(), Context::BuildsFiltered);
+        app.update(Action::Back);
+        assert_eq!(app.context(), Context::Builds);
+        assert_eq!(app.history.visible().len(), 3);
+    }
+
+    #[test]
+    fn enter_opens_that_build_and_esc_returns_to_builds() {
+        let mut app = builds_tab(five_builds());
+        app.update(Action::SelectNext); // b #9
+        let effects = app.update(Action::OpenBuild);
+        let fetch = effects.iter().find_map(|e| match e {
+            Effect::FetchBuild {
+                job,
+                which,
+                want_numbers,
+                ..
+            } => Some((job.clone(), *which, *want_numbers)),
+            _ => None,
+        });
+        assert_eq!(fetch, Some(("b".into(), BuildRef::Number(9), true)));
+        assert_eq!(app.view, View::Build);
+        assert_eq!(
+            app.tab(),
+            Some(Tab::Builds),
+            "the Builds tab stays highlighted"
+        );
+        app.update(Action::Back);
+        assert_eq!(app.view, View::Builds);
+        assert_eq!(app.history.selected, 1, "selection kept");
+    }
+
+    #[test]
+    fn refresh_on_the_builds_tab_refetches_history() {
+        let mut app = builds_tab(five_builds());
+        let effects = app.update(Action::Refresh);
+        assert_eq!(history_fetch(&effects), Some(3));
+        assert_eq!(fetches(&effects), 0, "not the job list");
+        assert_eq!(app.update(Action::Refresh), Vec::new(), "in flight");
+    }
+
+    #[test]
+    fn history_of_an_old_connection_is_ignored() {
+        let mut app = connected_with_jobs(&["a"]);
+        app.list_rows.set(3);
+        app.update(Action::SwitchTab(Tab::Builds));
+        let old = app.connection_generation;
+        app.update(Action::HistoryFetched {
+            generation: old + 1,
+            limit: 3,
+            result: Ok(five_builds()),
+        });
+        assert_eq!(app.history.load, HistoryLoad::Loading);
     }
 }

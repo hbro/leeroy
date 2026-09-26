@@ -6,6 +6,7 @@ use leeroy::{
     builds::{Build, BuildPage, BuildRef, BuildStep, Change},
     config::{SettingKey, Settings},
     console::ConsoleChunk,
+    history::HistoryEntry,
     jenkins::ServerInfo,
     jobs::{Job, JobStatus},
     ui,
@@ -688,4 +689,75 @@ fn refresh_block_colour() {
         block_bg(&app),
         (Color::DarkGray, Color::DarkGray, Color::DarkGray)
     );
+}
+
+fn history_entry(
+    job: &str,
+    number: u64,
+    status: Option<JobStatus>,
+    age: u64,
+    took: u64,
+) -> HistoryEntry {
+    use std::time::{Duration, SystemTime};
+    HistoryEntry {
+        job: job.into(),
+        number,
+        result: status,
+        building: status.is_none(),
+        started: SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000 - age),
+        duration: Duration::from_secs(took),
+    }
+}
+
+/// Builds tab with a fixed clock and a 5-row page.
+fn app_on_builds_tab() -> App {
+    use std::time::{Duration, SystemTime};
+    let mut app = app_with_jobs();
+    app.wall_now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    app.list_rows.set(5);
+    apply(&mut app, &[Action::SwitchTab(Tab::Builds)]);
+    let generation = app.connection_generation;
+    apply(
+        &mut app,
+        &[Action::HistoryFetched {
+            generation,
+            limit: 5,
+            result: Ok(vec![
+                history_entry("backend/api/release-1.2", 46, None, 150, 0),
+                history_entry("backend/api/main", 56, Some(JobStatus::Success), 600, 95),
+                history_entry("frontend/web/main", 12, Some(JobStatus::Failed), 3_700, 312),
+                history_entry("docs", 7, Some(JobStatus::Aborted), 90_000, 12),
+                history_entry("backend/worker", 88, Some(JobStatus::Unstable), 95_000, 61),
+                history_entry("backend/api/main", 55, Some(JobStatus::Success), 99_000, 90),
+            ]),
+        }],
+    );
+    app
+}
+
+#[test]
+fn builds_tab_list() {
+    let app = app_on_builds_tab();
+    let screen = format!("{}", render(&app).backend());
+    assert!(!screen.contains("#55"), "only the guaranteed 5 rows");
+    insta::assert_snapshot!(screen);
+}
+
+/// The selected build row keeps its dim `#number` readable (dark gray on the
+/// dark-gray highlight used to vanish).
+#[test]
+fn selected_build_row_number_stays_readable() {
+    let app = app_on_builds_tab();
+    let terminal = render(&app);
+    let buffer = terminal.backend().buffer();
+    let y = (0..HEIGHT)
+        .find(|&y| buffer[(0, y)].symbol() == "▶")
+        .expect("selected row");
+    let line: String = (0..WIDTH).map(|x| buffer[(x, y)].symbol()).collect();
+    let start = line.find("#46").expect("build number");
+    let x = line[..start].chars().count() as u16;
+    for dx in 0..3 {
+        let cell = &buffer[(x + dx, y)];
+        assert_ne!(cell.fg, cell.bg, "#46 unreadable on the selected row");
+    }
 }

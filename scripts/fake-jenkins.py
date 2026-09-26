@@ -6,7 +6,8 @@
 
 Serves (under any path prefix, with an X-Jenkins header):
   GET /whoAmI/api/json   the current user
-  GET /api/json          a job tree: folders, a multibranch project, every status
+  GET /api/json          a job tree: folders, a multibranch project, every status;
+                         with tree=...builds[...]{0,N}: each job's newest N builds
   GET /job/../api/json             the job: allBuilds (numbers, with gaps) + lastBuild
   GET /job/../<n>/api/json         build n (404 if it doesn't exist)
   GET /job/../lastBuild/api/json   the job's last build (404 if never built)
@@ -21,6 +22,7 @@ Serves (under any path prefix, with an X-Jenkins header):
 """
 
 import argparse
+import re
 import base64
 import json
 import subprocess
@@ -198,6 +200,23 @@ def last_build(full_name: str, color: str):
     return build(full_name, color, numbers[-1]) if numbers else None
 
 
+def add_builds(items: list, limit: int) -> None:
+    """Give every job its newest `limit` builds, like tree=...builds[..]{0,N}."""
+    for item in items:
+        if "jobs" in item:
+            add_builds(item["jobs"], limit)
+            continue
+        numbers = build_numbers(item["fullName"], item["color"])
+        item["builds"] = [
+            {
+                k: v
+                for k, v in build(item["fullName"], item["color"], n).items()
+                if k in ("number", "result", "building", "timestamp", "duration")
+            }
+            for n in reversed(numbers[-limit:])
+        ]
+
+
 def job_tree(extra: int, churn_step: int) -> dict:
     jobs = [
         folder(
@@ -340,7 +359,12 @@ def main() -> None:
             if path.endswith("/api/json"):
                 job_requests[0] += 1
                 step = job_requests[0] if args.churn else 0
-                return self.reply(200, job_tree(args.jobs, step))
+                tree = job_tree(args.jobs, step)
+                query = unquote(self.path.split("?", 1)[1]) if "?" in self.path else ""
+                limit = re.search(r"builds\[[^\]]*\]\{0,(\d+)\}", query)
+                if limit:  # build history: each job's newest N builds
+                    add_builds(tree["jobs"], int(limit.group(1)))
+                return self.reply(200, tree)
             self.reply(404, {"error": "not found"})
 
         def reply_bytes(self, body: bytes, headers: dict) -> None:

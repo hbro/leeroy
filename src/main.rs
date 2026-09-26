@@ -99,6 +99,7 @@ async fn run(mut terminal: DefaultTerminal, mut app: App) -> Result<()> {
         fetch_task: None,
         build_task: None,
         console_task: None,
+        history_task: None,
     };
     for effect in app.start() {
         executor.run(effect);
@@ -144,6 +145,8 @@ struct Executor {
     build_task: Option<AbortHandle>,
     /// The in-flight console fetch, aborted when another starts.
     console_task: Option<AbortHandle>,
+    /// The in-flight build history fetch.
+    history_task: Option<AbortHandle>,
 }
 
 impl Executor {
@@ -191,6 +194,31 @@ impl Executor {
                 });
                 self.fetch_task = Some(task.abort_handle());
             }
+            Effect::FetchHistory {
+                generation,
+                limit,
+                config,
+            } => {
+                if let Some(previous) = self.history_task.take() {
+                    previous.abort();
+                }
+                let tx = tx.clone();
+                let task = tokio::spawn(async move {
+                    let result = jenkins::fetch_history(&config, limit).await;
+                    match &result {
+                        Ok(entries) => {
+                            tracing::info!(limit, builds = entries.len(), "fetched history")
+                        }
+                        Err(err) => tracing::warn!(%err, "fetching history failed"),
+                    }
+                    let _ = tx.send(Action::HistoryFetched {
+                        generation,
+                        limit,
+                        result,
+                    });
+                });
+                self.history_task = Some(task.abort_handle());
+            }
             Effect::FetchConsole {
                 generation,
                 job,
@@ -225,6 +253,7 @@ impl Executor {
                 generation,
                 job,
                 which,
+                want_numbers,
                 config,
             } => {
                 if let Some(previous) = self.build_task.take() {
@@ -232,7 +261,7 @@ impl Executor {
                 }
                 let tx = tx.clone();
                 let task = tokio::spawn(async move {
-                    let result = jenkins::fetch_build(&config, &job, which).await;
+                    let result = jenkins::fetch_build(&config, &job, which, want_numbers).await;
                     match &result {
                         Ok(page) => tracing::info!(
                             %job,

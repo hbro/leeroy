@@ -3,7 +3,7 @@ source: tests/render.rs
 expression: screen
 ---
 " Leeroy  ○ not connected                                              h/?  help "
-" 1 Jobs                                                              0 Settings "
+" 1 Jobs   2 Builds                                                   0 Settings "
 "Settings ───────────────────────────────────────────────────────────────────────"
 "   Config file       /home/user/.config/leeroy/config.toml                      "
 "                                                                                "
