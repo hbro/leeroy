@@ -86,38 +86,58 @@ fn settings_empty() {
 }
 
 #[test]
-fn settings_editing_token() {
+fn settings_editing_header() {
     let mut actions = vec![
         Action::OpenSettings,
-        Action::SelectNext,
-        Action::SelectNext, // the token
+        Action::SelectPrev, // wraps to "+ add header"
         Action::StartEdit,
     ];
-    actions.extend(type_str("s3cret"));
+    actions.extend(type_str("Authorization: Basic s3cret"));
     let terminal = render_after(&actions);
     let screen = format!("{}", terminal.backend());
-    assert!(!screen.contains("s3cret"), "token shown in clear");
+    // While editing, the value is shown as typed; masking returns afterwards.
+    assert!(screen.contains("Authorization: Basic s3cret"), "{screen}");
     insta::assert_snapshot!(screen);
 }
 
 #[test]
-fn settings_saved_with_env_override() {
+fn settings_saved_with_env_header() {
     let mut app = test_app();
     app.settings
         .env
-        .set(SettingKey::JenkinsUsername, Some("ci-bot".into()));
-    let mut actions = vec![Action::OpenSettings, Action::StartEdit];
-    actions.extend(type_str("https://ci.example.com"));
-    actions.extend([
-        Action::ConfirmEdit,
-        Action::SettingsSaved(Ok(())),
-        Action::SelectNext,
-    ]);
-    apply(&mut app, &actions);
+        .set_header("Authorization", Some("Basic from-env".into()));
     app.settings
         .file
-        .set(SettingKey::JenkinsToken, Some("s3cret".into()));
-    insta::assert_snapshot!(render(&app).backend());
+        .set_header("X-Forwarded-User", Some("me".into()));
+    let mut actions = vec![Action::OpenSettings, Action::StartEdit];
+    actions.extend(type_str("https://ci.example.com"));
+    actions.extend([Action::ConfirmEdit, Action::SettingsSaved(Ok(()))]);
+    apply(&mut app, &actions);
+    let screen = format!("{}", render(&app).backend());
+    assert!(!screen.contains("from-env"), "env header value shown");
+    insta::assert_snapshot!(screen);
+}
+
+#[test]
+fn url_credentials_masked_except_while_editing() {
+    let mut app = test_app();
+    let mut actions = vec![Action::OpenSettings, Action::StartEdit];
+    actions.extend(type_str("https://me:s3cret@ci.example.com"));
+    apply(&mut app, &actions);
+    let editing = format!("{}", render(&app).backend());
+    assert!(
+        editing.contains("https://me:s3cret@ci.example.com"),
+        "shown as typed while editing: {editing}"
+    );
+
+    apply(&mut app, &[Action::ConfirmEdit]);
+    let settings = format!("{}", render(&app).backend());
+    apply(&mut app, &[Action::Back]);
+    let jobs = format!("{}", render(&app).backend());
+    for screen in [&settings, &jobs] {
+        assert!(!screen.contains("s3cret"), "{screen}");
+    }
+    assert!(jobs.contains("https://me:••••@ci.example.com"), "{jobs}");
 }
 
 #[test]
@@ -173,7 +193,10 @@ fn settings_proxy_selected_with_system_fallback() {
     app.settings.proxy_env = leeroy::proxy::ProxyEnv::from_env(|name| {
         (name == "HTTPS_PROXY").then(|| "http://me:hunter2@corp-proxy:3128".into())
     });
-    apply(&mut app, &[Action::OpenSettings, Action::SelectPrev]);
+    apply(
+        &mut app,
+        &[Action::OpenSettings, Action::SelectNext, Action::SelectNext],
+    );
     let screen = format!("{}", render(&app).backend());
     assert!(!screen.contains("hunter2"), "proxy password shown");
     insta::assert_snapshot!(screen);
@@ -181,7 +204,12 @@ fn settings_proxy_selected_with_system_fallback() {
 
 #[test]
 fn settings_invalid_proxy() {
-    let mut actions = vec![Action::OpenSettings, Action::SelectPrev, Action::StartEdit];
+    let mut actions = vec![
+        Action::OpenSettings,
+        Action::SelectNext,
+        Action::SelectNext, // proxy
+        Action::StartEdit,
+    ];
     actions.extend(type_str("ftp://proxy:21"));
     actions.push(Action::ConfirmEdit);
     insta::assert_snapshot!(render_after(&actions).backend());
@@ -189,17 +217,18 @@ fn settings_invalid_proxy() {
 
 #[test]
 fn settings_editing_proxy_cursor_mid_text() {
-    let mut actions = vec![Action::OpenSettings, Action::SelectPrev, Action::StartEdit];
+    let mut actions = vec![
+        Action::OpenSettings,
+        Action::SelectNext,
+        Action::SelectNext, // proxy
+        Action::StartEdit,
+    ];
     actions.extend(type_str("socks5h://me:hunter2@bastion:1080"));
     actions.extend([Action::CursorHome, Action::CursorRight, Action::CursorRight]);
     let screen = format!("{}", render_after(&actions).backend());
     assert!(
-        !screen.contains("hunter2"),
-        "proxy password shown while editing"
-    );
-    assert!(
-        screen.contains("socks5h://me:•••••••@bastion:1080"),
-        "{screen}"
+        screen.contains("socks5h://me:hunter2@bastion:1080"),
+        "shown as typed while editing: {screen}"
     );
     assert!(
         !screen.contains('█'),

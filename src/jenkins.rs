@@ -13,25 +13,26 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 #[derive(Clone, PartialEq, Eq)]
 pub struct ConnectionConfig {
     pub url: String,
-    /// Basic auth, used only when both username and token are set.
-    pub credentials: Option<(String, String)>,
+    /// Extra headers sent with every request (e.g. `Authorization`).
+    pub headers: Vec<(String, String)>,
     /// Proxy URL to use, or `None` for a direct connection.
     pub proxy: Option<String>,
     /// Accept invalid TLS certificates. Insecure; off by default.
     pub skip_tls_verify: bool,
 }
 
-/// Hand-written so the token and proxy password never end up in logs.
+/// Hand-written so header values and URL/proxy passwords never end up in logs.
 impl fmt::Debug for ConnectionConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ConnectionConfig")
-            .field("url", &self.url)
+            .field("url", &redact_url(&self.url))
             .field(
-                "credentials",
+                "headers",
                 &self
-                    .credentials
-                    .as_ref()
-                    .map(|(user, _)| (user, "<redacted>")),
+                    .headers
+                    .iter()
+                    .map(|(name, _)| name)
+                    .collect::<Vec<_>>(),
             )
             .field("proxy", &self.proxy.as_deref().map(redact_url))
             .field("skip_tls_verify", &self.skip_tls_verify)
@@ -82,21 +83,49 @@ pub async fn check(config: &ConnectionConfig) -> Result<ServerInfo, String> {
     let client = client(config)?;
     let endpoint = api_url(&config.url, "whoAmI/api/json")?;
     let mut request = client.get(endpoint);
-    if let Some((user, token)) = &config.credentials {
-        request = request.basic_auth(user, Some(token));
+    for (name, value) in &config.headers {
+        let name = reqwest::header::HeaderName::from_bytes(name.as_bytes())
+            .map_err(|_| format!("invalid header name {name:?}"))?;
+        let mut value = reqwest::header::HeaderValue::from_str(value)
+            .map_err(|_| format!("invalid value for header {name}"))?;
+        // Keeps the value out of hyper's debug output.
+        value.set_sensitive(true);
+        request = request.header(name, value);
     }
 
+    let requested = endpoint_origin(&config.url);
+    let header_names: Vec<&str> = config.headers.iter().map(|(n, _)| n.as_str()).collect();
     let response = request.send().await.map_err(describe)?;
     let status = response.status();
-    let version = response
-        .headers()
-        .get("X-Jenkins")
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_owned);
-    match status.as_u16() {
-        401 | 403 => return Err(format!("authentication failed (HTTP {})", status.as_u16())),
-        _ if !status.is_success() => return Err(format!("unexpected response: HTTP {status}")),
-        _ => {}
+    let final_url = response.url().clone();
+    let header = |name: &str| {
+        response
+            .headers()
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned)
+    };
+    let version = header("X-Jenkins");
+    // Names only: values may be credentials.
+    tracing::debug!(
+        sent_headers = ?header_names,
+        %status,
+        final_url = %redact_url(final_url.as_str()),
+        jenkins = ?version,
+        www_authenticate = ?header("WWW-Authenticate"),
+        "whoAmI response"
+    );
+    if matches!(status.as_u16(), 401 | 403) {
+        return Err(auth_failure(
+            status.as_u16(),
+            version.is_some(),
+            header("WWW-Authenticate"),
+            requested.as_deref() != Some(&origin(&final_url)),
+            &final_url,
+        ));
+    }
+    if !status.is_success() {
+        return Err(format!("unexpected response: HTTP {status}"));
     }
     let who: WhoAmI = response
         .json()
@@ -106,6 +135,51 @@ pub async fn check(config: &ConnectionConfig) -> Result<ServerInfo, String> {
         version,
         user: who.name,
     })
+}
+
+/// Explain a 401/403: who refused, and whether a redirect dropped our headers.
+fn auth_failure(
+    status: u16,
+    from_jenkins: bool,
+    www_authenticate: Option<String>,
+    redirected_cross_origin: bool,
+    final_url: &url::Url,
+) -> String {
+    let mut msg = format!("authentication failed (HTTP {status}");
+    if from_jenkins {
+        msg.push_str(" from Jenkins");
+    } else {
+        msg.push_str(" from a server in front of Jenkins");
+    }
+    if let Some(challenge) = www_authenticate {
+        msg.push_str(&format!(", asks for: {challenge}"));
+    }
+    msg.push(')');
+    if redirected_cross_origin {
+        let mut target = final_url.clone();
+        target.set_path("");
+        target.set_query(None);
+        msg.push_str(&format!(
+            ". The request was redirected to {}, which drops the Authorization header \
+             for safety: use that as the Jenkins URL",
+            redact_url(target.as_str().trim_end_matches('/'))
+        ));
+    }
+    msg
+}
+
+/// `scheme://host:port` of a URL, the unit redirects keep credentials within.
+fn origin(url: &url::Url) -> String {
+    format!(
+        "{}://{}:{}",
+        url.scheme(),
+        url.host_str().unwrap_or_default(),
+        url.port_or_known_default().unwrap_or_default()
+    )
+}
+
+fn endpoint_origin(base: &str) -> Option<String> {
+    url::Url::parse(base).ok().map(|u| origin(&u))
 }
 
 /// `base` joined with `path`, keeping any path prefix of `base`
@@ -165,7 +239,7 @@ mod tests {
     fn config(url: &str) -> ConnectionConfig {
         ConnectionConfig {
             url: url.into(),
-            credentials: None,
+            headers: Vec::new(),
             proxy: None,
             skip_tls_verify: false,
         }
@@ -196,16 +270,16 @@ mod tests {
     #[test]
     fn debug_redacts_secrets() {
         let config = ConnectionConfig {
-            url: "https://ci".into(),
-            credentials: Some(("me".into(), "s3cret".into())),
+            url: "https://me:urlpass@ci".into(),
+            headers: vec![("Authorization".into(), "Basic s3cret".into())],
             proxy: Some("socks5h://u:hunter2@p:1080".into()),
             skip_tls_verify: false,
         };
         let debug = format!("{config:?}");
-        assert!(
-            !debug.contains("s3cret") && !debug.contains("hunter2"),
-            "{debug}"
-        );
+        for secret in ["s3cret", "hunter2", "urlpass"] {
+            assert!(!debug.contains(secret), "{debug}");
+        }
+        assert!(debug.contains("Authorization"), "{debug}");
     }
 
     #[tokio::test]
@@ -228,17 +302,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sends_basic_auth() {
+    async fn sends_custom_headers() {
         let server = MockServer::start().await;
-        // base64("me:tok")
         Mock::given(path("/ci/whoAmI/api/json"))
             .and(header("authorization", "Basic bWU6dG9r"))
+            .and(header("x-forwarded-user", "me"))
             .respond_with(whoami("me"))
             .mount(&server)
             .await;
 
         let mut config = config(&format!("{}/ci", server.uri()));
-        config.credentials = Some(("me".into(), "tok".into()));
+        config.headers = vec![
+            ("Authorization".into(), "Basic bWU6dG9r".into()),
+            ("X-Forwarded-User".into(), "me".into()),
+        ];
         assert_eq!(check(&config).await.unwrap().user, "me");
     }
 
@@ -251,8 +328,65 @@ mod tests {
             .await;
         assert_eq!(
             check(&config(&server.uri())).await.unwrap_err(),
-            "authentication failed (HTTP 401)"
+            "authentication failed (HTTP 401 from a server in front of Jenkins)"
         );
+    }
+
+    #[tokio::test]
+    async fn auth_failure_says_who_refused() {
+        let proxy = MockServer::start().await;
+        Mock::given(path("/whoAmI/api/json"))
+            .respond_with(
+                ResponseTemplate::new(401)
+                    .insert_header("WWW-Authenticate", "Basic realm=\"corp\""),
+            )
+            .mount(&proxy)
+            .await;
+        let err = check(&config(&proxy.uri())).await.unwrap_err();
+        assert!(err.contains("in front of Jenkins"), "{err}");
+        assert!(err.contains("realm=\"corp\""), "{err}");
+
+        let jenkins = MockServer::start().await;
+        Mock::given(path("/whoAmI/api/json"))
+            .respond_with(ResponseTemplate::new(401).insert_header("X-Jenkins", "2.504.1"))
+            .mount(&jenkins)
+            .await;
+        let err = check(&config(&jenkins.uri())).await.unwrap_err();
+        assert!(err.contains("from Jenkins"), "{err}");
+    }
+
+    /// A redirect to another origin drops Authorization (reqwest does that for
+    /// safety); the error must say so instead of a bare 401.
+    #[tokio::test]
+    async fn cross_origin_redirect_is_explained() {
+        let target = MockServer::start().await;
+        Mock::given(path("/whoAmI/api/json"))
+            .and(header("authorization", "Basic bWU6dG9r"))
+            .respond_with(whoami("me"))
+            .mount(&target)
+            .await;
+        Mock::given(path("/whoAmI/api/json"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&target)
+            .await;
+        let redirector = MockServer::start().await;
+        Mock::given(path("/whoAmI/api/json"))
+            .respond_with(
+                ResponseTemplate::new(302)
+                    .insert_header("Location", format!("{}/whoAmI/api/json", target.uri())),
+            )
+            .mount(&redirector)
+            .await;
+
+        let mut config = config(&redirector.uri());
+        config.headers = vec![("Authorization".into(), "Basic bWU6dG9r".into())];
+        let err = check(&config).await.unwrap_err();
+        assert!(err.contains("redirected to"), "{err}");
+        assert!(err.contains(&target.uri()), "{err}");
+
+        // Using the target directly works.
+        config.url = target.uri();
+        assert_eq!(check(&config).await.unwrap().user, "me");
     }
 
     #[tokio::test]

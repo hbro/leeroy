@@ -28,8 +28,9 @@ const TICK_RATE: Duration = Duration::from_millis(250);
 /// Leeroy — a terminal UI for Jenkins.
 ///
 /// Every setting can also be set with an env var, which takes precedence over
-/// the config file: LEEROY_JENKINS_URL, LEEROY_JENKINS_USERNAME,
-/// LEEROY_JENKINS_TOKEN, LEEROY_PROXY_URL. Without a proxy setting, the usual
+/// the config file: LEEROY_JENKINS_URL, LEEROY_JENKINS_SKIP_TLS_VERIFY,
+/// LEEROY_PROXY_URL, and LEEROY_JENKINS_HEADERS_<NAME> per HTTP header (e.g.
+/// LEEROY_JENKINS_HEADERS_AUTHORIZATION). Without a proxy setting, the usual
 /// HTTPS_PROXY / HTTP_PROXY / ALL_PROXY / NO_PROXY env vars apply.
 #[derive(Debug, Parser)]
 #[command(version)]
@@ -68,7 +69,7 @@ async fn main() -> Result<()> {
     }
     let path = location.path;
     let file = config::load(&path)?;
-    let env = Settings::from_env(|name| std::env::var_os(name))?;
+    let env = Settings::from_env(std::env::vars_os())?;
     tracing::info!(path = %path.display(), "loaded config");
     file.validate(|key| {
         let (table, name) = key.toml_path();

@@ -7,8 +7,8 @@ use ratatui::{
 };
 
 use crate::{
-    app::{App, ConnectionStatus, SettingsState, StatusMessage, View},
-    config::{SettingKey, mask_url_password, redact_url},
+    app::{App, ConnectionStatus, SettingsRow, SettingsState, StatusMessage, View},
+    config::{HEADERS_DOC, SettingKey, header_env_var, redact_url},
     event::{Binding, GLOBAL_BINDINGS, context_bindings},
     proxy::SystemProxy,
 };
@@ -114,10 +114,10 @@ fn render_jobs(frame: &mut Frame, area: Rect, app: &App) {
             if app
                 .settings
                 .connection_config()
-                .is_some_and(|c| c.credentials.is_none())
+                .is_some_and(|c| c.headers.is_empty())
             {
                 lines.push(Line::styled(
-                    "Set a username and API token in settings (s) to log in",
+                    "Add an Authorization header in settings (s) to log in",
                     hint,
                 ));
             }
@@ -152,48 +152,47 @@ fn render_settings(frame: &mut Frame, area: Rect, s: &SettingsState) {
     ];
 
     let effective = s.effective();
-    for (i, key) in SettingKey::ALL.into_iter().enumerate() {
-        let selected = i == s.selected;
+    let rows = s.rows();
+    let selected_index = s.selected.min(rows.len() - 1);
+    for (i, row) in rows.iter().enumerate() {
+        if i > 0
+            && matches!(row, SettingsRow::Header(_) | SettingsRow::AddHeader)
+            && matches!(rows[i - 1], SettingsRow::Setting(_))
+        {
+            lines.push(Line::raw(""));
+            lines.push(Line::styled("   Headers", Style::new().bold()));
+        }
+        let selected = i == selected_index;
         let marker = if selected { "▶" } else { " " };
         let label_style = if selected {
             Style::new().yellow().bold()
         } else {
             Style::new()
         };
-        let mut row = vec![Span::styled(
-            format!(" {marker} {:<LABEL_WIDTH$}", key.label()),
+        let label = match row {
+            SettingsRow::Setting(key) => key.label().to_owned(),
+            SettingsRow::Header(name) => name.clone(),
+            SettingsRow::AddHeader => "+ add header".to_owned(),
+        };
+        let mut spans = vec![Span::styled(
+            format!(" {marker} {label:<LABEL_WIDTH$}"),
             label_style,
         )];
 
-        match (&s.editing, selected) {
-            (Some(input), true) => {
-                // Shown text keeps one char per input char, so the cursor lines
-                // up: secrets as bullets, proxy passwords masked in place.
-                let shown: Vec<char> = if key.is_secret() {
-                    vec!['•'; input.value().chars().count()]
-                } else if key == SettingKey::ProxyUrl {
-                    mask_url_password(input.value()).chars().collect()
-                } else {
-                    input.value().chars().collect()
-                };
-                let (before, after) = shown.split_at(input.cursor());
-                let text = Style::new().yellow().underlined();
-                row.push(Span::raw("  "));
-                row.push(Span::styled(before.iter().collect::<String>(), text));
-                match after.split_first() {
-                    Some((under, rest)) => {
-                        row.push(Span::styled(
-                            under.to_string(),
-                            Style::new().black().on_yellow(),
-                        ));
-                        row.push(Span::styled(rest.iter().collect::<String>(), text));
-                    }
-                    None => row.push(Span::styled("█", Style::new().yellow())),
-                }
-            }
-            _ => {
-                row.push(Span::raw("  "));
-                row.push(match effective.get(key) {
+        if let (Some(input), true) = (&s.editing, selected) {
+            // Shown as typed: masking only applies when not editing.
+            let shown: Vec<char> = input.value().chars().collect();
+            spans.push(Span::raw("  "));
+            spans.extend(input_spans(&shown, input.cursor()));
+            lines.push(Line::from(spans));
+            continue;
+        }
+
+        spans.push(Span::raw("  "));
+        match row {
+            SettingsRow::Setting(key) => {
+                let key = *key;
+                spans.push(match effective.get(key) {
                     _ if key.is_bool() => {
                         if effective.is_on(key) {
                             Span::styled("on (insecure)", Style::new().red().bold())
@@ -205,16 +204,26 @@ fn render_settings(frame: &mut Frame, area: Rect, s: &SettingsState) {
                         Span::styled(system_proxy_note(&s.system_proxy()), dim)
                     }
                     None => Span::styled("(not set)", dim),
-                    // Fixed-width mask: doesn't leak the secret's length.
-                    Some(_) if key.is_secret() => Span::raw(SECRET_MASK),
                     Some(value) => Span::raw(key.display(value)),
                 });
+                if s.is_overridden(key) {
+                    spans.push(Span::styled(format!("  (from ${})", key.env_var()), dim));
+                }
             }
+            SettingsRow::Header(name) => {
+                // Header values are credentials more often than not: always
+                // masked, fixed width so the length doesn't leak.
+                spans.push(Span::raw(SECRET_MASK));
+                if s.is_header_overridden(name) {
+                    spans.push(Span::styled(
+                        format!("  (from ${})", header_env_var(name)),
+                        dim,
+                    ));
+                }
+            }
+            SettingsRow::AddHeader => {}
         }
-        if s.is_overridden(key) {
-            row.push(Span::styled(format!("  (from ${})", key.env_var()), dim));
-        }
-        lines.push(Line::from(row));
+        lines.push(Line::from(spans));
     }
 
     let block = view_block("Settings");
@@ -228,8 +237,8 @@ fn render_settings(frame: &mut Frame, area: Rect, s: &SettingsState) {
     .areas(inner);
     frame.render_widget(Paragraph::new(lines), top);
 
-    // Status message + docs for the selected setting, in their own inset
-    // area so wrapped lines keep the indent.
+    // Status message + docs for the selected row, in their own inset area so
+    // wrapped lines keep the indent.
     let [_, bottom] = Layout::horizontal([Constraint::Length(3), Constraint::Min(0)]).areas(docs);
     let mut bottom_lines = Vec::new();
     if let Some(message) = &s.message {
@@ -239,16 +248,33 @@ fn render_settings(frame: &mut Frame, area: Rect, s: &SettingsState) {
         });
         bottom_lines.push(Line::raw(""));
     }
-    bottom_lines.extend(
-        s.selected_key()
-            .doc()
-            .lines()
-            .map(|line| Line::styled(line, dim)),
-    );
+    let doc = match &rows[selected_index] {
+        SettingsRow::Setting(key) => key.doc(),
+        SettingsRow::Header(_) | SettingsRow::AddHeader => HEADERS_DOC,
+    };
+    bottom_lines.extend(doc.lines().map(|line| Line::styled(line, dim)));
     frame.render_widget(
         Paragraph::new(bottom_lines).wrap(Wrap { trim: false }),
         bottom,
     );
+}
+
+/// An input's text with the cursor: highlighted char, or a block at the end.
+fn input_spans(shown: &[char], cursor: usize) -> Vec<Span<'static>> {
+    let (before, after) = shown.split_at(cursor.min(shown.len()));
+    let text = Style::new().yellow().underlined();
+    let mut spans = vec![Span::styled(before.iter().collect::<String>(), text)];
+    match after.split_first() {
+        Some((under, rest)) => {
+            spans.push(Span::styled(
+                under.to_string(),
+                Style::new().black().on_yellow(),
+            ));
+            spans.push(Span::styled(rest.iter().collect::<String>(), text));
+        }
+        None => spans.push(Span::styled("█", Style::new().yellow())),
+    }
+    spans
 }
 
 fn system_proxy_note(system: &SystemProxy) -> String {

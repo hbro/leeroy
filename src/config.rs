@@ -5,20 +5,22 @@
 //! `$XDG_CONFIG_HOME/leeroy/config.toml` (default `~/.config/...`). The legacy
 //! `~/.leeroy/config.toml` is only used if it exists and the XDG file doesn't.
 //! Precedence for each setting: its env var (see [`SettingKey::env_var`]) >
-//! the config file.
+//! the config file. Custom HTTP headers (`[jenkins.headers]`) work the same way,
+//! per header: `LEEROY_JENKINS_HEADERS_<NAME>` (see [`header_env_var`]).
 //!
 //! Functions take the environment (`env`) and filesystem checks (`exists`) as
 //! parameters instead of reading them directly, so they can be tested
 //! deterministically.
 
 use std::{
+    collections::BTreeMap,
     ffi::OsString,
     fs,
     io::{self, Write},
     path::{Path, PathBuf},
 };
 
-use color_eyre::eyre::{Result, WrapErr};
+use color_eyre::eyre::{Result, WrapErr, bail, eyre};
 use serde::Deserialize;
 use toml_edit::DocumentMut;
 
@@ -29,17 +31,13 @@ pub const FILE_NAME: &str = "config.toml";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingKey {
     JenkinsUrl,
-    JenkinsUsername,
-    JenkinsToken,
     JenkinsSkipTlsVerify,
     ProxyUrl,
 }
 
 impl SettingKey {
-    pub const ALL: [SettingKey; 5] = [
+    pub const ALL: [SettingKey; 3] = [
         SettingKey::JenkinsUrl,
-        SettingKey::JenkinsUsername,
-        SettingKey::JenkinsToken,
         SettingKey::JenkinsSkipTlsVerify,
         SettingKey::ProxyUrl,
     ];
@@ -47,8 +45,6 @@ impl SettingKey {
     pub fn label(self) -> &'static str {
         match self {
             SettingKey::JenkinsUrl => "Jenkins URL",
-            SettingKey::JenkinsUsername => "Username",
-            SettingKey::JenkinsToken => "API token",
             SettingKey::JenkinsSkipTlsVerify => "Skip TLS verify",
             SettingKey::ProxyUrl => "Proxy URL",
         }
@@ -58,8 +54,6 @@ impl SettingKey {
     pub fn toml_path(self) -> (&'static str, &'static str) {
         match self {
             SettingKey::JenkinsUrl => ("jenkins", "url"),
-            SettingKey::JenkinsUsername => ("jenkins", "username"),
-            SettingKey::JenkinsToken => ("jenkins", "token"),
             SettingKey::JenkinsSkipTlsVerify => ("jenkins", "skip_tls_verify"),
             SettingKey::ProxyUrl => ("proxy", "url"),
         }
@@ -69,16 +63,9 @@ impl SettingKey {
     pub fn env_var(self) -> &'static str {
         match self {
             SettingKey::JenkinsUrl => "LEEROY_JENKINS_URL",
-            SettingKey::JenkinsUsername => "LEEROY_JENKINS_USERNAME",
-            SettingKey::JenkinsToken => "LEEROY_JENKINS_TOKEN",
             SettingKey::JenkinsSkipTlsVerify => "LEEROY_JENKINS_SKIP_TLS_VERIFY",
             SettingKey::ProxyUrl => "LEEROY_PROXY_URL",
         }
-    }
-
-    /// Secrets are masked in the UI.
-    pub fn is_secret(self) -> bool {
-        matches!(self, SettingKey::JenkinsToken)
     }
 
     /// On/off settings: toggled instead of edited, stored as TOML booleans,
@@ -91,16 +78,13 @@ impl SettingKey {
     /// view and written as a comment above the key when it's first saved.
     pub fn doc(self) -> &'static str {
         match self {
-            SettingKey::JenkinsUrl => {
-                "Base URL of the Jenkins instance, e.g. https://jenkins.example.com"
-            }
-            SettingKey::JenkinsUsername => "Jenkins user name for API authentication",
-            SettingKey::JenkinsToken => {
-                "Jenkins API token (Jenkins: your user > Security > API Token)"
-            }
+            SettingKey::JenkinsUrl => concat!(
+                "Base URL of the Jenkins instance, e.g. https://jenkins.example.com\n",
+                "For authentication, add headers below rather than user:pass@ in the URL.",
+            ),
             SettingKey::JenkinsSkipTlsVerify => concat!(
                 "Accept invalid TLS certificates (self-signed, expired, unknown CA) from Jenkins.\n",
-                "INSECURE: anyone between you and Jenkins can read your API token. Off by default;\n",
+                "INSECURE: anyone between you and Jenkins can read your credentials. Off by default;\n",
                 "prefer adding the internal CA to the system trust store, which Leeroy uses.",
             ),
             SettingKey::ProxyUrl => concat!(
@@ -141,16 +125,14 @@ impl SettingKey {
             SettingKey::JenkinsSkipTlsVerify => parse_bool(value)
                 .map(|b| b.to_string())
                 .ok_or_else(|| format!("expected true or false, got {value:?}")),
-            SettingKey::JenkinsUsername | SettingKey::JenkinsToken => Ok(value.to_owned()),
         }
     }
 
-    /// The value as it may be shown on screen or in logs: credentials in a
-    /// proxy URL are masked. Secrets (see [`Self::is_secret`]) are masked by
-    /// the caller, since it knows how.
+    /// The value as it may be shown on screen or in logs: credentials in
+    /// URLs are masked.
     pub fn display(self, value: &str) -> String {
         match self {
-            SettingKey::ProxyUrl => redact_url(value),
+            SettingKey::JenkinsUrl | SettingKey::ProxyUrl => redact_url(value),
             _ if self.is_bool() => match parse_bool(value) {
                 Some(true) => "on".into(),
                 _ => "off".into(),
@@ -159,6 +141,113 @@ impl SettingKey {
         }
     }
 }
+
+/// Documentation for `[jenkins.headers]`: shown in the settings view and
+/// written as a comment above the table when it's first created.
+pub const HEADERS_DOC: &str = concat!(
+    "Extra HTTP headers sent with every request to Jenkins, e.g. for authentication.\n",
+    "Edit as \"Name: value\"; clear the field to remove it. Values are masked, except while editing.\n",
+    "Examples:\n",
+    "  Authorization: Basic <base64 of user:password>\n",
+    "  Authorization: Bearer <token>\n",
+    "  X-Forwarded-User: <user>\n",
+    "Basic auth covers reverse-proxy logins and a Jenkins user + API token alike.\n",
+    "Base64: printf '%s' 'user:password' | base64 -w0\n",
+    "From a password manager, via env var (read-only here, never saved):\n",
+    "  LEEROY_JENKINS_HEADERS_AUTHORIZATION=\"Basic $(printf 'me:%s' \"$(pass show jenkins | head -n1)\" | base64 -w0)\"",
+);
+
+const HEADERS_ENV_PREFIX: &str = "LEEROY_JENKINS_HEADERS_";
+
+/// The env var for header `name`: `LEEROY_JENKINS_HEADERS_<NAME>`, with `-`
+/// written as `_`.
+pub fn header_env_var(name: &str) -> String {
+    format!(
+        "{HEADERS_ENV_PREFIX}{}",
+        name.to_ascii_uppercase().replace('-', "_")
+    )
+}
+
+/// Header name from the env var suffix: `X_API_KEY` -> `X-Api-Key`.
+fn header_name_from_env(suffix: &str) -> String {
+    suffix
+        .split('_')
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                Some(first) => {
+                    first.to_ascii_uppercase().to_string() + &chars.as_str().to_ascii_lowercase()
+                }
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("-")
+}
+
+/// Parse `Name: value` into a valid HTTP header name and value.
+pub fn parse_header(line: &str) -> Result<(String, String), String> {
+    let (name, value) = line
+        .split_once(':')
+        .ok_or_else(|| "expected \"Name: value\"".to_owned())?;
+    let (name, value) = (name.trim(), value.trim());
+    validate_header(name, value)?;
+    Ok((name.to_owned(), value.to_owned()))
+}
+
+fn validate_header(name: &str, value: &str) -> Result<(), String> {
+    reqwest::header::HeaderName::from_bytes(name.as_bytes())
+        .map_err(|_| format!("invalid header name {name:?}"))?;
+    if value.is_empty() {
+        return Err(format!(
+            "header {name} has no value (clear the whole field to remove it)"
+        ));
+    }
+    reqwest::header::HeaderValue::from_str(value)
+        .map_err(|_| format!("invalid value for header {name}"))?;
+    if name.eq_ignore_ascii_case("authorization") {
+        check_basic_auth(value)?;
+    }
+    Ok(())
+}
+
+/// Catch the usual mistakes in hand-made `Basic <base64>` values, which the
+/// server would otherwise just answer with an unhelpful 401.
+fn check_basic_auth(value: &str) -> Result<(), String> {
+    use base64::Engine as _;
+    let Some((scheme, encoded)) = value.split_once(' ') else {
+        return Ok(());
+    };
+    if !scheme.eq_ignore_ascii_case("basic") {
+        return Ok(());
+    }
+    let hint = "create it with: printf '%s' 'user:password' | base64 -w0";
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(encoded.trim())
+        .map_err(|_| format!("Authorization: Basic value isn't valid base64 ({hint})"))?;
+    let decoded = String::from_utf8_lossy(&decoded);
+    if decoded.contains(['\n', '\r']) {
+        return Err(format!(
+            "Authorization: Basic credentials contain a newline, e.g. from echo or a \
+             multi-line `pass show` entry (use `pass show NAME | head -n1`; {hint})"
+        ));
+    }
+    if !decoded.contains(':') {
+        return Err(format!(
+            "Authorization: Basic credentials must be user:password ({hint})"
+        ));
+    }
+    Ok(())
+}
+
+/// Shown when an old config still uses the removed basic-auth settings.
+const LEGACY_AUTH_HELP: &str = "\
+jenkins.username / jenkins.token (and $LEEROY_JENKINS_USERNAME / $LEEROY_JENKINS_TOKEN) \
+were replaced by custom headers. For HTTP basic auth, remove them and add:
+  [jenkins.headers]
+  Authorization = \"Basic <base64 of user:token>\"
+(create the value with: printf '%s' 'user:token' | base64 -w0), or set
+$LEEROY_JENKINS_HEADERS_AUTHORIZATION instead.";
 
 /// `true`/`false`, plus the usual env var spellings (`1`/`0`, `yes`/`no`, `on`/`off`).
 pub fn parse_bool(value: &str) -> Option<bool> {
@@ -177,16 +266,6 @@ fn parse_url(value: &str) -> Result<url::Url, String> {
         return Err("invalid URL: missing host".into());
     }
     Ok(url)
-}
-
-/// Like [`redact_url`], but one `•` per password char, so every char keeps
-/// its position. For showing a URL while it's being edited (with a cursor).
-pub fn mask_url_password(value: &str) -> String {
-    let Some((start, end)) = password_range(value) else {
-        return value.to_owned();
-    };
-    let masked = "•".repeat(value[start..end].chars().count());
-    format!("{}{masked}{}", &value[..start], &value[end..])
 }
 
 /// Byte range of the password in `scheme://user:password@host...`, if any.
@@ -235,19 +314,19 @@ impl std::fmt::Debug for ProxySettings {
 #[serde(default)]
 pub struct JenkinsSettings {
     pub url: Option<String>,
-    pub username: Option<String>,
-    pub token: Option<String>,
     pub skip_tls_verify: Option<bool>,
+    /// Extra HTTP headers, name as written -> value. Names are compared
+    /// case-insensitively (see [`Settings::header`]).
+    pub headers: BTreeMap<String, String>,
 }
 
-/// Hand-written so the token never ends up in logs or panic messages.
+/// Hand-written so header values and URL credentials never end up in logs.
 impl std::fmt::Debug for JenkinsSettings {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("JenkinsSettings")
-            .field("url", &self.url)
-            .field("username", &self.username)
-            .field("token", &self.token.as_ref().map(|_| "<redacted>"))
+            .field("url", &self.url.as_deref().map(redact_url))
             .field("skip_tls_verify", &self.skip_tls_verify)
+            .field("headers", &self.headers.keys().collect::<Vec<_>>())
             .finish()
     }
 }
@@ -256,8 +335,6 @@ impl Settings {
     pub fn get(&self, key: SettingKey) -> Option<&str> {
         match key {
             SettingKey::JenkinsUrl => self.jenkins.url.as_deref(),
-            SettingKey::JenkinsUsername => self.jenkins.username.as_deref(),
-            SettingKey::JenkinsToken => self.jenkins.token.as_deref(),
             SettingKey::JenkinsSkipTlsVerify => self
                 .jenkins
                 .skip_tls_verify
@@ -271,8 +348,6 @@ impl Settings {
     pub fn set(&mut self, key: SettingKey, value: Option<String>) {
         let slot = match key {
             SettingKey::JenkinsUrl => &mut self.jenkins.url,
-            SettingKey::JenkinsUsername => &mut self.jenkins.username,
-            SettingKey::JenkinsToken => &mut self.jenkins.token,
             SettingKey::JenkinsSkipTlsVerify => {
                 self.jenkins.skip_tls_verify = value.as_deref().and_then(parse_bool);
                 return;
@@ -282,21 +357,59 @@ impl Settings {
         *slot = value;
     }
 
+    /// The header named `name` (case-insensitive): `(name as stored, value)`.
+    pub fn header(&self, name: &str) -> Option<(&str, &str)> {
+        self.jenkins
+            .headers
+            .iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case(name))
+            .map(|(n, v)| (n.as_str(), v.as_str()))
+    }
+
+    /// Add, replace (case-insensitively) or, with `None`, remove a header.
+    pub fn set_header(&mut self, name: &str, value: Option<String>) {
+        self.jenkins
+            .headers
+            .retain(|n, _| !n.eq_ignore_ascii_case(name));
+        if let Some(value) = value {
+            self.jenkins.headers.insert(name.to_owned(), value);
+        }
+    }
+
     /// Settings whose value is on (for boolean keys).
     pub fn is_on(&self, key: SettingKey) -> bool {
         self.get(key).and_then(parse_bool).unwrap_or(false)
     }
 
-    /// Settings given through env vars. Empty or non-UTF-8 values count as
-    /// unset; invalid values are an error naming the variable.
-    pub fn from_env(env: impl Fn(&str) -> Option<OsString>) -> Result<Self> {
+    /// Settings given through env vars (all of them, e.g. `std::env::vars_os()`).
+    /// Empty or non-UTF-8 values count as unset; invalid values are an error
+    /// naming the variable.
+    pub fn from_env(vars: impl IntoIterator<Item = (OsString, OsString)>) -> Result<Self> {
+        let vars: BTreeMap<String, String> = vars
+            .into_iter()
+            .filter_map(|(k, v)| Some((k.into_string().ok()?, non_empty(Some(v))?)))
+            .collect();
+        if ["LEEROY_JENKINS_USERNAME", "LEEROY_JENKINS_TOKEN"]
+            .iter()
+            .any(|name| vars.contains_key(*name))
+        {
+            bail!("{LEGACY_AUTH_HELP}");
+        }
         let mut settings = Settings::default();
         for key in SettingKey::ALL {
-            if let Some(raw) = non_empty(env(key.env_var())) {
+            if let Some(raw) = vars.get(key.env_var()) {
                 let value = key
-                    .validate(&raw)
-                    .map_err(|err| color_eyre::eyre::eyre!("invalid ${}: {err}", key.env_var()))?;
+                    .validate(raw)
+                    .map_err(|err| eyre!("invalid ${}: {err}", key.env_var()))?;
                 settings.set(key, Some(value));
+            }
+        }
+        for (var, value) in &vars {
+            if let Some(suffix) = var.strip_prefix(HEADERS_ENV_PREFIX) {
+                let name = header_name_from_env(suffix);
+                validate_header(&name, value.trim())
+                    .map_err(|err| eyre!("invalid ${var}: {err}"))?;
+                settings.set_header(&name, Some(value.trim().to_owned()));
             }
         }
         Ok(settings)
@@ -307,8 +420,11 @@ impl Settings {
         for key in SettingKey::ALL {
             if let Some(value) = self.get(key) {
                 key.validate(value)
-                    .map_err(|err| color_eyre::eyre::eyre!("invalid {}: {err}", source(key)))?;
+                    .map_err(|err| eyre!("invalid {}: {err}", source(key)))?;
             }
+        }
+        for (name, value) in &self.jenkins.headers {
+            validate_header(name, value).map_err(|err| eyre!("invalid jenkins.headers: {err}"))?;
         }
         Ok(())
     }
@@ -320,6 +436,9 @@ impl Settings {
             if let Some(value) = overrides.get(key) {
                 merged.set(key, Some(value.to_owned()));
             }
+        }
+        for (name, value) in &overrides.jenkins.headers {
+            merged.set_header(name, Some(value.clone()));
         }
         merged
     }
@@ -390,7 +509,15 @@ pub fn load(path: &Path) -> Result<Settings> {
         Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Settings::default()),
         Err(err) => return Err(err).wrap_err_with(|| format!("reading {}", path.display())),
     };
-    toml::from_str(&text).wrap_err_with(|| format!("parsing {}", path.display()))
+    let table: toml::Table =
+        toml::from_str(&text).wrap_err_with(|| format!("parsing {}", path.display()))?;
+    let jenkins = table.get("jenkins").and_then(|j| j.as_table());
+    if jenkins.is_some_and(|j| j.contains_key("username") || j.contains_key("token")) {
+        bail!("{}: {LEGACY_AUTH_HELP}", path.display());
+    }
+    toml::Value::Table(table)
+        .try_into()
+        .wrap_err_with(|| format!("parsing {}", path.display()))
 }
 
 /// Write `settings` to the config file.
@@ -446,6 +573,8 @@ pub fn save(path: &Path, settings: &Settings) -> Result<()> {
         }
     }
 
+    save_headers(&mut doc, &settings.jenkins.headers);
+
     let dir = target
         .parent()
         .filter(|d| !d.as_os_str().is_empty())
@@ -461,6 +590,45 @@ pub fn save(path: &Path, settings: &Settings) -> Result<()> {
     Ok(())
 }
 
+/// Sync `[jenkins.headers]` with `headers`, keeping comments on existing
+/// entries. Removed when empty.
+fn save_headers(doc: &mut DocumentMut, headers: &BTreeMap<String, String>) {
+    if headers.is_empty() {
+        if let Some(jenkins) = doc.get_mut("jenkins").and_then(|t| t.as_table_like_mut()) {
+            jenkins.remove("headers");
+        }
+        return;
+    }
+    if !doc.contains_key("jenkins") {
+        doc["jenkins"] = toml_edit::table();
+    }
+    if doc["jenkins"].get("headers").is_none() {
+        let mut table = toml_edit::Table::new();
+        let comment: String = HEADERS_DOC
+            .lines()
+            .map(|line| format!("# {line}\n"))
+            .collect();
+        table.decor_mut().set_prefix(format!("\n{comment}"));
+        doc["jenkins"]["headers"] = toml_edit::Item::Table(table);
+    }
+    let Some(table) = doc["jenkins"]["headers"].as_table_like_mut() else {
+        return;
+    };
+    let stale: Vec<String> = table
+        .iter()
+        .map(|(name, _)| name.to_owned())
+        .filter(|name| !headers.contains_key(name))
+        .collect();
+    for name in stale {
+        table.remove(&name);
+    }
+    for (name, value) in headers {
+        if table.get(name).and_then(|v| v.as_str()) != Some(value) {
+            table.insert(name, toml_edit::value(value));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -473,6 +641,13 @@ mod tests {
             .map(|(k, v)| (k.to_string(), OsString::from(v)))
             .collect();
         move |name| vars.get(name).cloned()
+    }
+
+    /// All env vars, as `Settings::from_env` takes them.
+    fn vars(vars: &[(&str, &str)]) -> Vec<(OsString, OsString)> {
+        vars.iter()
+            .map(|(k, v)| ((*k).into(), (*v).into()))
+            .collect()
     }
 
     fn path_of(
@@ -583,25 +758,130 @@ mod tests {
     fn env_overrides_file() {
         let mut file = Settings::default();
         file.set(SettingKey::JenkinsUrl, Some("https://file".into()));
-        file.set(SettingKey::JenkinsUsername, Some("file-user".into()));
-        let overrides = Settings::from_env(env(&[
+        file.set(SettingKey::ProxyUrl, Some("http://file-proxy:1".into()));
+        let overrides = Settings::from_env(vars(&[
             ("LEEROY_JENKINS_URL", "https://env"),
-            ("LEEROY_JENKINS_USERNAME", ""),
+            ("LEEROY_PROXY_URL", ""),
         ]))
         .unwrap();
 
         let merged = file.overlaid(&overrides);
         assert_eq!(merged.get(SettingKey::JenkinsUrl), Some("https://env"));
-        assert_eq!(merged.get(SettingKey::JenkinsUsername), Some("file-user"));
-        assert_eq!(merged.get(SettingKey::JenkinsToken), None);
+        assert_eq!(
+            merged.get(SettingKey::ProxyUrl),
+            Some("http://file-proxy:1")
+        );
+        assert_eq!(merged.get(SettingKey::JenkinsSkipTlsVerify), None);
     }
 
     #[test]
-    fn debug_redacts_token() {
+    fn headers_from_env_override_file_case_insensitively() {
+        let mut file = Settings::default();
+        file.set_header("authorization", Some("Bearer file".into()));
+        file.set_header("X-Keep", Some("kept".into()));
+        let env = Settings::from_env(vars(&[
+            ("LEEROY_JENKINS_HEADERS_AUTHORIZATION", "Bearer env"),
+            ("LEEROY_JENKINS_HEADERS_X_API_KEY", " k3y "),
+            ("UNRELATED", "x"),
+        ]))
+        .unwrap();
+        assert_eq!(env.header("X-Api-Key"), Some(("X-Api-Key", "k3y")));
+
+        let merged = file.overlaid(&env);
+        assert_eq!(
+            merged.header("AUTHORIZATION"),
+            Some(("Authorization", "Bearer env"))
+        );
+        assert_eq!(
+            merged.jenkins.headers.len(),
+            3,
+            "{:?}",
+            merged.jenkins.headers.keys()
+        );
+        assert_eq!(merged.header("x-keep"), Some(("X-Keep", "kept")));
+    }
+
+    #[test]
+    fn header_env_var_names() {
+        assert_eq!(
+            header_env_var("X-Api-Key"),
+            "LEEROY_JENKINS_HEADERS_X_API_KEY"
+        );
+        assert_eq!(header_name_from_env("X_FORWARDED_USER"), "X-Forwarded-User");
+    }
+
+    #[test]
+    fn header_parsing() {
+        assert_eq!(
+            parse_header(" Authorization :  Basic bWU6czNjcmV0 "),
+            Ok(("Authorization".into(), "Basic bWU6czNjcmV0".into()))
+        );
+        // Values may contain colons.
+        assert_eq!(
+            parse_header("X-Url: https://x"),
+            Ok(("X-Url".into(), "https://x".into()))
+        );
+        assert!(parse_header("no colon").is_err());
+        assert!(parse_header("Bad Name: x").is_err());
+        assert!(parse_header("X-Empty:").is_err());
+        assert!(Settings::from_env(vars(&[("LEEROY_JENKINS_HEADERS_BAD", "a\nb")])).is_err());
+    }
+
+    #[test]
+    fn basic_auth_values_are_checked() {
+        let ok = format!("Authorization: Basic {}", "bWU6czNjcmV0"); // me:s3cret
+        assert!(parse_header(&ok).is_ok());
+        assert!(parse_header("Authorization: Bearer anything").is_ok());
+        // echo 'me:s3cret' | base64 (trailing newline)
+        let err = parse_header("Authorization: Basic bWU6czNjcmV0Cg==").unwrap_err();
+        assert!(err.contains("newline"), "{err}");
+        // A multi-line pass entry: "me:pw\nuser: me"
+        let err = parse_header("Authorization: Basic bWU6cHcKdXNlcjogbWU=").unwrap_err();
+        assert!(err.contains("head -n1"), "{err}");
+        assert!(
+            parse_header("Authorization: Basic !!!")
+                .unwrap_err()
+                .contains("base64")
+        );
+        // base64("nocolon")
+        assert!(
+            parse_header("Authorization: Basic bm9jb2xvbg==")
+                .unwrap_err()
+                .contains("user:password")
+        );
+        // Also checked for env vars.
+        assert!(
+            Settings::from_env(vars(&[(
+                "LEEROY_JENKINS_HEADERS_AUTHORIZATION",
+                "Basic bWU6czNjcmV0Cg=="
+            )]))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn removed_auth_settings_fail_loudly() {
+        let err = Settings::from_env(vars(&[("LEEROY_JENKINS_TOKEN", "t")])).unwrap_err();
+        assert!(format!("{err}").contains("Authorization"), "{err}");
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(FILE_NAME);
+        fs::write(&path, "[jenkins]\nusername = \"me\"\n").unwrap();
+        let err = load(&path).unwrap_err();
+        assert!(format!("{err}").contains("[jenkins.headers]"), "{err}");
+    }
+
+    #[test]
+    fn debug_redacts_secrets() {
         let mut settings = Settings::default();
-        settings.set(SettingKey::JenkinsToken, Some("s3cret".into()));
+        settings.set(SettingKey::JenkinsUrl, Some("https://me:urlpass@ci".into()));
+        settings.set_header("Authorization", Some("Basic s3cret".into()));
         let debug = format!("{settings:?}");
-        assert!(!debug.contains("s3cret"), "{debug}");
+        assert!(
+            !debug.contains("s3cret") && !debug.contains("urlpass"),
+            "{debug}"
+        );
+        assert!(debug.contains("Authorization"), "{debug}");
     }
 
     #[test]
@@ -638,10 +918,6 @@ mod tests {
         assert_eq!(key.display("http://me@proxy:1"), "http://me@proxy:1");
         assert_eq!(key.display("http://proxy:1/p@th"), "http://proxy:1/p@th");
         assert_eq!(key.display("http://me:hunt"), "http://me:hunt");
-        assert_eq!(
-            mask_url_password("socks5h://me:pw@proxy:1080"),
-            "socks5h://me:••@proxy:1080"
-        );
 
         let mut settings = Settings::default();
         settings.set(key, Some("http://me:hunter2@proxy:3128".into()));
@@ -684,11 +960,11 @@ mod tests {
         assert!(!Settings::default().is_on(key), "must default to off");
         for (raw, on) in [("true", true), ("1", true), ("YES", true), ("off", false)] {
             let settings =
-                Settings::from_env(env(&[("LEEROY_JENKINS_SKIP_TLS_VERIFY", raw)])).unwrap();
+                Settings::from_env(vars(&[("LEEROY_JENKINS_SKIP_TLS_VERIFY", raw)])).unwrap();
             assert_eq!(settings.is_on(key), on, "{raw}");
         }
         let err =
-            Settings::from_env(env(&[("LEEROY_JENKINS_SKIP_TLS_VERIFY", "maybe")])).unwrap_err();
+            Settings::from_env(vars(&[("LEEROY_JENKINS_SKIP_TLS_VERIFY", "maybe")])).unwrap_err();
         assert!(
             format!("{err}").contains("$LEEROY_JENKINS_SKIP_TLS_VERIFY"),
             "{err}"
@@ -735,13 +1011,25 @@ mod tests {
         let path = dir.path().join("a/b").join(FILE_NAME);
         let mut settings = Settings::default();
         settings.set(SettingKey::JenkinsUrl, Some("https://ci".into()));
-        settings.set(SettingKey::JenkinsToken, Some("s3cret".into()));
+        settings.set_header("Authorization", Some("Basic s3cret".into()));
 
         save(&path, &settings).unwrap();
         assert_eq!(load(&path).unwrap(), settings);
         let text = fs::read_to_string(&path).unwrap();
         assert!(text.contains("[jenkins]\n"), "{text}");
+        assert!(text.contains("[jenkins.headers]\n"), "{text}");
+        assert!(
+            text.contains("# Examples:"),
+            "headers table documented: {text}"
+        );
         assert!(!text.contains("jenkins = {"), "{text}");
+
+        // Removing the last header removes the table.
+        settings.set_header("authorization", None);
+        save(&path, &settings).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("[jenkins.headers]"), "{text}");
+        assert!(!text.contains("Authorization"), "{text}");
     }
 
     #[test]
@@ -750,19 +1038,19 @@ mod tests {
         let path = dir.path().join(FILE_NAME);
         fs::write(
             &path,
-            "# my notes\n[jenkins]\nurl = \"https://old\" # prod\nusername = \"gone\"\nfuture = 1\n",
+            "# my notes\n[jenkins]\nurl = \"https://old\" # prod\nskip_tls_verify = true\nfuture = 1\n",
         )
         .unwrap();
         let mut settings = load(&path).unwrap();
         settings.set(SettingKey::JenkinsUrl, Some("https://new".into()));
-        settings.set(SettingKey::JenkinsUsername, None);
+        settings.set(SettingKey::JenkinsSkipTlsVerify, None);
 
         save(&path, &settings).unwrap();
         let text = fs::read_to_string(&path).unwrap();
         assert!(text.contains("# my notes"), "{text}");
         assert!(text.contains("future = 1"), "{text}");
         assert!(text.contains("url = \"https://new\""), "{text}");
-        assert!(!text.contains("username"), "{text}");
+        assert!(!text.contains("skip_tls_verify"), "{text}");
     }
 
     #[cfg(unix)]

@@ -41,9 +41,9 @@ Rules:
 - Text input contexts (`Context::captures_input()`) receive every key except
   `Ctrl-C`; global keys are off there and the global bar is dimmed. Editing uses
   `input::TextInput` (char-indexed cursor): ←/→, Home/End, Ctrl-A/E, Backspace,
-  Delete, Ctrl-U. ↑/↓ while editing = save the field (if valid) and move. What's
-  rendered must keep one char per input char so the cursor lines up (secrets as
-  `•` per char, proxy passwords via `config::mask_url_password`).
+  Delete, Ctrl-U. ↑/↓ while editing = save the field (if valid) and move. The
+  field being edited is shown exactly as typed (no masking, per user request);
+  masking applies only to fields that aren't being edited.
 - Settings: add a `SettingKey` variant (label, TOML path, env var
   `LEEROY_<TABLE>_<KEY>`, secret?, `doc`, `validate`, `display`) plus a field in
   `Settings`. `doc` is shown in the settings view and written as a TOML comment
@@ -53,9 +53,20 @@ Rules:
   Config path: `--config` > `$LEEROY_CONFIG` > `$XDG_CONFIG_HOME/leeroy/config.toml`
   (default `~/.config/...`); legacy `~/.leeroy/config.toml` only if it exists and
   the XDG file doesn't. Empty env values count as unset.
-- Secrets (API token) are masked in the UI, redacted in `Debug`, and `Input` actions
-  are never logged. Proxy URL passwords go through `config::redact_url` everywhere
-  they're shown. Keep it that way.
+- Auth is generic: `[jenkins.headers]` (`Settings::header`/`set_header`, names
+  case-insensitive) sent with every request; env `LEEROY_JENKINS_HEADERS_<NAME>`
+  (`_` → `-`). Settings view rows = `SettingsState::rows()`: fixed `SettingKey`s,
+  then one row per header, then `+ add header` (edit `Name: value`, empty =
+  delete). Removed `jenkins.username`/`token` must keep failing loudly at startup.
+  `Authorization: Basic` values are decoded and rejected when not base64, without
+  `:`, or containing a newline (echo / multi-line `pass show`). 401/403 errors say
+  who refused (`X-Jenkins` present = Jenkins) and whether a cross-origin redirect
+  dropped the header (reqwest strips `Authorization` then); keep that.
+- Secrets: header values are masked in the UI (fixed `••••••••`) except in the
+  field currently being edited, sent as sensitive `HeaderValue`s, and only header *names* appear
+  in `Debug`. `Input` actions are never logged. Passwords in the Jenkins and proxy
+  URLs go through `config::redact_url` everywhere they're shown (the header's
+  `ConnectionStatus` stores the redacted URL). Keep it that way.
 - Connection: every attempt bumps `App::connection_generation`; `ConnectFinished`
   for an older generation is ignored and the executor aborts the previous task.
   Reconnect happens only when `SettingsState::connection_config()` changes.

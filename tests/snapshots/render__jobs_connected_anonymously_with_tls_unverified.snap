@@ -6,7 +6,7 @@ expression: render(&app).backend()
 "╭ Jobs ────────────────────────────────────────────────────────────────────────╮"
 "│                                                                              │"
 "│                            Connected as anonymous                            │"
-"│            Set a username and API token in settings (s) to log in            │"
+"│             Add an Authorization header in settings (s) to log in            │"
 "│                        Job list is not implemented yet                       │"
 "│                                                                              │"
 "│                                                                              │"

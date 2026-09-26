@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use crate::{
-    config::{SettingKey, Settings},
+    config::{SettingKey, Settings, header_env_var, parse_header, redact_url},
     input::TextInput,
     jenkins::{ConnectionConfig, ServerInfo},
     proxy::{ProxyEnv, SystemProxy},
@@ -122,6 +122,16 @@ pub enum ConnectionStatus {
     Failed { url: String, error: String },
 }
 
+/// One row of the settings view.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SettingsRow {
+    Setting(SettingKey),
+    /// A custom HTTP header, by (effective) name.
+    Header(String),
+    /// "+ add header".
+    AddHeader,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StatusMessage {
     Info(String),
@@ -158,8 +168,34 @@ impl SettingsState {
         }
     }
 
-    pub fn selected_key(&self) -> SettingKey {
-        SettingKey::ALL[self.selected]
+    /// Rows in display order: fixed settings, then headers, then "+ add header".
+    pub fn rows(&self) -> Vec<SettingsRow> {
+        let mut rows: Vec<SettingsRow> = SettingKey::ALL.map(SettingsRow::Setting).into();
+        rows.extend(
+            self.effective()
+                .jenkins
+                .headers
+                .into_keys()
+                .map(SettingsRow::Header),
+        );
+        rows.push(SettingsRow::AddHeader);
+        rows
+    }
+
+    pub fn selected_row(&self) -> SettingsRow {
+        let rows = self.rows();
+        rows[self.selected.min(rows.len() - 1)].clone()
+    }
+
+    fn select(&mut self, row: &SettingsRow) {
+        if let Some(i) = self.rows().iter().position(|r| r == row) {
+            self.selected = i;
+        }
+    }
+
+    /// Whether header `name` comes from an env var (and so is read-only here).
+    pub fn is_header_overridden(&self, name: &str) -> bool {
+        self.env.header(name).is_some()
     }
 
     /// What the app should actually use: env vars over the file.
@@ -181,13 +217,6 @@ impl SettingsState {
     pub fn connection_config(&self) -> Option<ConnectionConfig> {
         let settings = self.effective();
         let url = settings.get(SettingKey::JenkinsUrl)?.to_owned();
-        let credentials = match (
-            settings.get(SettingKey::JenkinsUsername),
-            settings.get(SettingKey::JenkinsToken),
-        ) {
-            (Some(user), Some(token)) => Some((user.to_owned(), token.to_owned())),
-            _ => None,
-        };
         let proxy = match settings.get(SettingKey::ProxyUrl) {
             Some(proxy) => Some(proxy.to_owned()),
             None => match self.system_proxy() {
@@ -195,9 +224,10 @@ impl SettingsState {
                 SystemProxy::Bypassed { .. } | SystemProxy::None => None,
             },
         };
+        let headers = settings.jenkins.headers.clone().into_iter().collect();
         Some(ConnectionConfig {
             url,
-            credentials,
+            headers,
             proxy,
             skip_tls_verify: settings.is_on(SettingKey::JenkinsSkipTlsVerify),
         })
@@ -249,8 +279,9 @@ impl App {
             self.connection = ConnectionStatus::NotConfigured;
             return None;
         };
+        // Display-only copy: credentials in the URL are never shown.
         self.connection = ConnectionStatus::Connecting {
-            url: config.url.clone(),
+            url: redact_url(&config.url),
         };
         Some(Effect::Connect {
             generation: self.connection_generation,
@@ -287,7 +318,8 @@ impl App {
                 let effects = self.confirm_edit();
                 let s = &mut self.settings;
                 if s.editing.is_none() {
-                    let len = SettingKey::ALL.len();
+                    let len = s.rows().len();
+                    s.selected = s.selected.min(len - 1);
                     s.selected = match action {
                         Action::SelectNext => (s.selected + 1) % len,
                         _ => (s.selected + len - 1) % len,
@@ -296,20 +328,27 @@ impl App {
                 return effects;
             }
             Action::StartEdit => {
-                let key = s.selected_key();
-                if s.is_overridden(key) {
-                    s.message = Some(StatusMessage::Error(format!(
-                        "{} is set by ${}; unset it to edit here",
-                        key.label(),
-                        key.env_var()
-                    )));
-                } else if key.is_bool() {
-                    // On/off settings toggle directly; off = unset (the default).
-                    let value = (!s.file.is_on(key)).then(|| "true".to_owned());
-                    return self.store(key, value);
-                } else {
-                    s.editing = Some(TextInput::new(s.file.get(key).unwrap_or_default()));
-                    s.message = None;
+                s.message = None;
+                match s.selected_row() {
+                    SettingsRow::Setting(key) if s.is_overridden(key) => {
+                        s.message = Some(read_only(key.label(), key.env_var()));
+                    }
+                    SettingsRow::Setting(key) if key.is_bool() => {
+                        // On/off settings toggle directly; off = unset (the default).
+                        let value = (!s.file.is_on(key)).then(|| "true".to_owned());
+                        return self.commit(|settings| settings.set(key, value));
+                    }
+                    SettingsRow::Setting(key) => {
+                        s.editing = Some(TextInput::new(s.file.get(key).unwrap_or_default()));
+                    }
+                    SettingsRow::Header(name) if s.is_header_overridden(&name) => {
+                        s.message = Some(read_only(&name, &header_env_var(&name)));
+                    }
+                    SettingsRow::Header(name) => {
+                        let value = s.file.header(&name).map_or("", |(_, v)| v);
+                        s.editing = Some(TextInput::new(&format!("{name}: {value}")));
+                    }
+                    SettingsRow::AddHeader => s.editing = Some(TextInput::default()),
                 }
             }
             Action::Input(_)
@@ -367,28 +406,77 @@ impl App {
         let Some(input) = s.editing.take() else {
             return Vec::new();
         };
-        let key = s.selected_key();
-        let value = if input.value().trim().is_empty() {
-            None
-        } else {
-            match key.validate(input.value()) {
-                Ok(value) => Some(value),
-                Err(err) => {
-                    s.editing = Some(input);
-                    s.message = Some(StatusMessage::Error(err));
-                    return Vec::new();
+        let text = input.value().trim().to_owned();
+        let result = match s.selected_row() {
+            SettingsRow::Setting(key) if text.is_empty() => Ok(Change::Set(key, None)),
+            SettingsRow::Setting(key) => key.validate(&text).map(|v| Change::Set(key, Some(v))),
+            // Clearing a header's field removes it.
+            SettingsRow::Header(old) if text.is_empty() => Ok(Change::Header {
+                old: Some(old),
+                new: None,
+            }),
+            SettingsRow::AddHeader if text.is_empty() => return Vec::new(),
+            row => parse_header(&text).and_then(|(name, value)| {
+                let old = match row {
+                    SettingsRow::Header(old) => Some(old),
+                    _ => None,
+                };
+                let renamed = old.as_ref().is_none_or(|o| !o.eq_ignore_ascii_case(&name));
+                if renamed && s.is_header_overridden(&name) {
+                    Err(format!(
+                        "{name} is set by ${}; unset it to change it here",
+                        header_env_var(&name)
+                    ))
+                } else if renamed && s.file.header(&name).is_some() {
+                    Err(format!(
+                        "header {name} already exists; edit that row instead"
+                    ))
+                } else {
+                    Ok(Change::Header {
+                        old,
+                        new: Some((name, value)),
+                    })
                 }
+            }),
+        };
+        let change = match result {
+            Ok(change) => change,
+            Err(err) => {
+                s.editing = Some(input);
+                s.message = Some(StatusMessage::Error(err));
+                return Vec::new();
             }
         };
-        self.store(key, value)
+        match change {
+            Change::Set(key, value) => self.commit(|settings| settings.set(key, value)),
+            Change::Header { old, new } => {
+                let select = new
+                    .as_ref()
+                    .map(|(name, _)| SettingsRow::Header(name.clone()));
+                let effects = self.commit(|settings| {
+                    if let Some(old) = &old {
+                        settings.set_header(old, None);
+                    }
+                    if let Some((name, value)) = new {
+                        settings.set_header(&name, Some(value));
+                    }
+                });
+                let s = &mut self.settings;
+                match select {
+                    Some(row) => s.select(&row),
+                    None => s.selected = s.selected.min(s.rows().len() - 1),
+                }
+                effects
+            }
+        }
     }
 
-    /// Store a (validated) setting in the file layer, save, and reconnect if
-    /// that changed how Jenkins is reached.
-    fn store(&mut self, key: SettingKey, value: Option<String>) -> Vec<Effect> {
+    /// Apply `change` to the file layer, save, and reconnect if that changed
+    /// how Jenkins is reached.
+    fn commit(&mut self, change: impl FnOnce(&mut Settings)) -> Vec<Effect> {
         let s = &mut self.settings;
         let before = s.connection_config();
-        s.file.set(key, value);
+        change(&mut s.file);
         s.message = Some(StatusMessage::Info("Saving…".into()));
         let mut effects = vec![Effect::SaveSettings {
             path: s.path.clone(),
@@ -414,6 +502,20 @@ impl App {
     }
 }
 
+/// A validated edit from the settings view.
+enum Change {
+    Set(SettingKey, Option<String>),
+    /// Remove `old` (if any), then add `new` (if any): add, edit, rename, delete.
+    Header {
+        old: Option<String>,
+        new: Option<(String, String)>,
+    },
+}
+
+fn read_only(what: &str, var: &str) -> StatusMessage {
+    StatusMessage::Error(format!("{what} is set by ${var}; unset it to edit here"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -422,6 +524,11 @@ mod tests {
         let mut app = App::default();
         app.update(Action::OpenSettings);
         app
+    }
+
+    fn select(app: &mut App, row: SettingsRow) {
+        app.settings.select(&row);
+        assert_eq!(app.settings.selected_row(), row);
     }
 
     fn type_str(app: &mut App, text: &str) {
@@ -486,9 +593,12 @@ mod tests {
     fn selection_wraps() {
         let mut app = settings_app();
         app.update(Action::SelectPrev);
-        assert_eq!(app.settings.selected_key(), SettingKey::ProxyUrl);
+        assert_eq!(app.settings.selected_row(), SettingsRow::AddHeader);
         app.update(Action::SelectNext);
-        assert_eq!(app.settings.selected_key(), SettingKey::JenkinsUrl);
+        assert_eq!(
+            app.settings.selected_row(),
+            SettingsRow::Setting(SettingKey::JenkinsUrl)
+        );
     }
 
     #[test]
@@ -531,7 +641,7 @@ mod tests {
     #[test]
     fn invalid_value_keeps_editing() {
         let mut app = settings_app();
-        app.update(Action::SelectPrev); // proxy URL
+        select(&mut app, SettingsRow::Setting(SettingKey::ProxyUrl));
         app.update(Action::StartEdit);
         type_str(&mut app, "ftp://proxy:21");
         assert_eq!(app.update(Action::ConfirmEdit), Vec::new());
@@ -681,16 +791,117 @@ mod tests {
         let mut app = settings_app();
         set_url(&mut app, "https://ci");
         assert_eq!(connect_generation(&set_url(&mut app, "https://ci")), None);
-        // Username alone doesn't enable auth (needs a token too).
-        app.update(Action::SelectNext);
+        // A new header changes the connection: reconnect.
+        assert!(connect_generation(&add_header(&mut app, "Authorization: Bearer abc")).is_some());
+        // Re-saving the same header value doesn't.
+        select(&mut app, SettingsRow::Header("Authorization".into()));
         app.update(Action::StartEdit);
-        type_str(&mut app, "me");
         assert_eq!(connect_generation(&app.update(Action::ConfirmEdit)), None);
-        // The token completes the credentials: reconnect.
-        app.update(Action::SelectNext);
+    }
+
+    fn add_header(app: &mut App, line: &str) -> Vec<Effect> {
+        select(app, SettingsRow::AddHeader);
         app.update(Action::StartEdit);
-        type_str(&mut app, "tok");
-        assert!(connect_generation(&app.update(Action::ConfirmEdit)).is_some());
+        type_str(app, line);
+        app.update(Action::ConfirmEdit)
+    }
+
+    #[test]
+    fn header_add_edit_rename_delete() {
+        let mut app = settings_app();
+        add_header(&mut app, "X-Token: one");
+        assert_eq!(
+            app.settings.file.header("x-token"),
+            Some(("X-Token", "one"))
+        );
+        assert_eq!(
+            app.settings.selected_row(),
+            SettingsRow::Header("X-Token".into()),
+            "new header selected"
+        );
+
+        // Edit: prefilled with "Name: value".
+        app.update(Action::StartEdit);
+        assert_eq!(
+            app.settings.editing.as_ref().map(|i| i.value()),
+            Some("X-Token: one")
+        );
+        app.update(Action::ClearInput);
+        type_str(&mut app, "X-Renamed: two");
+        app.update(Action::ConfirmEdit);
+        assert_eq!(app.settings.file.header("X-Token"), None);
+        assert_eq!(
+            app.settings.file.header("X-Renamed"),
+            Some(("X-Renamed", "two"))
+        );
+
+        // Clearing the field deletes it.
+        app.update(Action::StartEdit);
+        app.update(Action::ClearInput);
+        let effects = app.update(Action::ConfirmEdit);
+        assert!(matches!(effects.first(), Some(Effect::SaveSettings { .. })));
+        assert!(app.settings.file.jenkins.headers.is_empty());
+        assert_eq!(app.settings.selected_row(), SettingsRow::AddHeader);
+    }
+
+    #[test]
+    fn header_errors_keep_editing() {
+        let mut app = settings_app();
+        add_header(&mut app, "X-Token: one");
+        for bad in ["no colon", "X-Empty:", "x-token: dup"] {
+            let effects = add_header(&mut app, bad);
+            assert_eq!(effects, Vec::new(), "{bad}");
+            assert_eq!(app.context(), Context::EditSetting, "{bad}");
+            assert!(
+                matches!(app.settings.message, Some(StatusMessage::Error(_))),
+                "{bad}"
+            );
+            app.update(Action::Back);
+        }
+        // Empty "+ add header" just cancels.
+        assert_eq!(add_header(&mut app, ""), Vec::new());
+        assert_eq!(app.context(), Context::Settings);
+    }
+
+    #[test]
+    fn env_headers_are_read_only_and_used() {
+        let mut app = settings_app();
+        app.settings
+            .env
+            .set_header("Authorization", Some("Bearer env".into()));
+        set_url(&mut app, "https://ci");
+        select(&mut app, SettingsRow::Header("Authorization".into()));
+        app.update(Action::StartEdit);
+        assert_eq!(app.context(), Context::Settings);
+        assert!(matches!(
+            app.settings.message,
+            Some(StatusMessage::Error(ref m)) if m.contains("LEEROY_JENKINS_HEADERS_AUTHORIZATION")
+        ));
+        // Can't shadow it with a file header either.
+        let effects = add_header(&mut app, "authorization: Basic file");
+        assert_eq!(effects, Vec::new());
+        app.update(Action::Back);
+        assert_eq!(
+            app.settings.connection_config().unwrap().headers,
+            vec![("Authorization".to_owned(), "Bearer env".to_owned())]
+        );
+    }
+
+    #[test]
+    fn url_credentials_never_shown_in_connection_status() {
+        let mut app = settings_app();
+        set_url(&mut app, "https://me:s3cret@ci");
+        assert_eq!(
+            app.connection,
+            ConnectionStatus::Connecting {
+                url: "https://me:••••@ci".into()
+            }
+        );
+        // The real URL is still used to connect.
+        assert_eq!(
+            app.settings.connection_config().unwrap().url,
+            "https://me:s3cret@ci"
+        );
     }
 
     #[test]
@@ -726,10 +937,9 @@ mod tests {
     fn enter_toggles_skip_tls_verify_and_reconnects() {
         let mut app = settings_app();
         set_url(&mut app, "https://ci");
-        app.settings.selected = 3;
-        assert_eq!(
-            app.settings.selected_key(),
-            SettingKey::JenkinsSkipTlsVerify
+        select(
+            &mut app,
+            SettingsRow::Setting(SettingKey::JenkinsSkipTlsVerify),
         );
 
         let effects = app.update(Action::StartEdit);
@@ -778,7 +988,10 @@ mod tests {
             app.settings.file.get(SettingKey::JenkinsUrl),
             Some("https://ci")
         );
-        assert_eq!(app.settings.selected_key(), SettingKey::JenkinsUsername);
+        assert_eq!(
+            app.settings.selected_row(),
+            SettingsRow::Setting(SettingKey::JenkinsSkipTlsVerify)
+        );
         assert_eq!(app.context(), Context::Settings);
     }
 
@@ -788,7 +1001,10 @@ mod tests {
         app.update(Action::StartEdit);
         type_str(&mut app, "not a url");
         assert_eq!(app.update(Action::SelectPrev), Vec::new());
-        assert_eq!(app.settings.selected_key(), SettingKey::JenkinsUrl);
+        assert_eq!(
+            app.settings.selected_row(),
+            SettingsRow::Setting(SettingKey::JenkinsUrl)
+        );
         assert_eq!(app.context(), Context::EditSetting);
         assert!(matches!(
             app.settings.message,
