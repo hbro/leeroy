@@ -10,6 +10,18 @@ A release's section is used as its GitHub release notes.
 
 ## [Unreleased]
 
+### Added
+
+- Static Linux builds (musl) for x86_64 and ARM64, which run on any
+  distribution, next to the glibc builds.
+
+### Changed
+
+- Release archives are named without the vendor part of the target, and the
+  Linux glibc builds say `glibc` instead of `gnu`: e.g.
+  `leeroy-v0.1.1-x86_64-linux-glibc.tar.gz`, `…-aarch64-darwin.tar.gz`,
+  `…-x86_64-windows-msvc.zip`.
+
 ## [0.1.0] - 2026-09-26
 
 ### Added
@@ -29,8 +41,8 @@ A release's section is used as its GitHub release notes.
 - Config file in `$XDG_CONFIG_HOME/leeroy/config.toml`
   (`%APPDATA%\leeroy\config.toml` on Windows), or `--config` /
   `$LEEROY_CONFIG`.
-- Prebuilt binaries for Linux (x86_64, ARM64; static musl and glibc), macOS
-  (Apple Silicon, Intel) and Windows (x86_64).
+- Prebuilt binaries for Linux (x86_64, ARM64), macOS (Apple Silicon, Intel)
+  and Windows (x86_64).
 
 [Unreleased]: https://github.com/hbro/leeroy/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/hbro/leeroy/releases/tag/v0.1.0
