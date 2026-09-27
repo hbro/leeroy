@@ -3,7 +3,7 @@ source: tests/render.rs
 expression: screen
 ---
 " Leeroy  ◌ https://ci.example.com · connecting…                       h/?  help "
-" 1 Jobs   2 Builds                                                   0 Settings "
+" 1 Jobs   2 Builds   3 Pipelines   4 Runs                            0 Settings "
 "Settings ───────────────────────────────────────────────────────────────────────"
 "   Config file       /home/user/.config/leeroy/config.toml                      "
 "                                                                                "
@@ -25,4 +25,4 @@ expression: screen
 "                                                                                "
 "   Saved to /home/user/.config/leeroy/config.toml                               "
 "────────────────────────────────────────────────────────────────────────────────"
-" ↑/↓  select   Enter  edit/toggle                                               "
+" Enter  edit/toggle                                                             "

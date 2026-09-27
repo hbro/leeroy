@@ -36,5 +36,19 @@ Show
 Screenshot docs/screenshots/build.png
 Sleep 500ms
 Hide
+Escape
+Type "3"
+Sleep 1s
+Show
+Screenshot docs/screenshots/pipelines.png
+Sleep 500ms
+Hide
+Enter
+Type "v"
+Sleep 300ms
+Show
+Screenshot docs/screenshots/run.png
+Sleep 500ms
+Hide
 Type "q"
 Type "q"

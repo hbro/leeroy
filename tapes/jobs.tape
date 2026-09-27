@@ -17,7 +17,7 @@ Show
 Screenshot target/screenshots/jobs-auto-off.png
 Sleep 500ms
 Hide
-Down 5
+Down 7
 Sleep 300ms
 Show
 Screenshot target/screenshots/jobs-selected-not-built.png

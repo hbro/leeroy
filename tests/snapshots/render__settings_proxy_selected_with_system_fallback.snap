@@ -3,7 +3,7 @@ source: tests/render.rs
 expression: screen
 ---
 " Leeroy  ○ not connected                                              h/?  help "
-" 1 Jobs   2 Builds                                                   0 Settings "
+" 1 Jobs   2 Builds   3 Pipelines   4 Runs                            0 Settings "
 "Settings ───────────────────────────────────────────────────────────────────────"
 "   Config file       /home/user/.config/leeroy/config.toml                      "
 "                                                                                "
@@ -25,4 +25,4 @@ expression: screen
 "   Schemes: http, https, socks4, socks4a, socks5, socks5h.                      "
 "   SOCKS: socks5h:// or socks4a:// resolve DNS on the proxy (remote DNS);       "
 "────────────────────────────────────────────────────────────────────────────────"
-" ↑/↓  select   Enter  edit/toggle                                               "
+" Enter  edit/toggle                                                             "

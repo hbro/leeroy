@@ -2,13 +2,14 @@
 //! `tests/snapshots/*.snap`. Review changes with `cargo insta review`.
 
 use leeroy::{
-    app::{Action, App, ConnectionStatus, SettingsState, Tab},
-    builds::{Build, BuildPage, BuildRef, BuildStep, Change},
+    app::{Action, App, ConnectionStatus, Effect, SettingsState, Tab, View},
+    builds::{Build, BuildPage, BuildRef, BuildStep, Change, Stage, StageStatus},
     config::{SettingKey, Settings},
     console::ConsoleChunk,
     history::HistoryEntry,
     jenkins::ServerInfo,
     jobs::{Job, JobStatus},
+    pipelines,
     theme::Appearance,
     ui,
 };
@@ -52,6 +53,33 @@ fn type_str(text: &str) -> Vec<Action> {
 #[test]
 fn initial_screen() {
     insta::assert_snapshot!(render_after(&[]).backend());
+}
+
+#[test]
+fn help_fits_on_every_screen() {
+    // The popup lists the keys of the view below it; at 80x24 it must not
+    // lose its bottom border on any of them.
+    let views = [
+        Tab::Jobs,
+        Tab::Builds,
+        Tab::Pipelines,
+        Tab::Runs,
+        Tab::Settings,
+    ];
+    for tab in views {
+        let terminal = render_after(&[Action::SwitchTab(tab), Action::ToggleHelp]);
+        let screen = format!("{}", terminal.backend());
+        assert!(screen.contains('╚'), "{tab:?}:\n{screen}");
+    }
+    // The build and run views have the most keys.
+    let mut app = app_with_build(Some(finished_build()));
+    apply(&mut app, &[Action::ToggleHelp]);
+    let screen = format!("{}", render(&app).backend());
+    assert!(screen.contains('╚'), "build view:\n{screen}");
+    let mut app = app_with_pipelines(Tab::Pipelines);
+    apply(&mut app, &[Action::OpenBuild, Action::ToggleHelp]);
+    let screen = format!("{}", render(&app).backend());
+    assert!(screen.contains('╚'), "run view:\n{screen}");
 }
 
 #[test]
@@ -318,6 +346,177 @@ fn app_with_jobs() -> App {
     app
 }
 
+/// Pipelines/Runs data. `libs/core` #12 → backend/api/main #56 →
+/// deploy/staging #54 → tests/e2e #49 (running) + tests/smoke #51
+/// (unstable); tests/e2e → deploy/production statically. `shop/build` #7 →
+/// shop/test #3, and shop/build #8 failed without triggering anything.
+const PIPELINES_JSON: &str = r#"{"jobs": [
+    {"fullName": "backend/api/main", "color": "blue", "builds": [
+        {"number": 56, "result": "SUCCESS", "timestamp": 1700000000000, "duration": 95000,
+         "actions": [{"causes": [{"upstreamProject": "libs/core", "upstreamBuild": 12}]}]}]},
+    {"fullName": "deploy/production", "color": "blue",
+     "upstreamProjects": [{"fullName": "tests/e2e"}], "builds": []},
+    {"fullName": "deploy/staging", "color": "blue",
+     "upstreamProjects": [{"fullName": "backend/api/main"}],
+     "downstreamProjects": [{"fullName": "tests/smoke"}],
+     "builds": [
+        {"number": 54, "result": "SUCCESS", "timestamp": 1700000240000, "duration": 61000,
+         "actions": [{"causes": [{"upstreamProject": "backend/api/main", "upstreamBuild": 56}]}]}]},
+    {"fullName": "docs", "color": "disabled", "builds": []},
+    {"fullName": "libs/core", "color": "blue", "builds": [
+        {"number": 12, "result": "SUCCESS", "timestamp": 1699999760000, "duration": 40000}]},
+    {"fullName": "shop/build", "color": "red", "builds": [
+        {"number": 8, "result": "FAILURE", "timestamp": 1700000500000, "duration": 20000},
+        {"number": 7, "result": "SUCCESS", "timestamp": 1699990000000, "duration": 50000}]},
+    {"fullName": "shop/test", "color": "blue", "builds": [
+        {"number": 3, "result": "SUCCESS", "timestamp": 1699990060000, "duration": 30000,
+         "actions": [{"causes": [{"upstreamProject": "shop/build", "upstreamBuild": 7}]}]}]},
+    {"fullName": "tests/e2e", "color": "blue_anime", "builds": [
+        {"number": 49, "result": null, "building": true, "timestamp": 1700000480000,
+         "actions": [{"causes": [{"upstreamProject": "deploy/staging", "upstreamBuild": 54}]}]}]},
+    {"fullName": "tests/smoke", "color": "yellow",
+     "upstreamProjects": [{"fullName": "deploy/staging"}], "builds": [
+        {"number": 51, "result": "UNSTABLE", "timestamp": 1700000400000, "duration": 30000,
+         "actions": [{"causes": [{"upstreamProject": "deploy/staging", "upstreamBuild": 54}]}]}]}
+]}"#;
+
+/// Connected, with [`PIPELINES_JSON`] loaded, the clock 10 minutes after
+/// the newest build started, on `tab`.
+fn app_with_pipelines(tab: Tab) -> App {
+    use std::time::{Duration, SystemTime};
+    let mut app = app_with_jobs();
+    app.wall_now = SystemTime::UNIX_EPOCH + Duration::from_millis(1_700_001_080_000);
+    let generation = app.connection_generation;
+    app.update(Action::SwitchTab(tab));
+    app.update(Action::PipelinesFetched {
+        generation,
+        result: pipelines::parse(PIPELINES_JSON),
+    });
+    app
+}
+
+#[test]
+fn pipelines_list() {
+    let app = app_with_pipelines(Tab::Pipelines);
+    let screen = format!("{}", render(&app).backend());
+    assert!(!screen.contains("docs"), "not a pipeline");
+    assert!(screen.contains("shop"), "named by the common prefix");
+    insta::assert_snapshot!(screen);
+}
+
+#[test]
+fn pipeline_latest_run_as_tree_and_boxes() {
+    let mut app = app_with_pipelines(Tab::Pipelines);
+    // libs/core is the first pipeline (sorted by name).
+    apply(&mut app, &[Action::OpenBuild]);
+    assert_eq!(app.view, View::Run);
+    assert_eq!(app.tab(), Some(Tab::Pipelines));
+    let tree = format!("{}", render(&app).backend());
+    assert!(
+        tree.contains("└─ ● deploy/staging #54"),
+        "tree first:\n{tree}"
+    );
+    insta::assert_snapshot!("pipeline_run_tree", tree);
+
+    apply(&mut app, &[Action::ToggleRunView, Action::SelectNext]);
+    let boxes = format!("{}", render(&app).backend());
+    assert!(boxes.contains("─▶│ ● backend/api/main #56"), "{boxes}");
+    insta::assert_snapshot!("pipeline_run_boxes", boxes);
+
+    // Enter opens the selected build (backend/api/main #56); Esc comes back.
+    let effects = app.update(Action::OpenBuild);
+    assert!(effects.iter().any(|e| matches!(
+        e,
+        Effect::FetchBuild { job, which: BuildRef::Number(56), .. } if job == "backend/api/main"
+    )));
+    assert_eq!(app.tab(), Some(Tab::Pipelines));
+    apply(&mut app, &[Action::Back]);
+    assert_eq!(app.view, View::Run);
+    apply(&mut app, &[Action::Back]);
+    assert_eq!(app.view, View::Pipelines);
+}
+
+#[test]
+fn runs_list_opens_the_same_run_view() {
+    let mut app = app_with_pipelines(Tab::Runs);
+    let screen = format!("{}", render(&app).backend());
+    insta::assert_snapshot!(screen);
+    // The newest run is shop's failed #8, then libs/core #12.
+    apply(&mut app, &[Action::SelectNext, Action::OpenBuild]);
+    assert_eq!(app.view, View::Run);
+    assert_eq!(app.tab(), Some(Tab::Runs));
+    let run = format!("{}", render(&app).backend());
+    assert!(run.contains("libs/core · #12"), "{run}");
+    apply(&mut app, &[Action::Back]);
+    assert_eq!(app.view, View::Runs);
+}
+
+#[test]
+fn stepping_to_an_older_run() {
+    let mut app = app_with_pipelines(Tab::Pipelines);
+    apply(&mut app, &[Action::SelectNext, Action::OpenBuild]); // shop, latest = #8
+    let latest = format!("{}", render(&app).backend());
+    assert!(latest.contains("shop · #8 · 2 of 2 · failure"), "{latest}");
+    apply(&mut app, &[Action::BuildStep(BuildStep::Older)]);
+    let older = format!("{}", render(&app).backend());
+    assert!(older.contains("shop · #7 · 1 of 2 · success"), "{older}");
+}
+
+#[test]
+fn selected_run_rows_stay_readable() {
+    for theme in ["dark", "light"] {
+        for tab in [Tab::Pipelines, Tab::Runs] {
+            let mut app = app_with_pipelines(tab);
+            app.settings
+                .file
+                .set(SettingKey::Theme, Some(theme.to_owned()));
+            for row in 0..3 {
+                apply(&mut app, &[Action::SelectFirst]);
+                for _ in 0..row {
+                    apply(&mut app, &[Action::SelectNext]);
+                }
+                let terminal = render(&app);
+                let buffer = terminal.backend().buffer();
+                let y = (0..HEIGHT)
+                    .find(|&y| buffer[(0, y)].symbol() == "▶")
+                    .expect("selected row");
+                for x in 0..WIDTH {
+                    let cell = &buffer[(x, y)];
+                    assert!(
+                        cell.symbol() == " " || cell.fg != cell.bg,
+                        "{theme} {tab:?} row {row}: {:?} unreadable at x={x}",
+                        cell.symbol()
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn pipelines_filter() {
+    let mut app = app_with_pipelines(Tab::Pipelines);
+    let mut actions = vec![Action::StartFilter];
+    actions.extend(type_str("shop"));
+    actions.push(Action::ConfirmEdit);
+    apply(&mut app, &actions);
+    let screen = format!("{}", render(&app).backend());
+    assert!(screen.contains("Pipelines (1)"), "{screen}");
+    assert!(screen.contains("filter: shop"), "{screen}");
+}
+
+#[test]
+fn pipelines_without_relations() {
+    let mut app = app_with_jobs();
+    let generation = app.connection_generation;
+    app.update(Action::SwitchTab(Tab::Pipelines));
+    app.update(Action::PipelinesFetched {
+        generation,
+        result: pipelines::parse(r#"{"jobs": [{"fullName": "docs", "color": "blue"}]}"#),
+    });
+    insta::assert_snapshot!(render(&app).backend());
+}
+
 #[test]
 fn jobs_list() {
     let mut app = app_with_jobs();
@@ -551,7 +750,58 @@ fn finished_build() -> Build {
                 author: None,
             },
         ],
+        pipeline: true,
+        stages: Some(vec![
+            stage("Checkout", StageStatus::Success, 4),
+            stage("Build", StageStatus::Success, 62),
+            stage("Test", StageStatus::Failed, 38),
+            stage("Deploy", StageStatus::NotRun, 0),
+        ]),
     }
+}
+
+fn stage(name: &str, status: StageStatus, secs: u64) -> Stage {
+    Stage {
+        name: name.into(),
+        status,
+        duration: std::time::Duration::from_secs(secs),
+    }
+}
+
+#[test]
+fn many_stages_wrap_under_the_label() {
+    let mut build = finished_build();
+    let names = [
+        "Checkout",
+        "Compile",
+        "Unit tests",
+        "Lint",
+        "Package",
+        "Integration",
+        "Publish",
+        "Deploy",
+    ];
+    build.stages = Some(
+        names
+            .iter()
+            .map(|n| stage(n, StageStatus::Success, 75))
+            .collect(),
+    );
+    let screen = format!("{}", render(&app_with_build(Some(build))).backend());
+    let lines: Vec<&str> = screen.lines().collect();
+    let first = lines.iter().position(|l| l.contains("Stages")).unwrap();
+    // Every stage whole, on continuation lines aligned under the first.
+    for name in names {
+        assert!(
+            screen.contains(&format!("● {name} 1m 15s")),
+            "{name}:\n{screen}"
+        );
+    }
+    // A wrapped line starts with a stage (no dangling arrow).
+    assert!(
+        lines[first + 1].starts_with("\"             ● "),
+        "{screen}"
+    );
 }
 
 #[test]
@@ -603,8 +853,8 @@ fn build_navigation_title_and_deleted_build() {
         "{screen}"
     );
     assert!(
-        screen.contains("←/→  older/newer   Home/End  first/last"),
-        "{screen}"
+        screen.contains("←/→  older/newer   c  console"),
+        "Home/End only in the help: {screen}"
     );
 
     apply(&mut app, &[Action::BuildStep(BuildStep::Older)]);
@@ -706,7 +956,11 @@ fn bar_colours() {
     // hotkeys in the tab blue, no context name.
     let y = HEIGHT - 1;
     let context: String = (0..WIDTH).map(|x| buffer[(x, y)].symbol()).collect();
-    assert!(context.starts_with(" ↑/↓ "), "no context name: {context:?}");
+    assert!(
+        context.starts_with(" Enter "),
+        "no context name: {context:?}"
+    );
+    assert!(!context.contains("↑/↓"), "navigation keys only in help");
     assert_eq!(buffer[(1, y)].bg, Color::Blue, "hotkey");
     assert_eq!(
         buffer[(WIDTH - 1, y)].bg,

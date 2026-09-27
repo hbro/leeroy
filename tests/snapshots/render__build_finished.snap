@@ -3,11 +3,12 @@ source: tests/render.rs
 expression: render(&app_with_build(Some(finished_build()))).backend()
 ---
 " Leeroy  ● https://ci.example.com · Jenkins 2.504.1 · me       h/?  help   ⟳ 0s "
-" 1 Jobs   2 Builds                                                   0 Settings "
+" 1 Jobs   2 Builds   3 Pipelines   4 Runs                            0 Settings "
 "backend/api/release-1.2 · #42 · 4 of 4 ─────────────────────────────────────────"
 " Result      ● failed                                                           "
 " Started     5m ago                                                             "
 " Duration    2m 13s                                                             "
+" Stages      ● Checkout 4s ─▶ ● Build 1m 02s ─▶ ✕ Test 38s ─▶ ○ Deploy          "
 " Cause       Started by user Hans                                               "
 " Parameters  ENV = prod                                                         "
 "             DRY_RUN = false                                                    "
@@ -23,6 +24,5 @@ expression: render(&app_with_build(Some(finished_build()))).backend()
 "                                                                                "
 "                                                                                "
 "                                                                                "
-"                                                                                "
 "────────────────────────────────────────────────────────────────────────────────"
-" ←/→  older/newer   Home/End  first/last   c  console   Esc  back   ↑/↓  scroll "
+" ←/→  older/newer   c  console   Esc  back                                      "

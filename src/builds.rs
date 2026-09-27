@@ -25,6 +25,84 @@ pub struct Build {
     pub causes: Vec<String>,
     pub parameters: Vec<(String, String)>,
     pub changes: Vec<Change>,
+    /// A Pipeline (Jenkinsfile) run: it has stages.
+    pub pipeline: bool,
+    /// Its stages, from the Pipeline Stage View plugin's `wfapi`; `None`
+    /// when not a Pipeline run or the plugin isn't installed.
+    pub stages: Option<Vec<Stage>>,
+}
+
+/// One stage of a Pipeline run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Stage {
+    pub name: String,
+    pub status: StageStatus,
+    pub duration: Duration,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StageStatus {
+    Success,
+    Failed,
+    Unstable,
+    Aborted,
+    Running,
+    /// Waiting for someone to approve an `input` step.
+    Paused,
+    /// Skipped, or not reached (yet).
+    NotRun,
+    Unknown,
+}
+
+impl StageStatus {
+    fn parse(status: &str) -> Self {
+        match status {
+            "SUCCESS" => StageStatus::Success,
+            "FAILED" => StageStatus::Failed,
+            "UNSTABLE" => StageStatus::Unstable,
+            "ABORTED" => StageStatus::Aborted,
+            "IN_PROGRESS" => StageStatus::Running,
+            "PAUSED_PENDING_INPUT" => StageStatus::Paused,
+            "NOT_EXECUTED" | "SKIPPED" => StageStatus::NotRun,
+            _ => StageStatus::Unknown,
+        }
+    }
+}
+
+/// Request path for build `number`'s stages (Pipeline Stage View plugin;
+/// 404 without it).
+pub fn stages_path(full_name: &str, number: u64) -> String {
+    format!("{}{number}/wfapi/describe", job_path(full_name))
+}
+
+#[derive(Deserialize)]
+struct RawDescribe {
+    #[serde(default)]
+    stages: Vec<RawStage>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawStage {
+    name: String,
+    #[serde(default)]
+    status: String,
+    #[serde(default)]
+    duration_millis: u64,
+}
+
+pub fn parse_stages(json: &str) -> Result<Vec<Stage>, String> {
+    let raw: RawDescribe =
+        serde_json::from_str(json).map_err(|err| format!("unexpected stage data: {err}"))?;
+    Ok(raw
+        .stages
+        .into_iter()
+        .map(|s| Stage {
+            name: s.name,
+            status: StageStatus::parse(&s.status),
+            duration: Duration::from_millis(s.duration_millis),
+        })
+        .collect())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -156,6 +234,9 @@ const TREE: &str = concat!(
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RawBuild {
+    /// Jenkins includes the class whatever the `tree` says.
+    #[serde(rename = "_class")]
+    class: Option<String>,
     number: u64,
     display_name: Option<String>,
     result: Option<String>,
@@ -284,6 +365,10 @@ pub fn parse_build(json: &str) -> Result<Build, String> {
         causes,
         parameters,
         changes,
+        pipeline: raw
+            .class
+            .is_some_and(|c| c == "org.jenkinsci.plugins.workflow.job.WorkflowRun"),
+        stages: None,
     })
 }
 
@@ -549,6 +634,45 @@ mod tests {
         assert!(build.building);
         assert_eq!(build.estimated, None, "-1 = unknown");
         assert_eq!(build.changes[0].author, None);
+    }
+
+    #[test]
+    fn pipeline_runs_and_their_stages() {
+        let run = parse_build(
+            r#"{"_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun", "number": 1}"#,
+        )
+        .unwrap();
+        assert!(run.pipeline);
+        assert!(
+            !parse_build(r#"{"_class": "hudson.model.FreeStyleBuild", "number": 1}"#)
+                .unwrap()
+                .pipeline
+        );
+        assert_eq!(stages_path("a/b", 7), "job/a/job/b/7/wfapi/describe");
+
+        let stages = parse_stages(
+            r#"{"id": "7", "status": "IN_PROGRESS", "stages": [
+                {"id": "6", "name": "Checkout", "status": "SUCCESS", "durationMillis": 4200},
+                {"id": "9", "name": "Test", "status": "IN_PROGRESS", "durationMillis": 38000},
+                {"id": "12", "name": "Deploy", "status": "NOT_EXECUTED", "durationMillis": 0},
+                {"id": "15", "name": "Approve", "status": "PAUSED_PENDING_INPUT"}
+            ]}"#,
+        )
+        .unwrap();
+        let summary: Vec<(&str, StageStatus, u64)> = stages
+            .iter()
+            .map(|s| (s.name.as_str(), s.status, s.duration.as_secs()))
+            .collect();
+        assert_eq!(
+            summary,
+            [
+                ("Checkout", StageStatus::Success, 4),
+                ("Test", StageStatus::Running, 38),
+                ("Deploy", StageStatus::NotRun, 0),
+                ("Approve", StageStatus::Paused, 0),
+            ]
+        );
+        assert!(parse_stages("<html>").is_err());
     }
 
     #[test]

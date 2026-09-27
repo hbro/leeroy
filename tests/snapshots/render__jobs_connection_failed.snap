@@ -3,7 +3,7 @@ source: tests/render.rs
 expression: render(&app).backend()
 ---
 " Leeroy  ✕ https://ci.example.com · cannot connect: dns error: failed h/?  help "
-" 1 Jobs   2 Builds                                                   0 Settings "
+" 1 Jobs   2 Builds   3 Pipelines   4 Runs                            0 Settings "
 "Jobs ───────────────────────────────────────────────────────────────────────────"
 "                                                                                "
 "                       Cannot reach https://ci.example.com                      "
@@ -25,4 +25,4 @@ expression: render(&app).backend()
 "                                                                                "
 "                                                                                "
 "────────────────────────────────────────────────────────────────────────────────"
-" ↑/↓  select   Enter  last build   /  filter                                    "
+" Enter  last build   /  filter                                                  "

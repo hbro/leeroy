@@ -106,6 +106,7 @@ async fn run(mut terminal: DefaultTerminal, mut app: App) -> Result<()> {
         build_task: None,
         console_task: None,
         history_task: None,
+        pipelines_task: None,
     };
     for effect in app.start() {
         executor.run(effect);
@@ -153,6 +154,7 @@ struct Executor {
     console_task: Option<AbortHandle>,
     /// The in-flight build history fetch.
     history_task: Option<AbortHandle>,
+    pipelines_task: Option<AbortHandle>,
 }
 
 impl Executor {
@@ -224,6 +226,26 @@ impl Executor {
                     });
                 });
                 self.history_task = Some(task.abort_handle());
+            }
+            Effect::FetchPipelines { generation, config } => {
+                if let Some(previous) = self.pipelines_task.take() {
+                    previous.abort();
+                }
+                let tx = tx.clone();
+                let task = tokio::spawn(async move {
+                    let result = jenkins::fetch_pipelines(&config).await;
+                    match &result {
+                        Ok(data) => tracing::info!(
+                            jobs = data.jobs.len(),
+                            edges = data.edges.len(),
+                            builds = data.builds.len(),
+                            "fetched pipelines"
+                        ),
+                        Err(err) => tracing::warn!(%err, "fetching pipelines failed"),
+                    }
+                    let _ = tx.send(Action::PipelinesFetched { generation, result });
+                });
+                self.pipelines_task = Some(task.abort_handle());
             }
             Effect::FetchConsole {
                 generation,

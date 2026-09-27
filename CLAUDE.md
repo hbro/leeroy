@@ -30,6 +30,20 @@ Elm-style: pure core, thin IO shell.
   N are shown (exact). N = visible rows (`App::list_rows`, recorded by the
   renderer); moving past the end fetches N + one page. Job-name/`#number` filters
   are complete client-side.
+- `src/pipelines.rs` — Pipelines/Runs tabs and run view. One request
+  (`pipelines::tree_query`, `RUN_BUILDS` = 20 builds per job) gets every job's
+  static `upstreamProjects`/`downstreamProjects` plus builds with their
+  `UpstreamCause`s; edges = union (a Pipeline `build job:` only shows as a
+  cause). Pipeline = job with an untriggered build (no upstream cause at all)
+  that triggered something; its runs = all its untriggered builds (a failed
+  one triggers nothing), trees via causes. Name = common prefix of its parts
+  (reachable jobs) at a word boundary, unique, else the first job. Run status:
+  worst of failure/unstable/aborted, else success iff every part has a
+  successful build in the run, else partial; plus a running flag. Pure.
+- `src/graph.rs` — the run view's boxes on a character grid: builds stacked in
+  tree order, indented `INDENT` per level, `├─▶`/`└─▶` lines from the
+  triggering box, merged box-drawing junctions. Pure; tested with exact
+  pictures.
 - `src/console.rs` — console output: `ConsoleView` buffer fed by
   `logText/progressiveText?start=<byte>` chunks (`X-Text-Size` = next offset,
   `X-More-Data` = still running), UTF-8 carried across chunk boundaries, lines
@@ -80,6 +94,18 @@ Rules:
   Builds): Esc returns there and `App::tab()` highlights that tab. Opened at a
   number (from Builds), the first fetch also gets the job's build numbers
   (`want_numbers`) so ←/→ work.
+- Pipelines (`3`) and Runs (`4`) share one fetch (`Effect::FetchPipelines`,
+  one in flight, auto-refresh/`r` like the other tabs, reset on reconnect).
+  Enter opens `View::Run` (`App::run: RunView`, `RunRef::Latest` from
+  Pipelines, `Number` from Runs; `origin` for Esc and `App::tab`). Run view:
+  tree by default, `v` tree ⇄ boxes, ←/→ Home/End step runs (`BuildStep` reused; newest =
+  `Latest`), ↑/↓ select a build, Enter opens it as `View::Build` with
+  `origin: View::Run` (Esc → run view → list). List rows are
+  `ui::run_table`; the boxes are painted by `ui::paint_boxes` (scrolls to the
+  selection, records the scroll in a `Cell`, returns the `more ←→↑↓` hint).
+- Build view stages: for a `WorkflowRun` (`Build::pipeline`, from `_class`),
+  `jenkins::fetch_build` also gets `<n>/wfapi/describe`; 404 (no Stage View
+  plugin) or any error = no stages section, never a failed build view.
 - Console view (`View::Console`, under the build view): `c` toggles it (opens it
   from the build view, `c`/`Esc` go back) for the
   shown build's *number*. Polled every `CONSOLE_POLL` (1s) while shown and the
@@ -96,7 +122,9 @@ Rules:
   `JobsState::fetch_in_flight()` (manual `r` included); only a new connection
   (new generation) resets that.
 - Bottom of screen = the context bar: keys of
-  whatever has focus, from `context_bindings(App::context())`. A new view or overlay
+  whatever has focus, from `context_bindings(App::context())`. Navigation keys
+  (`nav(…)`: arrows, Home/End, PgUp/PgDn) are left out of the bar and only
+  listed in the help popup; `←/→` with a special meaning (older/newer) stays. A new view or overlay
   = new `View`/`Context` variant, its bindings in `event.rs`, handled in `map_key`.
   Test `advertised_bindings_are_mapped` fails if a shown key does nothing.
 - `Esc` = `Action::Back`: closes the current context (popup, sub-view) and is
@@ -196,7 +224,12 @@ Run all three layers for UI changes; layer 1 is mandatory for every change.
    Fake Jenkins for connection tests: `scripts/fake-jenkins.py [--port 8099]
    [--auth USER:TOKEN] [--delay SECS] [--status CODE] [--tls] [--jobs N] [--churn]`
    (job tree with folders/multibranch/all statuses, each job's builds when the tree
-   asks for `builds[…]{0,N}`; `lastBuild` per job: 404 for
+   asks for `builds[…]{0,N}` (with their upstream causes when it asks for
+   `causes[`); job chains `libs/core → backend/api/main → deploy/staging →
+   tests/*`, `frontend/web/main → deploy/staging`, `tests/e2e →
+   deploy/production`, `shop/build → shop/test → shop/deploy` (static relations
+   only on freestyle jobs, like Jenkins); `wfapi/describe` stages for Pipeline
+   runs; works as an HTTP proxy for any host; `lastBuild` per job: 404 for
    never built, running builds progress in real time and their console log grows
    a line every 0.3s (ANSI, `\r`, UTF-8, long lines); `--churn` changes a status
    per request to watch auto-refresh).

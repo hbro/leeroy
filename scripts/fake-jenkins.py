@@ -11,6 +11,7 @@ Serves (under any path prefix, with an X-Jenkins header):
   GET /job/../api/json             the job: allBuilds (numbers, with gaps) + lastBuild
   GET /job/../<n>/api/json         build n (404 if it doesn't exist)
   GET /job/../lastBuild/api/json   the job's last build (404 if never built)
+  GET /job/../<n>/wfapi/describe   stages of a Pipeline run (404 for freestyle)
   GET /job/../<n>/logText/progressiveText?start=B   console output from byte B;
       a running build's log grows by a line every 0.3s (X-More-Data: true)
 --auth      require HTTP basic auth, 401 otherwise; the user is echoed back.
@@ -43,13 +44,71 @@ COLORS = ["blue", "red", "yellow", "aborted", "notbuilt", "disabled", "blue_anim
 
 def job(folder: str, name: str, color: str) -> dict:
     full = f"{folder}/{name}" if folder else name
-    return {
+    data = {
         "_class": "hudson.model.FreeStyleProject",
         "name": name,
         "fullName": full,
         "url": f"http://jenkins/job/{full}/",
         "color": color,
     }
+    # Only freestyle-style jobs export the static dependency graph.
+    if full in STATIC_UPSTREAM or any(full in ups for ups in STATIC_UPSTREAM.values()):
+        data["upstreamProjects"] = [
+            {"fullName": up} for up in STATIC_UPSTREAM.get(full, [])
+        ]
+        data["downstreamProjects"] = [
+            {"fullName": down} for down, ups in STATIC_UPSTREAM.items() if full in ups
+        ]
+    if full in PIPELINE_JOBS:
+        data["_class"] = "org.jenkinsci.plugins.workflow.job.WorkflowJob"
+        data.pop("upstreamProjects", None)
+        data.pop("downstreamProjects", None)
+    return data
+
+
+# Job chains (Pipelines / Runs tabs). Static relations, as freestyle
+# "build other projects" / upstream triggers record them:
+STATIC_UPSTREAM = {
+    "deploy/staging": ["backend/api/main", "frontend/web/main"],
+    "tests/smoke": ["deploy/staging"],
+    "deploy/production": ["tests/e2e"],
+}
+# Pipeline jobs: no static relations; their `build job:` steps only show up
+# as upstream causes on the triggered builds.
+PIPELINE_JOBS = {
+    "tests/e2e",
+    "libs/core",
+    "backend/api/main",
+    "frontend/web/main",
+    "shop/build",
+    "shop/test",
+    "shop/deploy",
+}
+# Who triggers a job's builds, per slot k (0 = newest build): (upstream,
+# lag); upstream build = the upstream's slot k + lag. Alternatives rotate.
+TRIGGERS = {
+    "deploy/staging": [("backend/api/main", 0), ("frontend/web/main", 0)],
+    "tests/e2e": [("deploy/staging", 0)],
+    "tests/smoke": [("deploy/staging", 0)],
+    "deploy/production": [("tests/e2e", 1)],
+    "backend/api/main": [None, None, ("libs/core", 0)],  # sometimes by a lib
+    "shop/test": [("shop/build", 0)],
+    "shop/deploy": [("shop/test", 0)],
+}
+# Position in the chain: triggered builds start a few minutes after their
+# trigger (see `started_ms`).
+CHAIN_DEPTH = {
+    "libs/core": 0,
+    "backend/api/main": 1,
+    "frontend/web/main": 1,
+    "deploy/staging": 2,
+    "tests/e2e": 3,
+    "tests/smoke": 3,
+    "deploy/production": 4,
+    "shop/build": 0,
+    "shop/test": 1,
+    "shop/deploy": 2,
+}
 
 
 def folder(parent: str, name: str, children: list, cls: str = "Folder") -> dict:
@@ -92,12 +151,32 @@ def build_numbers(full_name: str, color: str) -> list:
     return [n for n in range(last - 12, last + 1) if n % 5 != 0 or n == last]
 
 
+def slot(numbers: list, number: int) -> int:
+    """0 for the newest build, 1 for the one before, ..."""
+    return len(numbers) - 1 - numbers.index(number)
+
+
+def trigger(full_name: str, k: int):
+    """(upstream job, upstream build) that triggered slot k, or None."""
+    options = TRIGGERS.get(full_name)
+    if not options or not options[k % len(options)]:
+        return None
+    upstream, lag = options[k % len(options)]
+    color = find_color(job_tree(0, 0)["jobs"], upstream)
+    numbers = build_numbers(upstream, color)
+    if k + lag >= len(numbers):
+        # Older than the upstream's builds: triggered by one that's gone.
+        return upstream, numbers[0] - 1 - (k + lag - len(numbers))
+    return upstream, numbers[-1 - k - lag]
+
+
 def build(full_name: str, color: str, number: int):
     """A plausible build of a job, or None if that build doesn't exist."""
     numbers = build_numbers(full_name, color)
     if number not in numbers:
         return None
     last = numbers[-1]
+    k = slot(numbers, number)
     running = number == last and color.endswith("_anime")
     if number == last:
         result = (
@@ -111,30 +190,57 @@ def build(full_name: str, color: str, number: int):
             if number % 7 == 0
             else "SUCCESS"
         )
-    started = (
-        SERVER_START_MS - (last - number) * 3_600_000
-    )  # fixed, so running builds progress
+    # Fixed, so running builds progress.
+    if full_name in CHAIN_DEPTH:
+        # Hourly, each chain step a few minutes after the one before.
+        # A lagging trigger (the upstream build before) shifts it back too.
+        options = TRIGGERS.get(full_name) or [None]
+        lag = (options[k % len(options)] or (None, 0))[1]
+        started = (
+            SERVER_START_MS
+            - (k + lag) * 3_600_000
+            - 1_200_000
+            + CHAIN_DEPTH[full_name] * 240_000
+        )
+    else:
+        started = SERVER_START_MS - (last - number) * 3_600_000
+    upstream = trigger(full_name, k)
+    if upstream:
+        causes = [
+            {
+                "_class": "hudson.model.Cause$UpstreamCause",
+                "shortDescription": f'Started by upstream project "{upstream[0]}" '
+                f"build number {upstream[1]}",
+                "upstreamProject": upstream[0],
+                "upstreamBuild": upstream[1],
+            }
+        ]
+    else:
+        causes = [
+            {
+                "shortDescription": "Started by user Hans"
+                if number % 2
+                else "Started by timer"
+            }
+        ]
     data = {
-        "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+        "_class": RUN_CLASS
+        if is_pipeline(full_name)
+        else "hudson.model.FreeStyleBuild",
         "number": number,
         "displayName": f"#{number}",
         "result": result,
         "building": running,
-        "timestamp": started - (150_000 if running else 600_000),
+        "timestamp": (
+            SERVER_START_MS - 150_000
+            if running
+            else started - (0 if full_name in CHAIN_DEPTH else 600_000)
+        ),
         "duration": 0 if running else 60_000 + number * 1_000,
         "estimatedDuration": 300_000,
         "description": "Release candidate" if "release" in full_name else None,
         "actions": [
-            {
-                "_class": "hudson.model.CauseAction",
-                "causes": [
-                    {
-                        "shortDescription": "Started by user Hans"
-                        if number % 2
-                        else "Started by timer"
-                    }
-                ],
-            },
+            {"_class": "hudson.model.CauseAction", "causes": causes},
             {},
         ],
         "changeSets": [
@@ -165,6 +271,45 @@ def build(full_name: str, color: str, number: int):
             }
         )
     return data
+
+
+RUN_CLASS = "org.jenkinsci.plugins.workflow.job.WorkflowRun"
+
+
+def is_pipeline(full_name: str) -> bool:
+    """Pipeline (Jenkinsfile) jobs: multibranch branches and PIPELINE_JOBS."""
+    return full_name in PIPELINE_JOBS or full_name.startswith(
+        ("backend/api/", "frontend/web/")
+    )
+
+
+def stages(full_name: str, color: str, number: int):
+    """wfapi/describe for a Pipeline run, or None (not a Pipeline run / no build)."""
+    data = build(full_name, color, number)
+    if data is None or not is_pipeline(full_name):
+        return None
+    names = ["Checkout", "Build", "Test", "Deploy"]
+    result, running = data["result"], data["building"]
+    # Where it stopped, and how that stage ended.
+    stop, how = {
+        "FAILURE": (2, "FAILED"),
+        "UNSTABLE": (2, "UNSTABLE"),
+        "ABORTED": (1, "ABORTED"),
+    }.get(result, (len(names), "SUCCESS"))
+    if running:
+        stop, how = 2, "IN_PROGRESS"
+    out = []
+    for i, name in enumerate(names):
+        if i < stop:
+            status, ms = "SUCCESS", [4_000, 62_000, 38_000, 15_000][i]
+        elif i == stop:
+            status, ms = how, 20_000 + number * 100
+        else:
+            status, ms = "NOT_EXECUTED", 0
+        out.append(
+            {"id": str(6 + 3 * i), "name": name, "status": status, "durationMillis": ms}
+        )
+    return {"id": str(number), "name": f"#{number}", "stages": out}
 
 
 def console_line(i: int) -> str:
@@ -204,18 +349,21 @@ def last_build(full_name: str, color: str):
     return build(full_name, color, numbers[-1]) if numbers else None
 
 
-def add_builds(items: list, limit: int) -> None:
-    """Give every job its newest `limit` builds, like tree=...builds[..]{0,N}."""
+def add_builds(items: list, limit: int, causes: bool) -> None:
+    """Give every job its newest `limit` builds, like tree=...builds[..]{0,N};
+    with `causes`, including their actions (for upstream causes)."""
+    fields = ("number", "result", "building", "timestamp", "duration")
+    fields += ("actions",) if causes else ()
     for item in items:
         if "jobs" in item:
-            add_builds(item["jobs"], limit)
+            add_builds(item["jobs"], limit, causes)
             continue
         numbers = build_numbers(item["fullName"], item["color"])
         item["builds"] = [
             {
                 k: v
                 for k, v in build(item["fullName"], item["color"], n).items()
-                if k in ("number", "result", "building", "timestamp", "duration")
+                if k in fields
             }
             for n in reversed(numbers[-limit:])
         ]
@@ -256,8 +404,34 @@ def job_tree(extra: int, churn_step: int) -> dict:
                 ),
             ],
         ),
+        folder(
+            "",
+            "deploy",
+            [
+                job("deploy", "staging", "blue"),
+                job("deploy", "production", "blue"),
+            ],
+        ),
         job("", "docs", "disabled"),
         job("", "infra-terraform-plan", "blue"),
+        folder("", "libs", [job("libs", "core", "red")]),
+        folder(
+            "",
+            "shop",
+            [
+                job("shop", "build", "blue"),
+                job("shop", "deploy", "blue"),
+                job("shop", "test", "blue"),
+            ],
+        ),
+        folder(
+            "",
+            "tests",
+            [
+                job("tests", "e2e", "blue_anime"),
+                job("tests", "smoke", "yellow"),
+            ],
+        ),
         folder("", "empty-folder", []),
     ]
     if extra:
@@ -272,7 +446,7 @@ def job_tree(extra: int, churn_step: int) -> dict:
             )
         )
     if churn_step:
-        target = jobs[3]  # infra-terraform-plan
+        target = jobs[4]  # infra-terraform-plan
         target["color"] = COLORS[churn_step % len(COLORS)]
     return {"_class": "hudson.model.Hudson", "jobs": jobs}
 
@@ -359,6 +533,15 @@ def main() -> None:
                         {"X-Text-Size": str(len(text))}
                         | ({"X-More-Data": "true"} if running else {}),
                     )
+                if (
+                    len(tail) == 3
+                    and tail[0].isdigit()
+                    and tail[1:] == ["wfapi", "describe"]
+                ):
+                    data = stages(full_name, color, int(tail[0]))
+                    if data is None:
+                        return self.reply(404, {"error": "no stages"})
+                    return self.reply(200, data)
                 if tail == ["lastBuild"]:
                     data = last_build(full_name, color)
                 elif tail[0].isdigit():
@@ -373,9 +556,10 @@ def main() -> None:
                 step = job_requests[0] if args.churn else 0
                 tree = job_tree(args.jobs, step)
                 query = unquote(self.path.split("?", 1)[1]) if "?" in self.path else ""
-                limit = re.search(r"builds\[[^\]]*\]\{0,(\d+)\}", query)
-                if limit:  # build history: each job's newest N builds
-                    add_builds(tree["jobs"], int(limit.group(1)))
+                # builds[...]{0,N}; the brackets may nest (actions[causes[...]]).
+                limit = re.search(r"builds\[.*\]\{0,(\d+)\}", query)
+                if limit:  # build history / runs: each job's newest N builds
+                    add_builds(tree["jobs"], int(limit.group(1)), "causes[" in query)
                 return self.reply(200, tree)
             self.reply(404, {"error": "not found"})
 

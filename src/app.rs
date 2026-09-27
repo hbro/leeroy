@@ -11,6 +11,7 @@ use crate::{
     input::TextInput,
     jenkins::{ConnectionConfig, ServerInfo},
     jobs::{Job, JobsLoad, JobsState},
+    pipelines::{PipelineData, PipelineLoad, PipelineState, RunRef, RunView},
     proxy::{ProxyEnv, SystemProxy},
     theme::{Appearance, Theme},
 };
@@ -48,6 +49,8 @@ pub enum Action {
     BuildStep(BuildStep),
     /// Build view: open the build's console output.
     OpenConsole,
+    /// Run view: switch between the tree and boxes.
+    ToggleRunView,
     /// Console: scroll sideways.
     ScrollLeft,
     ScrollRight,
@@ -87,6 +90,11 @@ pub enum Action {
         generation: u64,
         limit: usize,
         result: Result<Vec<HistoryEntry>, String>,
+    },
+    /// Outcome of [`Effect::FetchPipelines`].
+    PipelinesFetched {
+        generation: u64,
+        result: Result<PipelineData, String>,
     },
     /// Outcome of [`Effect::FetchConsole`] (the chunk from `start`).
     ConsoleFetched {
@@ -150,6 +158,12 @@ pub enum Effect {
         limit: usize,
         config: ConnectionConfig,
     },
+    /// Load job relations and recent builds' causes (Pipelines and Runs
+    /// tabs); answer with [`Action::PipelinesFetched`].
+    FetchPipelines {
+        generation: u64,
+        config: ConnectionConfig,
+    },
 }
 
 /// Tabs, selected with digit keys (`1` = first, `0` = Settings).
@@ -157,17 +171,27 @@ pub enum Effect {
 pub enum Tab {
     Jobs,
     Builds,
+    Pipelines,
+    Runs,
     Settings,
 }
 
 impl Tab {
     /// In tab-bar order.
-    pub const ALL: [Tab; 3] = [Tab::Jobs, Tab::Builds, Tab::Settings];
+    pub const ALL: [Tab; 5] = [
+        Tab::Jobs,
+        Tab::Builds,
+        Tab::Pipelines,
+        Tab::Runs,
+        Tab::Settings,
+    ];
 
     pub fn title(self) -> &'static str {
         match self {
             Tab::Jobs => "Jobs",
             Tab::Builds => "Builds",
+            Tab::Pipelines => "Pipelines",
+            Tab::Runs => "Runs",
             Tab::Settings => "Settings",
         }
     }
@@ -178,6 +202,8 @@ impl Tab {
         match self {
             Tab::Jobs => '1',
             Tab::Builds => '2',
+            Tab::Pipelines => '3',
+            Tab::Runs => '4',
             Tab::Settings => '0',
         }
     }
@@ -187,6 +213,8 @@ impl Tab {
         match self {
             Tab::Jobs => "1",
             Tab::Builds => "2",
+            Tab::Pipelines => "3",
+            Tab::Runs => "4",
             Tab::Settings => "0",
         }
     }
@@ -199,6 +227,8 @@ impl Tab {
         match self {
             Tab::Jobs => View::Jobs,
             Tab::Builds => View::Builds,
+            Tab::Pipelines => View::Pipelines,
+            Tab::Runs => View::Runs,
             Tab::Settings => View::Settings,
         }
     }
@@ -219,6 +249,12 @@ pub enum View {
     Jobs,
     /// Build history across all jobs.
     Builds,
+    /// How jobs trigger each other, as a graph.
+    Pipelines,
+    /// Runs of all pipelines.
+    Runs,
+    /// One run of a pipeline, as boxes or a tree (from Pipelines or Runs).
+    Run,
     /// A job's most recent build (within the Jobs tab).
     Build,
     /// A build's console output (within the Jobs tab).
@@ -231,6 +267,10 @@ impl View {
     pub fn tab(self) -> Option<Tab> {
         match self {
             View::Builds => Some(Tab::Builds),
+            View::Pipelines => Some(Tab::Pipelines),
+            View::Runs => Some(Tab::Runs),
+            // Opened from Pipelines unless said otherwise (see `App::tab`).
+            View::Run => Some(Tab::Pipelines),
             // Opened from the Jobs tab unless said otherwise (see `App::tab`).
             View::Jobs | View::Build | View::Console => Some(Tab::Jobs),
             View::Settings => Some(Tab::Settings),
@@ -242,6 +282,9 @@ impl View {
         match self {
             View::Jobs => Context::Jobs,
             View::Builds => Context::Builds,
+            View::Pipelines => Context::Pipelines,
+            View::Runs => Context::Runs,
+            View::Run => Context::Run,
             View::Build => Context::Build,
             View::Console => Context::Console,
             View::Settings => Context::Settings,
@@ -265,6 +308,13 @@ pub enum Context {
     BuildsFiltered,
     /// Typing the Builds tab's `/` filter.
     BuildsFilter,
+    Pipelines,
+    PipelinesFiltered,
+    PipelinesFilter,
+    Runs,
+    RunsFiltered,
+    RunsFilter,
+    Run,
     Build,
     Console,
     Settings,
@@ -276,8 +326,14 @@ impl Context {
     pub fn title(self) -> &'static str {
         match self {
             Context::Jobs | Context::JobsFiltered => "Jobs",
-            Context::JobsFilter | Context::BuildsFilter => "Filter",
+            Context::JobsFilter
+            | Context::BuildsFilter
+            | Context::PipelinesFilter
+            | Context::RunsFilter => "Filter",
             Context::Builds | Context::BuildsFiltered => "Builds",
+            Context::Pipelines | Context::PipelinesFiltered => "Pipelines",
+            Context::Runs | Context::RunsFiltered => "Runs",
+            Context::Run => "Run",
             Context::ConfirmQuit => "Quit?",
             Context::Build => "Build",
             Context::Console => "Console",
@@ -291,11 +347,20 @@ impl Context {
     pub fn closable(self) -> bool {
         match self {
             // Tabs aren't closed with Esc; they're switched with F-keys.
-            Context::Jobs | Context::Builds | Context::Settings => false,
+            Context::Jobs
+            | Context::Builds
+            | Context::Pipelines
+            | Context::Runs
+            | Context::Settings => false,
             Context::JobsFiltered
             | Context::JobsFilter
             | Context::BuildsFiltered
             | Context::BuildsFilter
+            | Context::PipelinesFiltered
+            | Context::PipelinesFilter
+            | Context::RunsFiltered
+            | Context::RunsFilter
+            | Context::Run
             | Context::ConfirmQuit
             | Context::Build
             | Context::Console
@@ -308,7 +373,11 @@ impl Context {
     pub fn captures_input(self) -> bool {
         matches!(
             self,
-            Context::EditSetting | Context::JobsFilter | Context::BuildsFilter
+            Context::EditSetting
+                | Context::JobsFilter
+                | Context::BuildsFilter
+                | Context::PipelinesFilter
+                | Context::RunsFilter
         )
     }
 
@@ -470,6 +539,10 @@ pub struct App {
     pub settings: SettingsState,
     pub jobs: JobsState,
     pub history: HistoryState,
+    /// Pipelines and Runs tabs (one shared fetch).
+    pub pipelines: PipelineState,
+    /// The open run view (with [`View::Run`]).
+    pub run: Option<RunView>,
     /// Height of the list area, recorded by the renderer: how many builds the
     /// Builds tab asks for per page.
     pub list_rows: std::cell::Cell<u16>,
@@ -511,6 +584,8 @@ impl App {
             settings,
             jobs: JobsState::default(),
             history: HistoryState::default(),
+            pipelines: PipelineState::default(),
+            run: None,
             list_rows: std::cell::Cell::new(0),
             build: None,
             console: None,
@@ -543,11 +618,18 @@ impl App {
         self.jobs.refreshing = false;
         self.history.load = HistoryLoad::NotLoaded;
         self.history.refreshing = false;
-        self.build = None;
-        self.console = None;
+        self.pipelines.load = PipelineLoad::NotLoaded;
+        self.pipelines.refreshing = false;
+        let run_origin = self.run_origin();
         if matches!(self.view, View::Build | View::Console) {
             self.view = self.build_origin();
         }
+        if self.view == View::Run {
+            self.view = run_origin;
+        }
+        self.build = None;
+        self.console = None;
+        self.run = None;
         let Some(config) = self.settings.connection_config() else {
             self.connection = ConnectionStatus::NotConfigured;
             return None;
@@ -577,6 +659,14 @@ impl App {
             Context::BuildsFilter
         } else if self.view == View::Builds && !self.history.filter.is_empty() {
             Context::BuildsFiltered
+        } else if self.view == View::Pipelines && self.pipelines.list.filter_input.is_some() {
+            Context::PipelinesFilter
+        } else if self.view == View::Pipelines && !self.pipelines.list.filter.is_empty() {
+            Context::PipelinesFiltered
+        } else if self.view == View::Runs && self.pipelines.runs.filter_input.is_some() {
+            Context::RunsFilter
+        } else if self.view == View::Runs && !self.pipelines.runs.filter.is_empty() {
+            Context::RunsFiltered
         } else {
             self.view.context()
         }
@@ -619,12 +709,67 @@ impl App {
                 if tab == Tab::Builds && self.history.load == HistoryLoad::NotLoaded {
                     return self.fetch_history(self.history_page());
                 }
+                if matches!(tab, Tab::Pipelines | Tab::Runs)
+                    && self.pipelines.load == PipelineLoad::NotLoaded
+                {
+                    return self.fetch_pipelines();
+                }
+            }
+            Action::StartFilter if self.view == View::Pipelines => {
+                let list = &mut self.pipelines.list;
+                list.filter_input = Some(TextInput::new(&list.filter));
+            }
+            Action::StartFilter if self.view == View::Runs => {
+                let runs = &mut self.pipelines.runs;
+                runs.filter_input = Some(TextInput::new(&runs.filter));
             }
             Action::StartFilter if self.view == View::Builds => {
                 self.history.filter_input = Some(TextInput::new(&self.history.filter));
             }
             Action::StartFilter => {
                 self.jobs.filter_input = Some(TextInput::new(&self.jobs.filter));
+            }
+            Action::OpenBuild if self.view == View::Pipelines => {
+                // The pipeline's latest run.
+                let pipelines = self.pipelines.visible_pipelines();
+                if let Some(p) = pipelines.get(self.pipelines.list.selected) {
+                    self.run = Some(RunView::new(
+                        p.first_job.clone(),
+                        RunRef::Latest,
+                        View::Pipelines,
+                    ));
+                    self.view = View::Run;
+                }
+            }
+            Action::OpenBuild if self.view == View::Runs => {
+                let pipelines = self.pipelines.pipelines();
+                let runs = self.pipelines.visible_runs(&pipelines);
+                if let Some(&(p, r)) = runs.get(self.pipelines.runs.selected) {
+                    let number = self.pipelines.run_number(&pipelines[p].runs[r]);
+                    self.run = Some(RunView::new(
+                        pipelines[p].first_job.clone(),
+                        RunRef::Number(number),
+                        View::Runs,
+                    ));
+                    self.view = View::Run;
+                }
+            }
+            Action::OpenBuild if self.view == View::Run => {
+                // The selected build of the run, at that number.
+                let Some((job, number)) = self.selected_run_build() else {
+                    return Vec::new();
+                };
+                self.view = View::Build;
+                let mut view = BuildView::new(job);
+                view.target = BuildRef::Number(number);
+                view.origin = View::Run;
+                self.build = Some(view);
+                return self.build_effect().into_iter().collect();
+            }
+            Action::ToggleRunView => {
+                if let Some(run) = self.run.as_mut().filter(|_| self.view == View::Run) {
+                    run.tree = !run.tree;
+                }
             }
             Action::OpenBuild if self.view == View::Builds => {
                 let Some((job, number)) = self
@@ -699,6 +844,49 @@ impl App {
                 // Moving down at the last row loads the next page.
                 if delta > 0 && was_at_end && self.history.has_more() {
                     return self.fetch_history(self.history.limit + self.history_page());
+                }
+            }
+            Action::SelectNext
+            | Action::SelectPrev
+            | Action::SelectPageDown
+            | Action::SelectPageUp
+            | Action::SelectFirst
+            | Action::SelectLast
+                if matches!(self.view, View::Pipelines | View::Runs | View::Run) =>
+            {
+                let page = self.history_page() as isize;
+                let delta = match action {
+                    Action::SelectNext => 1,
+                    Action::SelectPrev => -1,
+                    Action::SelectPageDown => page,
+                    Action::SelectPageUp => -page,
+                    Action::SelectFirst => isize::MIN / 2,
+                    _ => isize::MAX / 2,
+                };
+                let pipelines = self.pipelines.pipelines();
+                match self.view {
+                    View::Pipelines => {
+                        let len = self.pipelines.visible_pipelines().len();
+                        self.pipelines.list.move_selection(delta, len);
+                    }
+                    View::Runs => {
+                        let len = self.pipelines.visible_runs(&pipelines).len();
+                        self.pipelines.runs.move_selection(delta, len);
+                    }
+                    _ => {
+                        let Some(view) = self.run.as_ref() else {
+                            return Vec::new();
+                        };
+                        let len = self
+                            .pipelines
+                            .find_run(&pipelines, view)
+                            .map_or(0, |(p, r)| p.runs[r].builds.len());
+                        if let Some(view) = self.run.as_mut() {
+                            view.selected = (view.selected as isize + delta)
+                                .clamp(0, len.saturating_sub(1) as isize)
+                                as usize;
+                        }
+                    }
                 }
             }
             Action::SelectNext
@@ -866,10 +1054,18 @@ impl App {
             | Action::CursorHome
             | Action::CursorEnd
             | Action::ClearInput => {
-                let filtering = matches!(context, Context::JobsFilter | Context::BuildsFilter);
+                let filtering = matches!(
+                    context,
+                    Context::JobsFilter
+                        | Context::BuildsFilter
+                        | Context::PipelinesFilter
+                        | Context::RunsFilter
+                );
                 let target = match context {
                     Context::JobsFilter => self.jobs.filter_input.as_mut(),
                     Context::BuildsFilter => self.history.filter_input.as_mut(),
+                    Context::PipelinesFilter => self.pipelines.list.filter_input.as_mut(),
+                    Context::RunsFilter => self.pipelines.runs.filter_input.as_mut(),
                     _ => self.settings.editing.as_mut(),
                 };
                 if let Some(input) = target {
@@ -888,7 +1084,20 @@ impl App {
                     if filtering && input.value() != before {
                         self.jobs.selected = 0;
                         self.history.selected = 0;
+                        self.pipelines.list.selected = 0;
+                        self.pipelines.runs.selected = 0;
                     }
+                }
+            }
+            Action::ConfirmEdit if context == Context::PipelinesFilter => {
+                let list = &mut self.pipelines.list;
+                if let Some(input) = list.filter_input.take() {
+                    list.filter = input.value().trim().to_owned();
+                }
+            }
+            Action::ConfirmEdit if context == Context::RunsFilter => {
+                if let Some(input) = self.pipelines.runs.filter_input.take() {
+                    self.pipelines.runs.filter = input.value().trim().to_owned();
                 }
             }
             Action::ConfirmEdit if context == Context::BuildsFilter => {
@@ -930,6 +1139,9 @@ impl App {
                     if self.view == View::Builds {
                         effects.extend(self.fetch_history(self.history_page()));
                     }
+                    if matches!(self.view, View::Pipelines | View::Runs | View::Run) {
+                        effects.extend(self.fetch_pipelines());
+                    }
                     return effects;
                 }
             }
@@ -957,6 +1169,18 @@ impl App {
                     }
                     Err(error) => BuildLoad::Failed(error),
                 };
+            }
+            Action::BuildStep(step) if self.view == View::Run => {
+                // Another run of the same pipeline.
+                let Some(view) = self.run.as_ref() else {
+                    return Vec::new();
+                };
+                if let Some(target) = self.pipelines.step_run(view, step)
+                    && let Some(view) = self.run.as_mut()
+                {
+                    view.target = target;
+                    view.selected = 0;
+                }
             }
             Action::BuildStep(step) => {
                 let Some(build) = self.build.as_mut().filter(|_| self.view == View::Build) else {
@@ -1008,6 +1232,43 @@ impl App {
                         history.clamp_selection();
                     }
                     Err(error) => history.load = HistoryLoad::Failed(error),
+                }
+            }
+            Action::PipelinesFetched { generation, result } => {
+                if generation != self.connection_generation {
+                    return Vec::new();
+                }
+                let now = self.now;
+                // Keep the same pipeline and run selected across reloads.
+                let (previous_pipeline, previous_run) = self.selected_list_keys();
+                let state = &mut self.pipelines;
+                state.refreshing = false;
+                state.attempted_at = Some(now);
+                match result {
+                    Ok(data) => {
+                        state.data = data;
+                        state.fetched_at = Some(now);
+                        state.load = PipelineLoad::Loaded;
+                        let pipelines = state.visible_pipelines();
+                        if let Some(i) = previous_pipeline
+                            .and_then(|job| pipelines.iter().position(|p| p.first_job == job))
+                        {
+                            state.list.selected = i;
+                        }
+                        state.list.move_selection(0, pipelines.len());
+                        let all = state.pipelines();
+                        let runs = state.visible_runs(&all);
+                        if let Some(i) = previous_run.and_then(|(job, number)| {
+                            runs.iter().position(|&(p, r)| {
+                                all[p].first_job == job
+                                    && state.run_number(&all[p].runs[r]) == number
+                            })
+                        }) {
+                            state.runs.selected = i;
+                        }
+                        state.runs.move_selection(0, runs.len());
+                    }
+                    Err(error) => state.load = PipelineLoad::Failed(error),
                 }
             }
             Action::JobsFetched { generation, result } => {
@@ -1147,6 +1408,12 @@ impl App {
                 }
                 Vec::new()
             }
+            (View::Pipelines | View::Runs | View::Run, _) => {
+                if !self.pipelines.fetch_in_flight() && due(self.pipelines.attempted_at) {
+                    return self.fetch_pipelines();
+                }
+                Vec::new()
+            }
             (View::Build, Some(build)) => {
                 if !build.fetch_in_flight() && due(build.attempted_at) {
                     return self.fetch_build();
@@ -1188,6 +1455,58 @@ impl App {
         }]
     }
 
+    /// Fetch job relations and runs, unless a fetch is already in flight
+    /// (same no-pile-up rule as elsewhere).
+    fn fetch_pipelines(&mut self) -> Vec<Effect> {
+        let connected = matches!(self.connection, ConnectionStatus::Connected { .. });
+        if !connected || self.pipelines.fetch_in_flight() {
+            return Vec::new();
+        }
+        let Some(config) = self.settings.connection_config() else {
+            return Vec::new();
+        };
+        if self.pipelines.load == PipelineLoad::Loaded {
+            self.pipelines.refreshing = true;
+        } else {
+            self.pipelines.load = PipelineLoad::Loading;
+        }
+        vec![Effect::FetchPipelines {
+            generation: self.connection_generation,
+            config,
+        }]
+    }
+
+    /// First job of the selected pipeline and `(first job, number)` of the
+    /// selected run, to keep them selected when the lists reload.
+    fn selected_list_keys(&self) -> (Option<String>, Option<(String, u64)>) {
+        let state = &self.pipelines;
+        let pipeline = state
+            .visible_pipelines()
+            .get(state.list.selected)
+            .map(|p| p.first_job.clone());
+        let all = state.pipelines();
+        let run = state
+            .visible_runs(&all)
+            .get(state.runs.selected)
+            .map(|&(p, r)| (all[p].first_job.clone(), state.run_number(&all[p].runs[r])));
+        (pipeline, run)
+    }
+
+    /// `(job, number)` of the build selected in the run view.
+    pub fn selected_run_build(&self) -> Option<(String, u64)> {
+        let view = self.run.as_ref()?;
+        let pipelines = self.pipelines.pipelines();
+        let (pipeline, index) = self.pipelines.find_run(&pipelines, view)?;
+        let run = &pipeline.runs[index];
+        let build = &self.pipelines.data.builds[*run.builds.get(view.selected)?];
+        Some((build.job.clone(), build.number))
+    }
+
+    /// Where a run view goes back to.
+    fn run_origin(&self) -> View {
+        self.run.as_ref().map_or(View::Pipelines, |r| r.origin)
+    }
+
     /// Where a build view goes back to.
     fn build_origin(&self) -> View {
         self.build.as_ref().map_or(View::Jobs, |b| b.origin)
@@ -1196,8 +1515,12 @@ impl App {
     /// The tab the current view belongs to (a build view opened from the
     /// Builds tab belongs to Builds).
     pub fn tab(&self) -> Option<Tab> {
-        match self.view {
-            View::Build | View::Console => self.build_origin().tab(),
+        let view = match self.view {
+            View::Build | View::Console => self.build_origin(),
+            view => view,
+        };
+        match view {
+            View::Run => self.run_origin().tab(),
             view => view.tab(),
         }
     }
@@ -1211,6 +1534,11 @@ impl App {
             ConnectionStatus::Connected { .. } if self.view == View::Build => self.fetch_build(),
             ConnectionStatus::Connected { .. } if self.view == View::Builds => {
                 self.fetch_history(self.history.limit.max(self.history_page()))
+            }
+            ConnectionStatus::Connected { .. }
+                if matches!(self.view, View::Pipelines | View::Runs | View::Run) =>
+            {
+                self.fetch_pipelines()
             }
             ConnectionStatus::Connected { .. } => self.fetch_jobs(),
             ConnectionStatus::Connecting { .. } => Vec::new(),
@@ -1341,7 +1669,19 @@ impl App {
                 self.view = View::Build;
                 self.console = None;
             }
-            Context::Jobs | Context::Builds | Context::Settings => {}
+            Context::PipelinesFilter => self.pipelines.list.filter_input = None,
+            Context::PipelinesFiltered => self.pipelines.list.filter.clear(),
+            Context::RunsFilter => self.pipelines.runs.filter_input = None,
+            Context::RunsFiltered => self.pipelines.runs.filter.clear(),
+            Context::Run => {
+                self.view = self.run_origin();
+                self.run = None;
+            }
+            Context::Jobs
+            | Context::Builds
+            | Context::Pipelines
+            | Context::Runs
+            | Context::Settings => {}
         }
     }
 }
@@ -2020,7 +2360,9 @@ mod tests {
         assert_eq!(Tab::from_key('1'), Some(Tab::Jobs));
         assert_eq!(Tab::from_key('0'), Some(Tab::Settings));
         assert_eq!(Tab::from_key('2'), Some(Tab::Builds));
-        assert_eq!(Tab::from_key('3'), None);
+        assert_eq!(Tab::from_key('3'), Some(Tab::Pipelines));
+        assert_eq!(Tab::from_key('4'), Some(Tab::Runs));
+        assert_eq!(Tab::from_key('5'), None);
         for tab in Tab::ALL {
             assert_eq!(tab.key_label(), tab.key().to_string());
         }
@@ -2206,6 +2548,8 @@ mod tests {
             causes: vec![],
             parameters: vec![],
             changes: vec![],
+            pipeline: false,
+            stages: None,
         }
     }
 
@@ -2874,5 +3218,158 @@ mod tests {
             result: Ok(five_builds()),
         });
         assert_eq!(app.history.load, HistoryLoad::Loading);
+    }
+
+    fn pipelines_fetch(effects: &[Effect]) -> bool {
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::FetchPipelines { .. }))
+    }
+
+    fn pipeline_data() -> PipelineData {
+        crate::pipelines::parse(
+            r#"{"jobs": [
+                {"fullName": "app", "color": "blue",
+                 "downstreamProjects": [{"fullName": "deploy"}],
+                 "builds": [{"number": 3, "result": "SUCCESS", "timestamp": 1000}]},
+                {"fullName": "deploy", "color": "blue", "builds": [
+                    {"number": 9, "result": "SUCCESS", "timestamp": 2000,
+                     "actions": [{"causes": [{"upstreamProject": "app", "upstreamBuild": 3}]}]}]}
+            ]}"#,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn pipelines_and_runs_share_one_fetch() {
+        let mut app = connected_with_jobs(&["a"]);
+        assert!(pipelines_fetch(
+            &app.update(Action::SwitchTab(Tab::Pipelines))
+        ));
+        assert!(
+            !pipelines_fetch(&app.update(Action::SwitchTab(Tab::Runs))),
+            "already loading, for both tabs"
+        );
+        assert!(
+            !pipelines_fetch(&app.update(Action::Refresh)),
+            "one fetch in flight"
+        );
+        let generation = app.connection_generation;
+        app.update(Action::PipelinesFetched {
+            generation,
+            result: Ok(pipeline_data()),
+        });
+        assert_eq!(app.pipelines.load, PipelineLoad::Loaded);
+        assert!(pipelines_fetch(&app.update(Action::Refresh)), "r reloads");
+        assert!(app.pipelines.refreshing, "old data stays visible");
+    }
+
+    #[test]
+    fn pipelines_of_an_old_connection_are_ignored() {
+        let mut app = connected_with_jobs(&["a"]);
+        app.update(Action::SwitchTab(Tab::Pipelines));
+        let old = app.connection_generation;
+        app.update(Action::SwitchTab(Tab::Settings));
+        set_url(&mut app, "https://other");
+        app.update(Action::PipelinesFetched {
+            generation: old,
+            result: Ok(pipeline_data()),
+        });
+        assert_eq!(
+            app.pipelines.load,
+            PipelineLoad::NotLoaded,
+            "reset, not filled"
+        );
+    }
+
+    #[test]
+    fn runs_open_the_run_then_the_exact_build() {
+        let mut app = connected_with_jobs(&["a"]);
+        app.update(Action::SwitchTab(Tab::Runs));
+        let generation = app.connection_generation;
+        app.update(Action::PipelinesFetched {
+            generation,
+            result: Ok(pipeline_data()),
+        });
+        assert!(
+            app.update(Action::OpenBuild).is_empty(),
+            "no fetch: data is here"
+        );
+        assert_eq!(app.view, View::Run);
+        app.update(Action::SelectNext); // deploy #9, triggered by app #3
+        let effects = app.update(Action::OpenBuild);
+        assert!(effects.iter().any(|e| matches!(
+            e,
+            Effect::FetchBuild { job, which: BuildRef::Number(9), want_numbers: true, .. }
+                if job == "deploy"
+        )));
+        assert_eq!(app.tab(), Some(Tab::Runs));
+        app.update(Action::Back);
+        assert_eq!(app.view, View::Run);
+        assert!(app.run.as_ref().unwrap().tree, "tree by default");
+        app.update(Action::ToggleRunView);
+        assert!(!app.run.as_ref().unwrap().tree);
+        app.update(Action::Back);
+        assert_eq!(app.view, View::Runs);
+        assert!(app.run.is_none());
+    }
+
+    #[test]
+    fn reconnecting_leaves_the_run_view() {
+        let mut app = connected_with_jobs(&["a"]);
+        app.update(Action::SwitchTab(Tab::Pipelines));
+        let generation = app.connection_generation;
+        app.update(Action::PipelinesFetched {
+            generation,
+            result: Ok(pipeline_data()),
+        });
+        app.update(Action::OpenBuild);
+        assert_eq!(app.view, View::Run);
+        app.update(Action::SwitchTab(Tab::Settings));
+        app.update(Action::SwitchTab(Tab::Pipelines));
+        // (Switching tabs leaves the run view behind; a reconnect clears it.)
+        set_url(&mut app, "https://other");
+        assert!(app.run.is_none());
+    }
+
+    #[test]
+    fn pipelines_filter_is_typed_and_cleared() {
+        let mut app = connected_with_jobs(&["a"]);
+        app.update(Action::SwitchTab(Tab::Pipelines));
+        app.update(Action::StartFilter);
+        assert_eq!(app.context(), Context::PipelinesFilter);
+        type_str(&mut app, "dep");
+        app.update(Action::ConfirmEdit);
+        assert_eq!(app.context(), Context::PipelinesFiltered);
+        assert_eq!(app.pipelines.list.filter, "dep");
+        app.update(Action::Back);
+        assert_eq!(app.context(), Context::Pipelines, "Esc clears the filter");
+    }
+
+    #[test]
+    fn each_tab_remembers_its_filter() {
+        let mut app = connected_with_jobs(&["a"]);
+        let filters = [
+            (Tab::Jobs, "jobs"),
+            (Tab::Builds, "builds"),
+            (Tab::Pipelines, "pipes"),
+            (Tab::Runs, "runs"),
+        ];
+        for (tab, text) in filters {
+            app.update(Action::SwitchTab(tab));
+            app.update(Action::StartFilter);
+            type_str(&mut app, text);
+            app.update(Action::ConfirmEdit);
+        }
+        for (tab, text) in filters {
+            app.update(Action::SwitchTab(tab));
+            let applied = match tab {
+                Tab::Jobs => &app.jobs.filter,
+                Tab::Builds => &app.history.filter,
+                Tab::Pipelines => &app.pipelines.list.filter,
+                _ => &app.pipelines.runs.filter,
+            };
+            assert_eq!(applied, text, "{tab:?}");
+        }
     }
 }

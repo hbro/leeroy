@@ -1,3 +1,5 @@
+use std::time::SystemTime;
+
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Flex, Layout, Rect},
@@ -11,12 +13,14 @@ use ratatui::{
 
 use crate::{
     app::{App, ConnectionStatus, SettingsRow, StatusMessage, Tab, View},
-    builds::{Build, BuildLoad, BuildRef, format_duration},
+    builds::{Build, BuildLoad, BuildRef, Stage, StageStatus, format_duration},
     config::{DEFAULT_REFRESH_SECS, HEADERS_DOC, SettingKey, header_env_var, redact_url},
     console::ConsoleLoad,
     event::{Binding, GLOBAL_BINDINGS, context_bindings},
+    graph::{self, Cell as GraphCell},
     history::HistoryLoad,
     jobs::{JobStatus, JobsLoad},
+    pipelines::{PipelineLoad, RUN_BUILDS, RunStatus, run_span, run_status},
     proxy::SystemProxy,
     theme::{Appearance, Theme},
 };
@@ -37,6 +41,9 @@ pub fn render(frame: &mut Frame, app: &App) {
     match app.view {
         View::Jobs => render_jobs(frame, body, app),
         View::Builds => render_history(frame, body, app),
+        View::Pipelines => render_pipelines(frame, body, app),
+        View::Runs => render_runs(frame, body, app),
+        View::Run => render_run(frame, body, app),
         View::Build => render_build(frame, body, app),
         View::Console => render_console(frame, body, app),
         View::Settings => render_settings(frame, body, app),
@@ -418,6 +425,552 @@ fn render_history_list(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_stateful_widget(table, list_area, &mut state);
 }
 
+/// The Pipelines and Runs tabs before their data is there: not connected,
+/// loading, failed. `None` when loaded.
+fn pipelines_message(app: &App, what: &str) -> Option<Vec<Line<'static>>> {
+    let t = app.theme();
+    let hint = t.dim();
+    Some(match (&app.connection, &app.pipelines.load) {
+        (ConnectionStatus::Connected { .. }, PipelineLoad::Loaded) => return None,
+        (ConnectionStatus::Connected { .. }, PipelineLoad::Failed(error)) => vec![
+            Line::raw(""),
+            Line::styled(format!("Could not load the {what}"), Style::new().italic()),
+            Line::styled(error.clone(), Style::new().fg(t.error)),
+            Line::styled("Press r to retry", hint),
+        ],
+        (ConnectionStatus::Connected { .. }, _) => vec![
+            Line::raw(""),
+            Line::styled(format!("Loading {what}…"), Style::new().italic()),
+        ],
+        _ => vec![
+            Line::raw(""),
+            Line::styled("Not connected", Style::new().italic()),
+            Line::styled("See the Jobs tab (1) or the settings (0)", hint),
+        ],
+    })
+}
+
+/// The filter line of a tab (while typing or when applied); returns the
+/// area left for the content.
+fn filter_line(
+    frame: &mut Frame,
+    area: Rect,
+    t: &Theme,
+    input: Option<&crate::input::TextInput>,
+    applied: &str,
+) -> Rect {
+    let show = input.is_some() || !applied.is_empty();
+    let [filter_area, rest] =
+        Layout::vertical([Constraint::Length(u16::from(show)), Constraint::Min(0)]).areas(area);
+    if let Some(input) = input {
+        let mut spans = vec![Span::styled(" / ", Style::new().fg(t.highlight).bold())];
+        let shown: Vec<char> = input.value().chars().collect();
+        spans.extend(input_spans(t, &shown, input.cursor()));
+        frame.render_widget(Paragraph::new(Line::from(spans)), filter_area);
+    } else if show {
+        let line = Line::from(vec![
+            Span::styled(" filter: ", t.dim()),
+            Span::styled(applied.to_owned(), Style::new().fg(t.highlight)),
+        ]);
+        frame.render_widget(Paragraph::new(line), filter_area);
+    }
+    rest
+}
+
+/// Symbol and colour of a run status.
+fn run_status_style(t: &Theme, status: RunStatus, running: bool) -> (&'static str, Color) {
+    let color = match status {
+        RunStatus::Success => t.success,
+        RunStatus::Partial => t.highlight,
+        RunStatus::Aborted => t.neutral,
+        RunStatus::Unstable => t.warning,
+        RunStatus::Failure => t.error,
+    };
+    if running {
+        ("⟳", color)
+    } else {
+        ("●", color)
+    }
+}
+
+/// `2m 13s` from `start` to `end` (running: until now, with `…`).
+fn span_text(app: &App, start: SystemTime, end: Option<SystemTime>) -> String {
+    match end {
+        Some(end) => format_duration(end.duration_since(start).unwrap_or_default()),
+        None => format!(
+            "{}…",
+            format_duration(app.wall_now.duration_since(start).unwrap_or_default())
+        ),
+    }
+}
+
+/// One row of the Pipelines or Runs list.
+struct RunRow<'a> {
+    status: RunStatus,
+    running: bool,
+    /// Spans of the name column.
+    name: Vec<Span<'a>>,
+    start: SystemTime,
+    /// `None` while running.
+    end: Option<SystemTime>,
+}
+
+/// A list of runs as table rows: status, name, age, how long it took.
+fn run_table<'a>(app: &App, rows: Vec<RunRow<'a>>, selected: usize) -> Table<'a> {
+    let t = app.theme();
+    let table_rows = rows.into_iter().enumerate().map(|(i, row)| {
+        let RunRow {
+            status,
+            running,
+            name,
+            start,
+            end,
+        } = row;
+        let (symbol, mut color) = run_status_style(t, status, running);
+        let mut name = name;
+        if i == selected {
+            color = t.on_selected(color);
+            // Dim parts of the name would vanish on the selection.
+            for span in &mut name {
+                if let Some(fg) = span.style.fg {
+                    span.style.fg = Some(t.on_selected(fg));
+                }
+            }
+        }
+        let age = app.wall_now.duration_since(start).unwrap_or_default();
+        Row::new(vec![
+            Cell::from(Line::from(vec![
+                Span::styled(symbol, Style::new().fg(color)),
+                Span::raw(" "),
+                Span::styled(status.label(), Style::new().fg(color)),
+            ])),
+            Cell::from(Line::from(name)),
+            Cell::from(Line::from(format!("{} ago", format_age(age))).right_aligned()),
+            Cell::from(Line::from(span_text(app, start, end)).right_aligned()),
+        ])
+    });
+    Table::new(
+        table_rows,
+        [
+            Constraint::Length(10),
+            Constraint::Min(0),
+            Constraint::Length(8),
+            Constraint::Length(9),
+        ],
+    )
+    .column_spacing(1)
+    .row_highlight_style(Style::new().bg(t.selected_bg).bold())
+    .highlight_symbol("▶ ")
+    .highlight_spacing(HighlightSpacing::Always)
+}
+
+fn render_pipelines(frame: &mut Frame, area: Rect, app: &App) {
+    let t = app.theme();
+    if let Some(lines) = pipelines_message(app, "pipelines") {
+        let message = Paragraph::new(lines)
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: true })
+            .block(view_block(t, "Pipelines"));
+        return frame.render_widget(message, area);
+    }
+    let state = &app.pipelines;
+    let pipelines = state.visible_pipelines();
+    let mut title = format!("Pipelines ({})", pipelines.len());
+    if state.refreshing {
+        title.push_str(" · refreshing…");
+    }
+    let block = view_block(t, &title);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let list_area = filter_line(
+        frame,
+        inner,
+        t,
+        state.list.filter_input.as_ref(),
+        &state.list.filter,
+    );
+    app.list_rows.set(list_area.height);
+
+    if pipelines.is_empty() {
+        let filter = state.list.active_filter().trim();
+        let lines = if filter.is_empty() {
+            vec![
+                Line::raw(""),
+                Line::styled("No pipelines", Style::new().italic()),
+                Line::styled(
+                    format!("No job triggered another in its last {RUN_BUILDS} builds"),
+                    t.dim(),
+                ),
+            ]
+        } else {
+            vec![
+                Line::raw(""),
+                Line::styled(
+                    format!("No pipelines matching \"{filter}\""),
+                    Style::new().italic(),
+                ),
+            ]
+        };
+        let message = Paragraph::new(lines)
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: true });
+        return frame.render_widget(message, list_area);
+    }
+
+    let selected = state.list.selected.min(pipelines.len() - 1);
+    let rows = pipelines
+        .iter()
+        .map(|p| {
+            let run = &p.runs[0];
+            let (status, running) = run_status(&state.data, p, run);
+            let (start, end) = run_span(&state.data, run);
+            let mut name = vec![Span::raw(p.name.clone())];
+            if p.name != p.first_job {
+                name.push(Span::styled(format!("  {}", p.first_job), t.dim()));
+            }
+            RunRow {
+                status,
+                running,
+                name,
+                start,
+                end,
+            }
+        })
+        .collect();
+    let mut table_state = TableState::default().with_selected(Some(selected));
+    frame.render_stateful_widget(run_table(app, rows, selected), list_area, &mut table_state);
+}
+
+fn render_runs(frame: &mut Frame, area: Rect, app: &App) {
+    let t = app.theme();
+    if let Some(lines) = pipelines_message(app, "runs") {
+        let message = Paragraph::new(lines)
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: true })
+            .block(view_block(t, "Runs"));
+        return frame.render_widget(message, area);
+    }
+    let state = &app.pipelines;
+    let pipelines = state.pipelines();
+    let runs = state.visible_runs(&pipelines);
+    let mut title = format!("Runs ({})", runs.len());
+    if state.refreshing {
+        title.push_str(" · refreshing…");
+    }
+    let block = view_block(t, &title);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let list_area = filter_line(
+        frame,
+        inner,
+        t,
+        state.runs.filter_input.as_ref(),
+        &state.runs.filter,
+    );
+    app.list_rows.set(list_area.height);
+
+    if runs.is_empty() {
+        let filter = state.runs.active_filter().trim();
+        let lines = if filter.is_empty() {
+            vec![
+                Line::raw(""),
+                Line::styled("No runs", Style::new().italic()),
+                Line::styled(
+                    format!("None of the last {RUN_BUILDS} builds of any job triggered another"),
+                    t.dim(),
+                ),
+            ]
+        } else {
+            vec![
+                Line::raw(""),
+                Line::styled(
+                    format!("No runs matching \"{filter}\""),
+                    Style::new().italic(),
+                ),
+            ]
+        };
+        let message = Paragraph::new(lines)
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: true });
+        return frame.render_widget(message, list_area);
+    }
+
+    let selected = state.runs.selected.min(runs.len() - 1);
+    let rows = runs
+        .iter()
+        .map(|&(p, r)| {
+            let pipeline = &pipelines[p];
+            let run = &pipeline.runs[r];
+            let (status, running) = run_status(&state.data, pipeline, run);
+            let (start, end) = run_span(&state.data, run);
+            let name = vec![
+                Span::raw(pipeline.name.clone()),
+                Span::styled(format!(" #{}", state.run_number(run)), t.dim()),
+            ];
+            RunRow {
+                status,
+                running,
+                name,
+                start,
+                end,
+            }
+        })
+        .collect();
+    let mut table_state = TableState::default().with_selected(Some(selected));
+    frame.render_stateful_widget(run_table(app, rows, selected), list_area, &mut table_state);
+}
+
+/// Status symbol and colour of a build in a run.
+fn build_symbol(t: &Theme, build: &crate::pipelines::RunBuild) -> (&'static str, Color) {
+    if build.building {
+        ("⟳", t.warning)
+    } else {
+        status_symbol(t, build.result.unwrap_or(JobStatus::Unknown))
+    }
+}
+
+fn render_run(frame: &mut Frame, area: Rect, app: &App) {
+    let t = app.theme();
+    let Some(view) = &app.run else {
+        return;
+    };
+    if let Some(lines) = pipelines_message(app, "run") {
+        let message = Paragraph::new(lines)
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: true })
+            .block(view_block(t, "Run"));
+        return frame.render_widget(message, area);
+    }
+    let state = &app.pipelines;
+    let pipelines = state.pipelines();
+    let Some((pipeline, index)) = state.find_run(&pipelines, view) else {
+        let lines = vec![
+            Line::raw(""),
+            Line::styled("This run is no longer loaded", Style::new().italic()),
+            Line::styled(
+                format!(
+                    "Only runs started within the last {RUN_BUILDS} builds of a job are \
+                     shown: ←/→ to move on, End for the latest"
+                ),
+                t.dim(),
+            ),
+        ];
+        let message = Paragraph::new(lines)
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: true })
+            .block(view_block(t, &view.first_job));
+        return frame.render_widget(message, area);
+    };
+    let run = &pipeline.runs[index];
+    let (status, running) = run_status(&state.data, pipeline, run);
+    let mut title = format!(
+        "{} · #{} · {} of {} · {}",
+        pipeline.name,
+        state.run_number(run),
+        pipeline.runs.len() - index,
+        pipeline.runs.len(),
+        status.label()
+    );
+    if running {
+        title.push_str(" · running");
+    }
+    if state.refreshing {
+        title.push_str(" · refreshing…");
+    }
+    let selected = view.selected.min(run.builds.len() - 1);
+    let inner = view_block(t, "").inner(area);
+
+    if view.tree {
+        frame.render_widget(view_block(t, &title), area);
+        let rows = run
+            .builds
+            .iter()
+            .zip(&run.prefixes)
+            .enumerate()
+            .map(|(i, (&b, prefix))| {
+                let build = &state.data.builds[b];
+                let (symbol, mut color) = build_symbol(t, build);
+                let mut dim = t.dim;
+                if i == selected {
+                    color = t.on_selected(color);
+                    dim = t.on_selected(dim);
+                }
+                let age = app
+                    .wall_now
+                    .duration_since(build.started)
+                    .unwrap_or_default();
+                let took = if build.building {
+                    format!("{}…", format_duration(age))
+                } else {
+                    format_duration(build.duration)
+                };
+                Row::new(vec![
+                    Cell::from(Line::from(vec![
+                        Span::styled(prefix.clone(), Style::new().fg(dim)),
+                        Span::styled(symbol, Style::new().fg(color)),
+                        Span::raw(" "),
+                        Span::raw(build.job.clone()),
+                        Span::styled(format!(" #{}", build.number), Style::new().fg(dim)),
+                    ])),
+                    Cell::from(Line::from(format!("{} ago", format_age(age))).right_aligned()),
+                    Cell::from(Line::from(took).right_aligned()),
+                ])
+            });
+        let table = Table::new(
+            rows,
+            [
+                Constraint::Min(0),
+                Constraint::Length(8),
+                Constraint::Length(9),
+            ],
+        )
+        .column_spacing(1)
+        .row_highlight_style(Style::new().bg(t.selected_bg).bold())
+        .highlight_symbol("▶ ")
+        .highlight_spacing(HighlightSpacing::Always);
+        let mut table_state = TableState::default().with_selected(Some(selected));
+        return frame.render_stateful_widget(table, inner, &mut table_state);
+    }
+
+    // Boxes: one per build, stacked like the tree, each under the build that
+    // triggered it.
+    let labels: Vec<String> = run
+        .builds
+        .iter()
+        .map(|&b| {
+            let build = &state.data.builds[b];
+            format!("{} #{}", build.job, build.number)
+        })
+        .collect();
+    let widths: Vec<usize> = labels.iter().map(|l| l.chars().count() + 2).collect();
+    let layout = graph::tree_layout(&widths, &run.parents);
+    let boxes: Vec<(String, &'static str, Color)> = run
+        .builds
+        .iter()
+        .zip(labels)
+        .map(|(&b, label)| {
+            let (symbol, color) = build_symbol(t, &state.data.builds[b]);
+            (label, symbol, color)
+        })
+        .collect();
+    let more = paint_boxes(frame, inner, t, &layout, &boxes, selected, &view.scroll);
+    if !more.is_empty() {
+        title.push_str(&format!(" · more {more}"));
+    }
+    frame.render_widget(view_block(t, &title), area);
+}
+
+/// Draw a box layout into `area`, scrolled so box `selected` is fully
+/// visible (the position is kept in `scroll`). Boxes are `(label, symbol,
+/// status colour)`; borders take the status colour. Returns the directions
+/// in which the drawing continues off screen (e.g. `"→↓"`).
+fn paint_boxes(
+    frame: &mut Frame,
+    area: Rect,
+    t: &Theme,
+    layout: &graph::Layout,
+    boxes: &[(String, &'static str, Color)],
+    selected: usize,
+    scroll: &std::cell::Cell<(usize, usize)>,
+) -> String {
+    let (view_w, view_h) = (usize::from(area.width), usize::from(area.height));
+    let (mut sx, mut sy) = scroll.get();
+    if let Some(b) = layout.boxes.get(selected) {
+        let (bx, by, bw, bh) = (b.x, b.y, b.width, graph::BOX_HEIGHT);
+        if bx + bw > sx + view_w {
+            sx = (bx + bw).saturating_sub(view_w);
+        }
+        if bx < sx {
+            sx = bx;
+        }
+        if by + bh > sy + view_h {
+            sy = (by + bh).saturating_sub(view_h);
+        }
+        if by < sy {
+            sy = by;
+        }
+    }
+    sx = sx.min(layout.width.saturating_sub(view_w));
+    sy = sy.min(layout.height.saturating_sub(view_h));
+    scroll.set((sx, sy));
+
+    let edge = t.dim();
+    let mut grid: Vec<Vec<(char, Style)>> = layout
+        .cells
+        .iter()
+        .map(|row| {
+            row.iter()
+                .map(|cell| match *cell {
+                    GraphCell::Empty => (' ', Style::new()),
+                    GraphCell::Line(dirs) => (graph::line_char(dirs), edge),
+                    GraphCell::Arrow => ('▶', edge),
+                    GraphCell::Border { node, dirs } => {
+                        let mut style = Style::new().fg(boxes[node].2);
+                        if node == selected {
+                            style = style.bold();
+                        }
+                        (graph::line_char(dirs), style)
+                    }
+                })
+                .collect()
+        })
+        .collect();
+    for (i, b) in layout.boxes.iter().enumerate() {
+        let (label, symbol, color) = &boxes[i];
+        let row = &mut grid[b.y + 1];
+        let base = if i == selected {
+            Style::new().bg(t.selected_bg).bold()
+        } else {
+            Style::new()
+        };
+        // The inside of the box, padding included, so the selection fills it.
+        for cell in &mut row[b.x + 1..b.x + b.width - 1] {
+            *cell = (' ', base);
+        }
+        let color = if i == selected {
+            t.on_selected(*color)
+        } else {
+            *color
+        };
+        row[b.x + 2] = (symbol.chars().next().unwrap_or(' '), base.fg(color));
+        for (dx, c) in label.chars().enumerate() {
+            row[b.x + 4 + dx] = (c, base);
+        }
+    }
+    let lines: Vec<Line> = grid
+        .iter()
+        .skip(sy)
+        .take(view_h)
+        .map(|row| {
+            let mut spans: Vec<Span> = Vec::new();
+            let mut text = String::new();
+            let mut style = Style::new();
+            for &(c, st) in row.iter().skip(sx).take(view_w) {
+                if st != style && !text.is_empty() {
+                    spans.push(Span::styled(std::mem::take(&mut text), style));
+                }
+                style = st;
+                text.push(c);
+            }
+            if !text.is_empty() {
+                spans.push(Span::styled(text, style));
+            }
+            Line::from(spans)
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines), area);
+    [
+        (sx > 0, '←'),
+        (sx + view_w < layout.width, '→'),
+        (sy > 0, '↑'),
+        (sy + view_h < layout.height, '↓'),
+    ]
+    .iter()
+    .filter(|(more, _)| *more)
+    .map(|(_, arrow)| *arrow)
+    .collect()
+}
+
 fn render_build(frame: &mut Frame, area: Rect, app: &App) {
     let Some(view) = &app.build else {
         return;
@@ -515,6 +1068,14 @@ fn render_build(frame: &mut Frame, area: Rect, app: &App) {
             label("Duration"),
             Span::raw(format_duration(build.duration)),
         ]));
+    }
+    if let Some(stages) = build.stages.as_ref().filter(|s| !s.is_empty()) {
+        let width = usize::from(inner.width).saturating_sub(13).max(20);
+        for (i, line) in stage_lines(t, stages, width).into_iter().enumerate() {
+            let mut spans = vec![label(if i == 0 { "Stages" } else { "" })];
+            spans.extend(line);
+            lines.push(Line::from(spans));
+        }
     }
     for (i, cause) in build.causes.iter().enumerate() {
         let name = if i == 0 { "Cause" } else { "" };
@@ -655,6 +1216,48 @@ fn result_span(t: &Theme, build: &Build) -> Span<'static> {
         }
         None => Span::styled("unknown", t.dim()),
     }
+}
+
+/// Stages as a chain, `● Checkout 4s ─▶ ✕ Test 38s ─▶ ○ Deploy`, wrapped
+/// to `width` columns (a stage is never split).
+fn stage_lines(t: &Theme, stages: &[Stage], width: usize) -> Vec<Vec<Span<'static>>> {
+    let mut lines: Vec<Vec<Span<'static>>> = vec![Vec::new()];
+    let mut used = 0;
+    for (i, stage) in stages.iter().enumerate() {
+        let (symbol, color) = match stage.status {
+            StageStatus::Success => ("●", t.success),
+            StageStatus::Failed => ("✕", t.error),
+            StageStatus::Unstable => ("●", t.warning),
+            StageStatus::Aborted => ("●", t.neutral),
+            StageStatus::Running => ("⟳", t.warning),
+            StageStatus::Paused => ("⏸", t.warning),
+            StageStatus::NotRun | StageStatus::Unknown => ("○", t.dim),
+        };
+        let mut text = stage.name.clone();
+        let ran = !matches!(stage.status, StageStatus::NotRun | StageStatus::Unknown);
+        if ran && !stage.duration.is_zero() {
+            text.push(' ');
+            text.push_str(&format_duration(stage.duration));
+        }
+        if stage.status == StageStatus::Paused {
+            text.push_str(" (waiting for input)");
+        }
+        let arrow = if i == 0 { "" } else { " ─▶ " };
+        let piece = arrow.chars().count() + 2 + text.chars().count();
+        if used > 0 && used + piece > width {
+            lines.push(Vec::new());
+            used = 0;
+        }
+        let line = lines.last_mut().expect("never empty");
+        if used > 0 {
+            line.push(Span::styled(arrow, t.dim()));
+        }
+        let name_style = if ran { Style::new() } else { t.dim() };
+        line.push(Span::styled(format!("{symbol} "), Style::new().fg(color)));
+        line.push(Span::styled(text, name_style));
+        used += piece;
+    }
+    lines
 }
 
 /// `████████░░░░░░░░ 50%`, or full and red once past the estimate.
@@ -880,7 +1483,13 @@ fn binding_spans(bindings: &[Binding], key_style: Style) -> Vec<Span<'static>> {
 fn render_context_bar(frame: &mut Frame, area: Rect, app: &App) {
     // The selection gray as background, hotkeys in the active tab's colour.
     let t = app.theme();
-    let spans = binding_spans(context_bindings(app.context()), t.on_accent);
+    // Navigation keys are left to the help popup.
+    let bindings: Vec<Binding> = context_bindings(app.context())
+        .iter()
+        .copied()
+        .filter(|b| b.in_bar)
+        .collect();
+    let spans = binding_spans(&bindings, t.on_accent);
     frame.render_widget(Paragraph::new(Line::from(spans)).style(t.context_bar), area);
 }
 
@@ -913,6 +1522,11 @@ fn refresh_status(app: &App) -> Line<'static> {
             app.history.fetch_in_flight(),
             app.history.fetched_at,
             matches!(app.history.load, HistoryLoad::Failed(_)),
+        ),
+        (View::Pipelines | View::Runs | View::Run, _) => (
+            app.pipelines.fetch_in_flight(),
+            app.pipelines.fetched_at,
+            matches!(app.pipelines.load, PipelineLoad::Failed(_)),
         ),
         (View::Build, Some(build)) => (
             build.fetch_in_flight(),
@@ -999,14 +1613,20 @@ fn render_help(frame: &mut Frame, area: Rect, app: &App) {
     lines.extend(rows(GLOBAL_BINDINGS));
     lines.push(Line::raw(""));
     lines.push(section("Tabs"));
-    let tab_bindings: Vec<Binding> = Tab::ALL
-        .iter()
-        .map(|tab| Binding {
-            key: tab.key_label(),
-            desc: tab.title(),
-        })
-        .collect();
-    lines.extend(rows(&tab_bindings));
+    // Two per row: the popup has to fit on a 24-line terminal.
+    for pair in Tab::ALL.chunks(2) {
+        let mut spans = Vec::new();
+        for (i, tab) in pair.iter().enumerate() {
+            let key = if i == 0 {
+                format!("{:>8}", tab.key_label())
+            } else {
+                format!("{:>3}", tab.key_label())
+            };
+            spans.push(Span::styled(key, key_style));
+            spans.push(Span::raw(format!("  {:<11}", tab.title())));
+        }
+        lines.push(Line::from(spans));
+    }
     let view_bindings = context_bindings(view_context);
     if !view_bindings.is_empty() {
         lines.push(Line::raw(""));

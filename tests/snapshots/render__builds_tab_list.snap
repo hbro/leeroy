@@ -3,7 +3,7 @@ source: tests/render.rs
 expression: screen
 ---
 " Leeroy  ● https://ci.example.com · Jenkins 2.504.1 · me       h/?  help   ⟳ 0s "
-" 1 Jobs   2 Builds                                                   0 Settings "
+" 1 Jobs   2 Builds   3 Pipelines   4 Runs                            0 Settings "
 "Builds (5 newest) · ↓ at the end loads more ────────────────────────────────────"
 "▶ ⟳ running   backend/api/release-1.2 #46                       2m ago   2m 30s…"
 "  ● success   backend/api/main #56                             10m ago    1m 35s"
@@ -25,4 +25,4 @@ expression: screen
 "                                                                                "
 "                                                                                "
 "────────────────────────────────────────────────────────────────────────────────"
-" ↑/↓  select   Enter  open build   /  filter                                    "
+" Enter  open build   /  filter                                                  "

@@ -11,10 +11,26 @@ use crate::{
 pub struct Binding {
     pub key: &'static str,
     pub desc: &'static str,
+    /// Shown in the context bar; navigation keys everyone tries anyway
+    /// (arrows, Home/End, PgUp/PgDn) are only listed in the help popup.
+    pub in_bar: bool,
 }
 
 const fn bind(key: &'static str, desc: &'static str) -> Binding {
-    Binding { key, desc }
+    Binding {
+        key,
+        desc,
+        in_bar: true,
+    }
+}
+
+/// A navigation key: in the help popup, not in the context bar.
+const fn nav(key: &'static str, desc: &'static str) -> Binding {
+    Binding {
+        key,
+        desc,
+        in_bar: false,
+    }
 }
 
 /// Bindings that work everywhere (bottom bar), except while typing text.
@@ -29,12 +45,12 @@ pub const GLOBAL_BINDINGS: &[Binding] = &[
 /// Bindings that only apply in the given context (context bar).
 pub fn context_bindings(context: Context) -> &'static [Binding] {
     const JOBS: &[Binding] = &[
-        bind("↑/↓", "select"),
+        nav("↑/↓", "select"),
         bind("Enter", "last build"),
         bind("/", "filter"),
     ];
     const JOBS_FILTERED: &[Binding] = &[
-        bind("↑/↓", "select"),
+        nav("↑/↓", "select"),
         bind("Enter", "last build"),
         bind("/", "filter"),
         bind("Esc", "clear filter"),
@@ -42,40 +58,71 @@ pub fn context_bindings(context: Context) -> &'static [Binding] {
     // Ordered by importance: at 80 columns the last one may be cut off.
     const BUILD: &[Binding] = &[
         bind("←/→", "older/newer"),
-        bind("Home/End", "first/last"),
+        nav("Home/End", "first/last"),
         bind("c", "console"),
         bind("Esc", "back"),
-        bind("↑/↓", "scroll"),
+        nav("↑/↓", "scroll"),
     ];
     const CONSOLE: &[Binding] = &[
-        bind("↑/↓", "line"),
-        bind("PgUp/PgDn", "page"),
-        bind("Home/End", "top/bottom"),
+        nav("↑/↓", "line"),
+        nav("PgUp/PgDn", "page"),
+        nav("Home/End", "top/bottom"),
         bind("c/Esc", "back"),
         bind("←/→", "sideways"),
     ];
     const BUILDS: &[Binding] = &[
-        bind("↑/↓", "select"),
+        nav("↑/↓", "select"),
         bind("Enter", "open build"),
         bind("/", "filter"),
     ];
     const BUILDS_FILTERED: &[Binding] = &[
-        bind("↑/↓", "select"),
+        nav("↑/↓", "select"),
         bind("Enter", "open build"),
         bind("/", "filter"),
         bind("Esc", "clear filter"),
     ];
+    const PIPELINES: &[Binding] = &[
+        nav("↑/↓", "select"),
+        bind("Enter", "latest run"),
+        bind("/", "filter"),
+    ];
+    const PIPELINES_FILTERED: &[Binding] = &[
+        nav("↑/↓", "select"),
+        bind("Enter", "latest run"),
+        bind("/", "filter"),
+        bind("Esc", "clear filter"),
+    ];
+    const RUNS: &[Binding] = &[
+        nav("↑/↓", "select"),
+        bind("Enter", "open run"),
+        bind("/", "filter"),
+    ];
+    const RUNS_FILTERED: &[Binding] = &[
+        nav("↑/↓", "select"),
+        bind("Enter", "open run"),
+        bind("/", "filter"),
+        bind("Esc", "clear filter"),
+    ];
+    // Ordered by importance: at 80 columns the last one may be cut off.
+    const RUN: &[Binding] = &[
+        bind("←/→", "older/newer"),
+        bind("v", "tree/boxes"),
+        bind("Enter", "open build"),
+        bind("Esc", "back"),
+        nav("↑/↓", "select"),
+        nav("Home/End", "first/last"),
+    ];
     const JOBS_FILTER: &[Binding] = &[
         bind("Enter", "apply"),
         bind("Esc", "cancel"),
-        bind("↑/↓", "select"),
+        nav("↑/↓", "select"),
         bind("C-u", "clear"),
     ];
-    const SETTINGS: &[Binding] = &[bind("↑/↓", "select"), bind("Enter", "edit/toggle")];
+    const SETTINGS: &[Binding] = &[nav("↑/↓", "select"), bind("Enter", "edit/toggle")];
     const EDIT: &[Binding] = &[
         bind("Enter", "save"),
         bind("Esc", "cancel"),
-        bind("↑/↓", "save & move"),
+        nav("↑/↓", "save & move"),
         bind("←/→", "cursor"),
         bind("C-u", "clear"),
     ];
@@ -85,9 +132,17 @@ pub fn context_bindings(context: Context) -> &'static [Binding] {
         Context::ConfirmQuit => CONFIRM_QUIT,
         Context::Jobs => JOBS,
         Context::JobsFiltered => JOBS_FILTERED,
-        Context::JobsFilter | Context::BuildsFilter => JOBS_FILTER,
+        Context::JobsFilter
+        | Context::BuildsFilter
+        | Context::PipelinesFilter
+        | Context::RunsFilter => JOBS_FILTER,
         Context::Builds => BUILDS,
         Context::BuildsFiltered => BUILDS_FILTERED,
+        Context::Runs => RUNS,
+        Context::RunsFiltered => RUNS_FILTERED,
+        Context::Run => RUN,
+        Context::Pipelines => PIPELINES,
+        Context::PipelinesFiltered => PIPELINES_FILTERED,
         Context::Build => BUILD,
         Context::Console => CONSOLE,
         Context::Settings => SETTINGS,
@@ -162,8 +217,30 @@ pub fn map_key(app: &App, key: KeyEvent) -> Option<Action> {
         (Context::Settings, KeyCode::Down | KeyCode::Char('j')) => Some(Action::SelectNext),
         (Context::Settings, KeyCode::Up | KeyCode::Char('k')) => Some(Action::SelectPrev),
         (Context::Settings, KeyCode::Enter) => Some(Action::StartEdit),
+        (Context::Run, code) => match code {
+            KeyCode::Left => Some(Action::BuildStep(BuildStep::Older)),
+            KeyCode::Right => Some(Action::BuildStep(BuildStep::Newer)),
+            KeyCode::Home => Some(Action::BuildStep(BuildStep::First)),
+            KeyCode::End => Some(Action::BuildStep(BuildStep::Last)),
+            KeyCode::Down | KeyCode::Char('j') => Some(Action::SelectNext),
+            KeyCode::Up | KeyCode::Char('k') => Some(Action::SelectPrev),
+            KeyCode::PageDown => Some(Action::SelectPageDown),
+            KeyCode::PageUp => Some(Action::SelectPageUp),
+            KeyCode::Char('g') => Some(Action::SelectFirst),
+            KeyCode::Char('G') => Some(Action::SelectLast),
+            KeyCode::Char('v') => Some(Action::ToggleRunView),
+            KeyCode::Enter => Some(Action::OpenBuild),
+            _ => None,
+        },
         (
-            Context::Jobs | Context::JobsFiltered | Context::Builds | Context::BuildsFiltered,
+            Context::Jobs
+            | Context::JobsFiltered
+            | Context::Builds
+            | Context::BuildsFiltered
+            | Context::Pipelines
+            | Context::PipelinesFiltered
+            | Context::Runs
+            | Context::RunsFiltered,
             code,
         ) => match code {
             KeyCode::Down | KeyCode::Char('j') => Some(Action::SelectNext),
@@ -213,7 +290,7 @@ mod tests {
     use super::*;
     use crate::app::View;
 
-    const ALL_CONTEXTS: [Context; 12] = [
+    const ALL_CONTEXTS: [Context; 19] = [
         Context::ConfirmQuit,
         Context::Jobs,
         Context::JobsFiltered,
@@ -221,6 +298,13 @@ mod tests {
         Context::Builds,
         Context::BuildsFiltered,
         Context::BuildsFilter,
+        Context::Pipelines,
+        Context::PipelinesFiltered,
+        Context::PipelinesFilter,
+        Context::Runs,
+        Context::RunsFiltered,
+        Context::RunsFilter,
+        Context::Run,
         Context::Build,
         Context::Console,
         Context::Settings,
@@ -259,6 +343,32 @@ mod tests {
             Context::Console => {
                 app.view = View::Console;
                 app.console = Some(crate::console::ConsoleView::new("job".into(), 1));
+            }
+            Context::Pipelines => app.view = View::Pipelines,
+            Context::PipelinesFiltered => {
+                app.view = View::Pipelines;
+                app.pipelines.list.filter = "api".into();
+            }
+            Context::PipelinesFilter => {
+                app.view = View::Pipelines;
+                app.pipelines.list.filter_input = Some(Default::default());
+            }
+            Context::Runs => app.view = View::Runs,
+            Context::RunsFiltered => {
+                app.view = View::Runs;
+                app.pipelines.runs.filter = "api".into();
+            }
+            Context::RunsFilter => {
+                app.view = View::Runs;
+                app.pipelines.runs.filter_input = Some(Default::default());
+            }
+            Context::Run => {
+                app.view = View::Run;
+                app.run = Some(crate::pipelines::RunView::new(
+                    "job".into(),
+                    crate::pipelines::RunRef::Latest,
+                    View::Pipelines,
+                ));
             }
             Context::Settings => app.view = View::Settings,
             Context::EditSetting => {
@@ -315,7 +425,7 @@ mod tests {
                 Some(Action::SwitchTab(Tab::Settings)),
                 "{context:?}"
             );
-            assert_eq!(map_key(&app, key(KeyCode::Char('3'))), None, "no such tab");
+            assert_eq!(map_key(&app, key(KeyCode::Char('5'))), None, "no such tab");
             assert_eq!(map_key(&app, key(KeyCode::F(1))), None, "F-keys unused");
         }
         assert_eq!(

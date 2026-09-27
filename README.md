@@ -13,6 +13,14 @@ A build's details, here a running one with its progress:
 
 ![Build details of a running build](docs/screenshots/build.png)
 
+Pipelines (jobs that trigger other jobs) with the status of their latest run:
+
+![Pipelines tab: each pipeline with its latest run's status](docs/screenshots/pipelines.png)
+
+A run: the builds it triggered, as a tree or (with `v`, shown here) as boxes:
+
+![Run view: a pipeline's latest run as boxes](docs/screenshots/run.png)
+
 ## Installing
 
 Download the archive for your platform from the
@@ -192,6 +200,8 @@ Content lives in tabs, selected with the digit keys shown in the tab bar:
 | --- | --- |
 | `1` | Jobs |
 | `2` | Builds (build history) |
+| `3` | Pipelines |
+| `4` | Runs (of all pipelines) |
 | `0` | Settings (far right of the tab bar) |
 
 Global keys, available everywhere except while typing in a field (the full list
@@ -230,7 +240,9 @@ retried after a full interval, never in a tight loop.
 `Enter` on a job shows its most recent build: result, when it started, how long
 it took, what triggered it, parameters, description and the SCM changes it
 included. A running build shows its elapsed time against Jenkins' estimate as a
-progress bar. `r` and auto-refresh re-fetch the build while this view is open (so
+progress bar. For a Pipeline (Jenkinsfile) build, its stages are shown in order,
+`● Checkout 4s ─▶ ● Build 1m 02s ─▶ ✕ Test 38s ─▶ ○ Deploy`, when Jenkins has the
+Pipeline Stage View plugin (its `wfapi`); without it the section is left out. `r` and auto-refresh re-fetch the build while this view is open (so
 a running build updates live), and the header's `⟳` age refers to it.
 
 | Key | Action |
@@ -275,6 +287,57 @@ the number of rows that fit on your screen, and merges them. That's exact for th
 *N* rows shown. Moving down past the last row loads the next screenful (again one
 request). Filtering by job name or `#number` is complete without extra requests;
 filtering by result (e.g. "failed") only searches what's loaded.
+
+### Pipelines
+
+A pipeline is a job whose own builds (not triggered by another job) trigger
+other jobs, e.g. an SCM-triggered `app/build` that starts `app/deploy`, which
+starts `app/e2e`. The tab lists every pipeline with the status of its latest
+run, when that started and how long it took (`…` while running). It's named
+after the common prefix of its jobs (`app` for `app/build`, `app/deploy`, …, cut
+at `/`, `-`, `_` or `.`), or after its first job when there's none or two
+pipelines would share it.
+
+A run's status: **failure**, **unstable** or **aborted** if any of its builds
+ended that way (the worst wins); otherwise **success** when every part of the
+pipeline (every job it can trigger) has a successful build in the run, and
+**partial** while some part hasn't (still running, or not reached). `⟳` marks a
+run that's still going.
+
+| Key | Action |
+| --- | --- |
+| `↑/↓` `j/k`, `PgUp/PgDn`, `g/G` | move |
+| `Enter` | open the latest run |
+| `/` | filter by name |
+
+Leeroy finds the relations in two places, because Jenkins records them in two
+incomplete ways: the job configuration (freestyle "build other projects" and
+`upstream` triggers) and the *upstream cause* of every triggered build (which
+also covers a Jenkinsfile's `build job:` step). One request asks every job for
+both, looking at its last 20 builds, so runs older than that aren't shown.
+
+### Runs
+
+Every run of every pipeline, newest first, named like its pipeline plus the
+number of the build that started it (`app #12`). `Enter` opens it in the run
+view; `/` filters by pipeline name or any `job #number` in the run.
+
+### Run view
+
+One run as a tree: every build under the build that triggered it, with when it
+started and how long it took. `v` switches to boxes, stacked the same way (each
+indented under its trigger, with arrows into it, borders in the build's status
+colour) and back. When the boxes don't fit, the view scrolls to keep the
+selected one in sight and the title says where there's more (`more ↓`).
+
+| Key | Action |
+| --- | --- |
+| `←` / `→` | older / newer run of the pipeline |
+| `Home` / `End` | first (oldest loaded) / latest run |
+| `v` | tree ⇄ boxes |
+| `↑/↓` `j/k` | select a build |
+| `Enter` | open the selected build (details, console with `c`) |
+| `Esc` | back to the list |
 
 ## Development
 

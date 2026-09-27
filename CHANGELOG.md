@@ -10,6 +10,18 @@ A release's section is used as its GitHub release notes.
 
 ## [Unreleased]
 
+### Added
+
+- Pipelines tab: every job that triggers others, named by its jobs' common
+  prefix, with the status of its latest run (success, partial, unstable,
+  aborted, failure). Relations come from both the job configuration and the
+  builds' upstream causes, so Jenkinsfile `build job:` steps count too.
+- Runs tab: every run of every pipeline, newest first.
+- Run view (Enter in either tab): the run's builds as a tree or (`v`) as
+  stacked boxes, older/newer runs with `←`/`→`, Enter opens a build.
+- Build view: the stages of Pipeline builds, when Jenkins has the Pipeline Stage
+  View plugin.
+
 ## [0.2.0] - 2026-09-26
 
 ### Added

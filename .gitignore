@@ -2,3 +2,4 @@ target/
 result
 .direnv/
 *.snap.new
+__pycache__/

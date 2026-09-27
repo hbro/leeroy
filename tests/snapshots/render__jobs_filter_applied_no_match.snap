@@ -3,7 +3,7 @@ source: tests/render.rs
 expression: render(&app).backend()
 ---
 " Leeroy  ● https://ci.example.com · Jenkins 2.504.1 · me       h/?  help   ⟳ 0s "
-" 1 Jobs   2 Builds                                                   0 Settings "
+" 1 Jobs   2 Builds   3 Pipelines   4 Runs                            0 Settings "
 "Jobs (0/6) ─────────────────────────────────────────────────────────────────────"
 " filter: nope                                                                   "
 "                                                                                "
@@ -25,4 +25,4 @@ expression: render(&app).backend()
 "                                                                                "
 "                                                                                "
 "────────────────────────────────────────────────────────────────────────────────"
-" ↑/↓  select   Enter  last build   /  filter   Esc  clear filter                "
+" Enter  last build   /  filter   Esc  clear filter                              "

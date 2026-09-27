@@ -3,7 +3,7 @@ source: tests/render.rs
 expression: screen
 ---
 " Leeroy  ○ not connected                                              h/?  help "
-" 1 Jobs   2 Builds                                                   0 Settings "
+" 1 Jobs   2 Builds   3 Pipelines   4 Runs                            0 Settings "
 "Settings ───────────────────────────────────────────────────────────────────────"
 "   Config file       /home/user/.config/leeroy/config.toml                      "
 "                                                                                "
@@ -25,4 +25,4 @@ expression: screen
 "   authentication.                                                              "
 "   Edit as "Name: value"; clear the field to remove it. Values are masked,      "
 "────────────────────────────────────────────────────────────────────────────────"
-" Enter  save   Esc  cancel   ↑/↓  save & move   ←/→  cursor   C-u  clear        "
+" Enter  save   Esc  cancel   ←/→  cursor   C-u  clear                           "

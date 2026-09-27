@@ -10,6 +10,7 @@ use crate::{
     console::{self, ConsoleChunk},
     history::{self, HistoryEntry},
     jobs::{self, Job},
+    pipelines::{self, PipelineData},
 };
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -115,6 +116,17 @@ pub async fn fetch_history(
     history::parse_history(&response.body)
 }
 
+/// Job relations and every job's recent builds with their upstream causes
+/// (see [`crate::pipelines`]).
+pub async fn fetch_pipelines(config: &ConnectionConfig) -> Result<PipelineData, String> {
+    let path = format!(
+        "api/json?tree={}",
+        pipelines::tree_query(pipelines::RUN_BUILDS)
+    );
+    let response = get(config, &path, false).await?.ok_or("not found")?;
+    pipelines::parse(&response.body)
+}
+
 /// Console output of build `number` of a job, from byte offset `start`.
 pub async fn fetch_console(
     config: &ConnectionConfig,
@@ -159,7 +171,11 @@ pub async fn fetch_build(
 ) -> Result<BuildPage, String> {
     let response = get(config, &builds::build_path(full_name, which), true).await?;
     let mut page = match (which, response) {
-        (BuildRef::Latest, Some(response)) => return builds::parse_job_builds(&response.body),
+        (BuildRef::Latest, Some(response)) => {
+            let mut page = builds::parse_job_builds(&response.body)?;
+            add_stages(config, full_name, &mut page).await;
+            return Ok(page);
+        }
         (BuildRef::Latest, None) => return Err(format!("job {full_name} no longer exists")),
         (BuildRef::Number(_), Some(response)) => BuildPage {
             build: Some(builds::parse_build(&response.body)?),
@@ -170,6 +186,7 @@ pub async fn fetch_build(
             numbers: None,
         },
     };
+    add_stages(config, full_name, &mut page).await;
     if want_numbers {
         let path = builds::numbers_path(full_name);
         if let Some(response) = get(config, &path, true).await? {
@@ -177,6 +194,29 @@ pub async fn fetch_build(
         }
     }
     Ok(page)
+}
+
+/// Fill in a Pipeline run's stages. Best effort: without the Stage View
+/// plugin (404) or on any error the build is shown without them.
+async fn add_stages(config: &ConnectionConfig, full_name: &str, page: &mut BuildPage) {
+    let Some(build) = page.build.as_mut().filter(|b| b.pipeline) else {
+        return;
+    };
+    let path = builds::stages_path(full_name, build.number);
+    build.stages = match get(config, &path, true).await {
+        Ok(Some(response)) => match builds::parse_stages(&response.body) {
+            Ok(stages) => Some(stages),
+            Err(err) => {
+                tracing::warn!(%err, "unexpected stage data");
+                None
+            }
+        },
+        Ok(None) => None, // no Stage View plugin
+        Err(err) => {
+            tracing::warn!(%err, "fetching stages failed");
+            None
+        }
+    };
 }
 
 struct Response {

@@ -41,7 +41,7 @@ pub struct Job {
 }
 
 /// Parse a Jenkins `color` value: `blue`, `red_anime`, `disabled`, ...
-fn parse_color(color: Option<&str>) -> (JobStatus, bool) {
+pub fn parse_color(color: Option<&str>) -> (JobStatus, bool) {
     let Some(color) = color else {
         return (JobStatus::Unknown, false);
     };
