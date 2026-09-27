@@ -10,6 +10,8 @@ A release's section is used as its GitHub release notes.
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-09-27
+
 ### Added
 
 - The run view shows the pipeline's parts a run never reached, dimmed, where
@@ -103,7 +105,8 @@ A release's section is used as its GitHub release notes.
 - Prebuilt binaries for Linux (x86_64, ARM64), macOS (Apple Silicon, Intel)
   and Windows (x86_64).
 
-[Unreleased]: https://github.com/hbro/leeroy/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/hbro/leeroy/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/hbro/leeroy/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/hbro/leeroy/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/hbro/leeroy/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/hbro/leeroy/compare/v0.1.0...v0.1.1
