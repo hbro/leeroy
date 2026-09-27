@@ -1,5 +1,8 @@
-# Leeroy
-A TUI for Jenkins
+# Leeroy – a TUI for Jenkins
+
+> *All right, chums! Let's do this! LEEROOOOOOOOOOOOOY! JEEEENKIIINS!*
+>
+> — Leeroy Jenkins
 
 The jobs of an instance, with their last result and running builds:
 
