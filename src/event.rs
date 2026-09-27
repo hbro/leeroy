@@ -49,11 +49,13 @@ pub fn context_bindings(context: Context) -> &'static [Binding] {
     const JOBS: &[Binding] = &[
         nav("↑/↓", "select"),
         bind("Enter", "last build"),
+        bind("b", "build"),
         bind("/", "filter"),
     ];
     const JOBS_FILTERED: &[Binding] = &[
         nav("↑/↓", "select"),
         bind("Enter", "last build"),
+        bind("b", "build"),
         bind("/", "filter"),
         bind("Esc", "clear filter"),
     ];
@@ -62,6 +64,7 @@ pub fn context_bindings(context: Context) -> &'static [Binding] {
         bind("←/→", "older/newer"),
         nav("Home/End", "first/last"),
         bind("c", "console"),
+        bind("b", "build again"),
         bind("Esc", "back"),
         nav("↑/↓", "scroll"),
     ];
@@ -70,16 +73,19 @@ pub fn context_bindings(context: Context) -> &'static [Binding] {
         nav("PgUp/PgDn", "page"),
         nav("Home/End", "top/bottom"),
         bind("c/Esc", "back"),
+        bind("b", "build again"),
         bind("←/→", "sideways"),
     ];
     const BUILDS: &[Binding] = &[
         nav("↑/↓", "select"),
         bind("Enter", "open build"),
+        bind("b", "build again"),
         bind("/", "filter"),
     ];
     const BUILDS_FILTERED: &[Binding] = &[
         nav("↑/↓", "select"),
         bind("Enter", "open build"),
+        bind("b", "build again"),
         bind("/", "filter"),
         bind("Esc", "clear filter"),
     ];
@@ -275,9 +281,15 @@ pub fn map_key(app: &App, key: KeyEvent) -> Option<Action> {
             KeyCode::Enter => Some(Action::OpenBuild),
             _ => None,
         },
-        (Context::Pipelines | Context::PipelinesFiltered, KeyCode::Char('b')) => {
-            Some(Action::RequestStartRun)
-        }
+        (
+            Context::Jobs
+            | Context::JobsFiltered
+            | Context::Builds
+            | Context::BuildsFiltered
+            | Context::Pipelines
+            | Context::PipelinesFiltered,
+            KeyCode::Char('b'),
+        ) => Some(Action::RequestStartRun),
         (
             Context::Jobs
             | Context::JobsFiltered
@@ -312,6 +324,7 @@ pub fn map_key(app: &App, key: KeyEvent) -> Option<Action> {
             KeyCode::Char('g') => Some(Action::SelectFirst),
             KeyCode::Char('G') => Some(Action::SelectLast),
             KeyCode::Char('c') => Some(Action::OpenConsole),
+            KeyCode::Char('b') => Some(Action::RequestStartRun),
             _ => None,
         },
         (Context::Console, code) => match code {
@@ -325,6 +338,7 @@ pub fn map_key(app: &App, key: KeyEvent) -> Option<Action> {
             KeyCode::Right => Some(Action::ScrollRight),
             // c toggles: it opened the console from the build view.
             KeyCode::Char('c') => Some(Action::Back),
+            KeyCode::Char('b') => Some(Action::RequestStartRun),
             _ => None,
         },
         _ => None,
@@ -385,6 +399,7 @@ mod tests {
                 app.confirm_start = Some(crate::app::StartRun {
                     job: "a".into(),
                     name: "a".into(),
+                    pipeline: true,
                 })
             }
             Context::JobsFiltered => app.jobs.filter = "api".into(),

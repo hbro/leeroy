@@ -106,7 +106,9 @@ Rules:
   `origin: View::Run` (Esc → run view → list). List rows are
   `ui::run_table`; the boxes are painted by `ui::paint_boxes` (scrolls to the
   selection, records the scroll in a `Cell`, returns the `more ←→↑↓` hint).
-- Writing to Jenkins: `b` (Pipelines tab, run view) → `Context::ConfirmStart`
+- Writing to Jenkins: `b` (Jobs/Builds tabs, build view, console: the job;
+  Pipelines tab, run view: the pipeline's first job; `App::start_target`) →
+  `Context::ConfirmStart`
   prompt (takes every key, like the quit prompt) → `Effect::TriggerBuild`.
   `jenkins::trigger_build` uses ONE client (cookies on): parameter check
   (`buildWithParameters` vs `build`), crumb from `crumbIssuer/api/json` (404 =

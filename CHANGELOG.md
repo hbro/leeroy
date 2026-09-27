@@ -22,7 +22,8 @@ A release's section is used as its GitHub release notes.
 - Build view: the stages of Pipeline builds, when Jenkins has the Pipeline Stage
   View plugin.
 - `b` on the Pipelines tab or in the run view: start a new run of the pipeline
-  (after a y/n prompt, with default parameter values).
+  (after a y/n prompt, with default parameter values); on the Jobs and Builds
+  tabs, in the build view and the console: start a build of that job.
 - `p` in the run view: promote, i.e. take the run's manual steps (e.g. the Build
   Pipeline plugin's), several at once; the new builds join the run.
 - `o`: open what's on screen in Jenkins' web UI (without URL credentials).

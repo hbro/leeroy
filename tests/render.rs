@@ -119,7 +119,7 @@ fn start_run_prompt_and_notice() {
         &[
             Action::ConfirmStartRun,
             Action::BuildTriggered {
-                name: "shop".into(),
+                name: "a run of shop".into(),
                 result: Ok(()),
             },
         ],
@@ -163,6 +163,19 @@ fn promotions_overlay() {
     insta::assert_snapshot!(screen);
     let effects = app.update(Action::ConfirmPromote);
     assert!(matches!(effects.as_slice(), [Effect::Promote { .. }]));
+}
+
+#[test]
+fn start_build_prompt() {
+    let mut app = app_with_jobs();
+    apply(&mut app, &[Action::RequestStartRun]);
+    let screen = format!("{}", render(&app).backend());
+    assert!(screen.contains("Start a build?"), "{screen}");
+    assert!(screen.contains("backend/api/main"), "{screen}");
+    assert!(
+        !screen.contains("(backend"),
+        "no first job for a job: {screen}"
+    );
 }
 
 #[test]

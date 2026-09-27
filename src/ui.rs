@@ -1808,8 +1808,13 @@ fn render_confirm_start(frame: &mut Frame, area: Rect, app: &App) {
         .unwrap_or(40)
         .clamp(40, area.width.saturating_sub(4));
     let popup = centered(area, width, lines.len() as u16 + 2);
+    let title = if start.pipeline {
+        " Start a run? "
+    } else {
+        " Start a build? "
+    };
     let block = Block::bordered()
-        .title(" Start a run? ")
+        .title(title)
         .border_type(BorderType::Double)
         .border_style(Style::new().fg(t.warning));
     frame.render_widget(Clear, popup);

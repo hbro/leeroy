@@ -785,7 +785,7 @@ impl App {
                 }
             }
             Action::RequestStartRun => {
-                self.confirm_start = self.pipeline_to_start();
+                self.confirm_start = self.start_target();
             }
             Action::ConfirmStartRun => {
                 let Some(start) = self.confirm_start.take() else {
@@ -794,21 +794,22 @@ impl App {
                 let Some(config) = self.settings.connection_config() else {
                     return Vec::new();
                 };
+                let what = if start.pipeline { "run" } else { "build" };
                 return vec![Effect::TriggerBuild {
+                    name: format!("a {what} of {}", start.name),
                     job: start.job,
-                    name: start.name,
                     config,
                 }];
             }
             Action::BuildTriggered { name, result } => {
                 let ok = result.is_ok();
                 self.notice = Some(match result {
-                    Ok(()) => Notice::info(format!("Started a run of {name}"), self.now),
+                    Ok(()) => Notice::info(format!("Started {name}"), self.now),
                     Err(err) => Notice::error(format!("Could not start {name}: {err}"), self.now),
                 });
                 if ok {
                     // The new build appears once Jenkins starts it; look now.
-                    return self.fetch_pipelines();
+                    return self.refresh();
                 }
             }
             Action::OpenPromote => {
@@ -1743,13 +1744,24 @@ impl App {
         (pipeline, run)
     }
 
-    /// The pipeline `b` would start: selected in the Pipelines tab, or the one
-    /// the run view shows.
-    fn pipeline_to_start(&self) -> Option<StartRun> {
+    /// What `b` would start: the selected job (Jobs, Builds tabs) or the
+    /// shown build's job (build view, console) — or a pipeline: selected in
+    /// the Pipelines tab, or the one the run view shows.
+    fn start_target(&self) -> Option<StartRun> {
+        let job = |name: &str| {
+            Some(StartRun {
+                job: name.to_owned(),
+                name: name.to_owned(),
+                pipeline: false,
+            })
+        };
         let pipelines = match self.view {
+            View::Jobs => return job(&self.jobs.visible().get(self.jobs.selected)?.full_name),
+            View::Builds => return job(&self.history.visible().get(self.history.selected)?.job),
+            View::Build | View::Console => return job(&self.build.as_ref()?.job),
             View::Pipelines => self.pipelines.visible_pipelines(),
             View::Run => self.pipelines.pipelines(),
-            _ => return None,
+            View::Runs | View::Settings => return None,
         };
         let pipeline = match self.view {
             View::Pipelines => pipelines.get(self.pipelines.list.selected)?,
@@ -1761,6 +1773,7 @@ impl App {
         Some(StartRun {
             job: pipeline.first_job.clone(),
             name: pipeline.name.clone(),
+            pipeline: true,
         })
     }
 
@@ -2027,12 +2040,14 @@ pub struct PromoteList {
     pub ticked: std::collections::BTreeSet<usize>,
 }
 
-/// A pipeline to start (the "Start a run?" prompt).
+/// A job or pipeline to start (the "Start a build/run?" prompt).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StartRun {
-    /// Its first job: the one that gets built.
+    /// The job that gets built (a pipeline's first job).
     pub job: String,
     pub name: String,
+    /// A pipeline run rather than a single job's build.
+    pub pipeline: bool,
 }
 
 /// How long a [`Notice`] stays on screen.
@@ -3831,7 +3846,7 @@ mod tests {
         assert_eq!(app.context(), Context::Pipelines, "prompt closed");
 
         let effects = app.update(Action::BuildTriggered {
-            name: "app".into(),
+            name: "a run of app".into(),
             result: Ok(()),
         });
         assert!(pipelines_fetch(&effects), "looks for the new run");
@@ -3851,9 +3866,9 @@ mod tests {
         app.update(Action::Back);
         assert_eq!(app.confirm_start, None);
         assert!(app.update(Action::ConfirmStartRun).is_empty());
-        app.update(Action::SwitchTab(Tab::Jobs));
+        app.update(Action::SwitchTab(Tab::Settings));
         app.update(Action::RequestStartRun);
-        assert_eq!(app.confirm_start, None, "only for pipelines");
+        assert_eq!(app.confirm_start, None, "nothing to start here");
     }
 
     #[test]
@@ -3968,5 +3983,55 @@ mod tests {
             app.update(Action::ConfirmPromote).as_slice(),
             [Effect::Promote { promotions, .. }] if promotions[0].job == "qa"
         ));
+    }
+
+    #[test]
+    fn b_builds_the_selected_or_shown_job() {
+        let trigger = |app: &mut App| -> (String, String) {
+            app.update(Action::RequestStartRun);
+            let start = app.confirm_start.clone().expect("prompt open");
+            assert!(!start.pipeline);
+            match app.update(Action::ConfirmStartRun).as_slice() {
+                [Effect::TriggerBuild { job, name, .. }] => (job.clone(), name.clone()),
+                other => panic!("{other:?}"),
+            }
+        };
+        let mut app = connected_with_jobs(&["a", "b"]);
+        app.update(Action::SelectNext);
+        assert_eq!(trigger(&mut app), ("b".into(), "a build of b".into()));
+
+        // The build view builds its job again.
+        app.update(Action::OpenBuild);
+        let generation = app.connection_generation;
+        app.update(Action::BuildFetched {
+            generation,
+            job: "b".into(),
+            which: BuildRef::Latest,
+            result: Ok(BuildPage {
+                build: Some(sample_build(4)),
+                numbers: Some(vec![4]),
+            }),
+        });
+        assert_eq!(trigger(&mut app).0, "b");
+        let effects = app.update(Action::BuildTriggered {
+            name: "a build of b".into(),
+            result: Ok(()),
+        });
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::FetchBuild { .. })),
+            "refreshes what's on screen: {effects:?}"
+        );
+        assert_eq!(app.notice.as_ref().unwrap().text, "Started a build of b");
+    }
+
+    #[test]
+    fn b_on_the_builds_tab_builds_that_job() {
+        let mut app = builds_tab(five_builds());
+        app.update(Action::RequestStartRun);
+        let start = app.confirm_start.clone().expect("prompt open");
+        let selected = app.history.visible()[app.history.selected].job.clone();
+        assert_eq!(start.job, selected);
     }
 }

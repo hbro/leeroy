@@ -25,4 +25,4 @@ expression: render(&app).backend()
 "[INFO]  line 098 of the build                                                  █"
 "[INFO]  line 099 of the build                                                  █"
 "────────────────────────────────────────────────────────────────────────────────"
-" c/Esc  back   ←/→  sideways                                                    "
+" c/Esc  back   b  build again   ←/→  sideways                                   "

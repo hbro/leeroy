@@ -227,6 +227,7 @@ build runs.
 | --- | --- |
 | `↑/↓` `j/k`, `PgUp/PgDn`, `g/G` | move |
 | `Enter` | details of the job's most recent build |
+| `b` | start a build of the job (asks first; default parameter values) |
 | `/` | filter (live, case-insensitive; space-separated words must all match) |
 | `Enter` / `Esc` while filtering | apply / cancel |
 | `Esc` | clear an applied filter |
@@ -252,6 +253,7 @@ a running build updates live), and the header's `⟳` age refers to it.
 | `←` / `→` | older / newer build (deleted builds are skipped) |
 | `Home` / `End` | first (oldest kept) / latest build |
 | `c` | console output of this build |
+| `b` | start a new build of this job (asks first) |
 | `↑/↓` `PgUp/PgDn` `g/G` | scroll |
 | `Esc` | back to the list |
 
@@ -273,6 +275,7 @@ and followed at the bottom. Scrolling up pauses following (the title says so);
 | `Home` / `End` | top / bottom (`End` = follow again) |
 | `←/→` | scroll long lines sideways |
 | `c` / `Esc` | back to the build (`c` toggles the console) |
+| `b` | start a new build of this job (asks first) |
 
 Colour codes are removed, `\r` progress bars show their final state, and at
 most the last 100 000 lines are kept.
@@ -281,7 +284,8 @@ most the last 100 000 lines are kept.
 
 The build history of all jobs, newest first: status, job and build number, when
 it started and how long it took (`…` while running). `Enter` opens the build (with
-`←/→`, `c` etc. as usual); `Esc` comes back here. `/` filters like on the Jobs tab.
+`←/→`, `c` etc. as usual); `Esc` comes back here. `b` starts a new build of the
+selected build's job (asks first). `/` filters like on the Jobs tab.
 
 Jenkins has no "newest builds overall" API, so Leeroy asks every job for its
 newest *N* builds in **one** request (`tree=jobs[…,builds[…]{0,N}]`), where *N* is

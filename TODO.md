@@ -40,6 +40,6 @@
 - [x] **Open in the browser**: a hotkey that opens the item on screen (job,
   build, console, pipeline run) in Jenkins' web UI.
 
-- [ ] **Start a build of a job**: `b` on the Jobs tab starts a build of the
+- [x] **Start a build of a job**: `b` on the Jobs tab starts a build of the
   selected job; in the build view (and console), `b` starts a new build of the
   job the shown build belongs to. Same y/n prompt as for pipelines.
