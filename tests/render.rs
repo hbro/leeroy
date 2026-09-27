@@ -1167,3 +1167,109 @@ fn selected_build_row_number_stays_readable() {
         assert_ne!(cell.fg, cell.bg, "#46 unreadable on the selected row");
     }
 }
+
+/// A production-sized instance: 300 chains of 5 jobs, 20 builds per job.
+fn big_pipeline_data() -> pipelines::PipelineData {
+    use std::time::{Duration, SystemTime};
+    let mut data = pipelines::PipelineData::default();
+    for chain in 0..300 {
+        let job = |step: usize| format!("team{chain:03}/step{step}");
+        for step in 0..5 {
+            data.jobs.push(pipelines::PipelineJob {
+                name: job(step),
+                status: JobStatus::Success,
+                building: false,
+            });
+            if step > 0 {
+                data.edges.push((job(step - 1), job(step)));
+                data.static_edges.push((job(step - 1), job(step)));
+            }
+            for n in 1..=20u64 {
+                data.builds.push(pipelines::RunBuild {
+                    job: job(step),
+                    number: n,
+                    result: Some(JobStatus::Success),
+                    building: false,
+                    started: SystemTime::UNIX_EPOCH
+                        + Duration::from_secs(1_700_000_000 + n * 3600 + step as u64 * 60),
+                    duration: Duration::from_secs(50),
+                    parent: (step > 0).then(|| (job(step - 1), n)),
+                });
+            }
+        }
+    }
+    data.jobs.sort_by(|a, b| a.name.cmp(&b.name));
+    data.edges.sort();
+    data.static_edges.sort();
+    data
+}
+
+#[test]
+fn long_run_list_scrolls_with_the_selection() {
+    let mut app = app_with_jobs();
+    let generation = app.connection_generation;
+    app.update(Action::SwitchTab(Tab::Runs));
+    app.update(Action::PipelinesFetched {
+        generation,
+        result: Ok(big_pipeline_data()),
+    });
+    // The selected row is always on screen, and it's the selected run.
+    let selected_line = |app: &App| {
+        let screen = format!("{}", render(app).backend());
+        screen
+            .lines()
+            .find(|l| l.starts_with("\"▶"))
+            .map(str::to_owned)
+            .expect("selection on screen")
+    };
+    let expected = |app: &App| {
+        let all = app.pipelines.pipelines();
+        let (p, r) = app.pipelines.visible_runs()[app.pipelines.runs.selected];
+        format!(
+            "{} #{}",
+            all[p].name,
+            app.pipelines.run_number(&all[p].runs[r])
+        )
+    };
+    apply(&mut app, &[Action::SelectLast]);
+    assert!(selected_line(&app).contains(&expected(&app)), "last row");
+    for _ in 0..30 {
+        apply(&mut app, &[Action::SelectPrev]);
+    }
+    assert!(
+        selected_line(&app).contains(&expected(&app)),
+        "scrolled back up"
+    );
+    apply(&mut app, &[Action::SelectFirst]);
+    let screen = format!("{}", render(&app).backend());
+    let first_row = screen.lines().nth(3).unwrap();
+    assert!(first_row.starts_with("\"▶"), "top of the list: {first_row}");
+}
+
+/// Not a correctness test: how long a keypress + frame takes on the
+/// Pipeline runs tab of a big instance. `cargo test --release --test render
+/// -- --ignored --nocapture pipeline_runs_speed`
+#[test]
+#[ignore]
+fn pipeline_runs_speed() {
+    let mut app = app_with_jobs();
+    let generation = app.connection_generation;
+    app.update(Action::SwitchTab(Tab::Runs));
+    app.update(Action::PipelinesFetched {
+        generation,
+        result: Ok(big_pipeline_data()),
+    });
+    let start = std::time::Instant::now();
+    let rounds = 20;
+    for _ in 0..rounds {
+        app.update(Action::SelectNext);
+        render(&app);
+    }
+    let per_key = start.elapsed() / rounds;
+    let start = std::time::Instant::now();
+    for _ in 0..rounds {
+        let _ = pipelines::pipelines(app.pipelines.data());
+    }
+    let per_build = start.elapsed() / rounds;
+    println!("keypress + frame: {per_key:?}; one pipelines() rebuild: {per_build:?}");
+}

@@ -97,6 +97,13 @@ Rules:
   Builds): Esc returns there and `App::tab()` highlights that tab. Opened at a
   number (from Builds), the first fetch also gets the job's build numbers
   (`want_numbers`) so ←/→ work.
+- `PipelineState` keeps the fetch private: `set_data` stores it and works out
+  the pipelines (with each run's status) and the newest-first run order ONCE;
+  `pipelines()` / `visible_runs()` / `find_run()` read that cache. Never
+  rebuild pipelines per keypress or frame (it made the lists sluggish on big
+  instances). The list tabs only build the rows on screen
+  (`ui::visible_window`, offset recorded in `ListState::offset`); benchmark:
+  `cargo test --release --test render -- --ignored --nocapture pipeline_runs_speed`.
 - Pipelines (`3`) and Pipeline runs (`4`, `Tab::Runs`) share one fetch (`Effect::FetchPipelines`,
   one in flight, auto-refresh/`r` like the other tabs, reset on reconnect).
   Enter opens `View::Run` (`App::run: RunView`, `RunRef::Latest` from
@@ -122,6 +129,8 @@ Rules:
   `jenkins::promote`: via a Build Pipeline view's page proxy
   (`makeStaplerProxy`, `triggerManualBuild`, see `src/promote.rs`), else a
   plain build with the upstream build's parameters (`Ok(false)`: not linked).
+  Taken promotions stay in `App::pending_promotions` (not offered again) until
+  the job has a build newer than it had when promoted.
   Fake: `shop/test → shop/deploy` is manual; `--no-views` for the fallback.
 - Build view stages: for a `WorkflowRun` (`Build::pipeline`, from `_class`),
   `jenkins::fetch_build` also gets `<n>/wfapi/describe`; 404 (no Stage View

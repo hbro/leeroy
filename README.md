@@ -357,7 +357,9 @@ run, under the job that triggers them (`○ deploy/production  not reached`, or
 job configuration) of a successfully finished build of the run that it hasn't
 triggered, e.g. `shop/test #49 → shop/deploy` for a Build Pipeline plugin
 "Manually Execute Downstream Project" step. `Space` ticks one or more, `Enter`
-takes the ticked ones (or the highlighted one when none is ticked).
+takes the ticked ones (or the highlighted one when none is ticked). Only steps
+that can be taken now are offered (after dev → acc → prod's dev, only acc), and a
+step just taken isn't offered again until its build shows up.
 
 Leeroy takes a step the way the Build Pipeline plugin's own page does, through a
 Build Pipeline view: the new build then has the upstream build as its cause

@@ -251,7 +251,7 @@ impl Executor {
                                 tracing::warn!(to = promotion.job, %err, "promotion failed")
                             }
                         }
-                        results.push((promotion.job.clone(), result));
+                        results.push((promotion.clone(), result));
                     }
                     let _ = tx.send(Action::Promoted(results));
                 });

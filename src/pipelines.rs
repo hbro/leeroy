@@ -277,6 +277,9 @@ pub struct Run {
     pub parents: Vec<Option<usize>>,
     /// Per entry of `builds`: tree branches before it (`""`, `"├─ "`, `"│  └─ "`).
     pub prefixes: Vec<String>,
+    /// [`run_status`], worked out once when the pipelines are built.
+    pub status: RunStatus,
+    pub running: bool,
 }
 
 impl Run {
@@ -291,6 +294,9 @@ fn collect_run(links: &Links, root: usize) -> Run {
         builds: vec![root],
         parents: vec![None],
         prefixes: vec![String::new()],
+        // Filled in by `pipelines`, which knows the pipeline's parts.
+        status: RunStatus::Partial,
+        running: false,
     };
     fn walk(links: &Links, node: usize, at: usize, indent: &str, run: &mut Run) {
         let kids = &links.children[node];
@@ -421,12 +427,22 @@ pub fn pipelines(data: &PipelineData) -> Vec<Pipeline> {
                 }
             }
             let parts: Vec<String> = parts.into_iter().map(str::to_owned).collect();
-            Pipeline {
+            let mut pipeline = Pipeline {
                 first_job: job.to_owned(),
                 name: common_prefix(&parts).unwrap_or_else(|| job.to_owned()),
                 parts,
                 runs: roots.into_iter().map(|r| collect_run(&links, r)).collect(),
+            };
+            let statuses: Vec<(RunStatus, bool)> = pipeline
+                .runs
+                .iter()
+                .map(|run| run_status(data, &pipeline, run))
+                .collect();
+            for (run, (status, running)) in pipeline.runs.iter_mut().zip(statuses) {
+                run.status = status;
+                run.running = running;
             }
+            pipeline
         })
         .collect();
     // A name shared by two pipelines says nothing: use their first jobs.
@@ -675,6 +691,9 @@ pub struct ListState {
     pub filter_input: Option<TextInput>,
     /// Index into the visible rows.
     pub selected: usize,
+    /// First row on screen, recorded by the renderer, which only builds the
+    /// rows that fit (these lists can have thousands).
+    pub offset: std::cell::Cell<usize>,
 }
 
 impl ListState {
@@ -736,7 +755,13 @@ impl RunView {
 #[derive(Debug, Default)]
 pub struct PipelineState {
     pub load: PipelineLoad,
-    pub data: PipelineData,
+    /// The last fetch, and the pipelines worked out from it: rebuilding those
+    /// on every keypress and frame made the lists sluggish on big instances.
+    /// Only [`Self::set_data`] changes them, together.
+    data: PipelineData,
+    computed: Vec<Pipeline>,
+    /// Every run as `(pipeline, run)`, newest first (for the Runs tab).
+    run_order: Vec<(usize, usize)>,
     pub refreshing: bool,
     pub fetched_at: Option<std::time::Instant>,
     pub attempted_at: Option<std::time::Instant>,
@@ -758,42 +783,64 @@ impl PipelineState {
         self.refreshing || self.load == PipelineLoad::Loading
     }
 
-    pub fn pipelines(&self) -> Vec<Pipeline> {
-        pipelines(&self.data)
+    pub fn with_data(data: PipelineData) -> Self {
+        let mut state = Self::default();
+        state.set_data(data);
+        state
+    }
+
+    /// Store a fetch and work out its pipelines (once).
+    pub fn set_data(&mut self, data: PipelineData) {
+        let computed = pipelines(&data);
+        let mut order: Vec<(usize, usize)> = computed
+            .iter()
+            .enumerate()
+            .flat_map(|(p, pipeline)| (0..pipeline.runs.len()).map(move |r| (p, r)))
+            .collect();
+        order.sort_by_key(|&(p, r)| {
+            std::cmp::Reverse(data.builds[computed[p].runs[r].first()].started)
+        });
+        self.run_order = order;
+        self.computed = computed;
+        self.data = data;
+    }
+
+    pub fn data(&self) -> &PipelineData {
+        &self.data
+    }
+
+    pub fn pipelines(&self) -> &[Pipeline] {
+        &self.computed
     }
 
     /// Pipelines matching the Pipelines tab's filter (name or first job).
-    pub fn visible_pipelines(&self) -> Vec<Pipeline> {
+    pub fn visible_pipelines(&self) -> Vec<&Pipeline> {
         let filter = self.list.active_filter();
-        self.pipelines()
-            .into_iter()
+        self.computed
+            .iter()
             .filter(|p| matches(&format!("{} {}", p.name, p.first_job), filter))
             .collect()
     }
 
     /// The Runs tab: `(pipeline, run)` indices into `pipelines`, newest
     /// first, matching its filter (pipeline name or any `job #number`).
-    pub fn visible_runs(&self, pipelines: &[Pipeline]) -> Vec<(usize, usize)> {
+    pub fn visible_runs(&self) -> Vec<(usize, usize)> {
         let filter = self.runs.active_filter();
-        let mut runs: Vec<(usize, usize)> = pipelines
+        if filter.trim().is_empty() {
+            return self.run_order.clone();
+        }
+        self.run_order
             .iter()
-            .enumerate()
-            .flat_map(|(p, pipeline)| (0..pipeline.runs.len()).map(move |r| (p, r)))
+            .copied()
             .filter(|&(p, r)| {
-                let pipeline = &pipelines[p];
-                let run = &pipeline.runs[r];
-                filter.trim().is_empty()
-                    || matches(&pipeline.name, filter)
-                    || run.builds.iter().any(|&b| {
+                let pipeline = &self.computed[p];
+                matches(&pipeline.name, filter)
+                    || pipeline.runs[r].builds.iter().any(|&b| {
                         let b = &self.data.builds[b];
                         matches(&format!("{} #{}", b.job, b.number), filter)
                     })
             })
-            .collect();
-        runs.sort_by_key(|&(p, r)| {
-            std::cmp::Reverse(self.data.builds[pipelines[p].runs[r].first()].started)
-        });
-        runs
+            .collect()
     }
 
     /// Number of the build that started `run`.
@@ -802,12 +849,11 @@ impl PipelineState {
     }
 
     /// The pipeline and run index a run view shows, if loaded.
-    pub fn find_run<'a>(
-        &self,
-        pipelines: &'a [Pipeline],
-        view: &RunView,
-    ) -> Option<(&'a Pipeline, usize)> {
-        let pipeline = pipelines.iter().find(|p| p.first_job == view.first_job)?;
+    pub fn find_run(&self, view: &RunView) -> Option<(&Pipeline, usize)> {
+        let pipeline = self
+            .computed
+            .iter()
+            .find(|p| p.first_job == view.first_job)?;
         let index = match view.target {
             RunRef::Latest => (!pipeline.runs.is_empty()).then_some(0)?,
             RunRef::Number(n) => pipeline.runs.iter().position(|r| self.run_number(r) == n)?,
@@ -819,8 +865,7 @@ impl PipelineState {
     /// newest run is always `Latest`, so it follows new runs again.
     pub fn step_run(&self, view: &RunView, step: crate::builds::BuildStep) -> Option<RunRef> {
         use crate::builds::BuildStep;
-        let pipelines = self.pipelines();
-        let (pipeline, index) = self.find_run(&pipelines, view)?;
+        let (pipeline, index) = self.find_run(view)?;
         let last = pipeline.runs.len().checked_sub(1)?;
         let target = match step {
             BuildStep::Older => (index < last).then_some(index + 1)?,
@@ -1020,6 +1065,35 @@ mod tests {
     }
 
     #[test]
+    fn only_the_next_promotion_is_offered() {
+        // app/build → app/dev (automatic) → app/acc (manual) → app/prod (manual).
+        let data = parse(
+            r#"{"jobs": [
+                {"fullName": "app/build", "color": "blue",
+                 "downstreamProjects": [{"fullName": "app/dev"}],
+                 "builds": [{"number": 5, "result": "SUCCESS", "timestamp": 1}]},
+                {"fullName": "app/dev", "color": "blue",
+                 "upstreamProjects": [{"fullName": "app/build"}],
+                 "downstreamProjects": [{"fullName": "app/acc"}],
+                 "builds": [{"number": 3, "result": "SUCCESS", "timestamp": 2,
+                    "actions": [{"causes": [{"upstreamProject": "app/build", "upstreamBuild": 5}]}]}]},
+                {"fullName": "app/acc", "color": "blue",
+                 "upstreamProjects": [{"fullName": "app/dev"}],
+                 "downstreamProjects": [{"fullName": "app/prod"}], "builds": []},
+                {"fullName": "app/prod", "color": "blue",
+                 "upstreamProjects": [{"fullName": "app/acc"}], "builds": []}
+            ]}"#,
+        )
+        .unwrap();
+        let pipeline = &pipelines(&data)[0];
+        let labels: Vec<String> = promotions(&data, &pipeline.runs[0])
+            .iter()
+            .map(Promotion::label)
+            .collect();
+        assert_eq!(labels, ["app/dev #3 → app/acc"], "not app/prod yet");
+    }
+
+    #[test]
     fn missing_parts_explain_partial_runs() {
         let mut data = data();
         let pipeline = pipelines(&data)[0].clone();
@@ -1099,27 +1173,16 @@ mod tests {
 
     #[test]
     fn runs_list_newest_first_and_filtered() {
-        let state = PipelineState {
-            data: data(),
-            ..Default::default()
-        };
-        let pipelines = state.pipelines();
-        assert_eq!(state.visible_runs(&pipelines), [(0, 0), (0, 1), (0, 2)]);
+        let state = PipelineState::with_data(data());
+        assert_eq!(state.visible_runs(), [(0, 0), (0, 1), (0, 2)]);
         let mut filtered = state;
         filtered.runs.filter = "smoke".into();
-        assert_eq!(
-            filtered.visible_runs(&pipelines),
-            [(0, 2)],
-            "a job of the run"
-        );
+        assert_eq!(filtered.visible_runs(), [(0, 2)], "a job of the run");
     }
 
     #[test]
     fn stepping_through_runs() {
-        let state = PipelineState {
-            data: data(),
-            ..Default::default()
-        };
+        let state = PipelineState::with_data(data());
         let latest = RunView::new(
             "app/build".into(),
             RunRef::Latest,
@@ -1142,7 +1205,6 @@ mod tests {
             state.step_run(&oldest, BuildStep::Newer),
             Some(RunRef::Latest)
         );
-        let pipelines = state.pipelines();
-        assert_eq!(state.find_run(&pipelines, &oldest).map(|(_, i)| i), Some(1));
+        assert_eq!(state.find_run(&oldest).map(|(_, i)| i), Some(1));
     }
 }

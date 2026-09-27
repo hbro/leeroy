@@ -16,6 +16,18 @@ A release's section is used as its GitHub release notes.
   they would have run (disabled jobs marked): this explains a partial run whose
   builds all succeeded.
 
+### Changed
+
+- In the run view, `b` is labelled "new run".
+
+### Fixed
+
+- The Pipelines and Pipeline runs lists were sluggish on big instances: every
+  keypress and frame rebuilt all pipelines and runs. They're now worked out
+  once per fetch and only the rows on screen are drawn (about 150× faster).
+- A promotion just taken (build still queued) is no longer offered again, so it
+  can't be started twice.
+
 ## [0.3.0] - 2026-09-27
 
 ### Added

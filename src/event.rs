@@ -119,7 +119,8 @@ pub fn context_bindings(context: Context) -> &'static [Binding] {
         bind("v", "view"),
         bind("Enter", "open build"),
         bind("p", "promote"),
-        bind("b", "start run"),
+        // Already looking at a run: this starts another one.
+        bind("b", "new run"),
         // Esc is "back" everywhere; no room for it here at 80 columns.
         nav("Esc", "back"),
         nav("↑/↓", "select"),

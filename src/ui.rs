@@ -21,7 +21,7 @@ use crate::{
     history::HistoryLoad,
     instance::InfoLoad,
     jobs::{JobStatus, JobsLoad},
-    pipelines::{PipelineLoad, RUN_BUILDS, RunStatus, TreeItem, run_span, run_status, run_tree},
+    pipelines::{PipelineLoad, RUN_BUILDS, RunStatus, TreeItem, run_span, run_tree},
     proxy::SystemProxy,
     theme::{Appearance, Theme},
 };
@@ -514,6 +514,26 @@ fn span_text(app: &App, start: SystemTime, end: Option<SystemTime>) -> String {
     }
 }
 
+/// The rows of a long list that fit in `height`, keeping `selected` in view
+/// and moving the recorded `offset` as little as possible (like a scrolled
+/// table, but without building the rows off screen).
+fn visible_window(
+    len: usize,
+    selected: usize,
+    height: u16,
+    offset: &std::cell::Cell<usize>,
+) -> std::ops::Range<usize> {
+    let height = usize::from(height).max(1);
+    let mut start = offset.get().min(len.saturating_sub(height));
+    if selected < start {
+        start = selected;
+    } else if selected >= start + height {
+        start = selected + 1 - height;
+    }
+    offset.set(start);
+    start..(start + height).min(len)
+}
+
 /// One row of the Pipelines or Runs list.
 struct RunRow<'a> {
     status: RunStatus,
@@ -628,12 +648,18 @@ fn render_pipelines(frame: &mut Frame, area: Rect, app: &App) {
     }
 
     let selected = state.list.selected.min(pipelines.len() - 1);
-    let rows = pipelines
+    let window = visible_window(
+        pipelines.len(),
+        selected,
+        list_area.height,
+        &state.list.offset,
+    );
+    let rows = pipelines[window.clone()]
         .iter()
         .map(|p| {
             let run = &p.runs[0];
-            let (status, running) = run_status(&state.data, p, run);
-            let (start, end) = run_span(&state.data, run);
+            let (status, running) = (run.status, run.running);
+            let (start, end) = run_span(state.data(), run);
             let mut name = vec![Span::raw(p.name.clone())];
             if p.name != p.first_job {
                 name.push(Span::styled(format!("  {}", p.first_job), t.dim()));
@@ -647,6 +673,7 @@ fn render_pipelines(frame: &mut Frame, area: Rect, app: &App) {
             }
         })
         .collect();
+    let selected = selected - window.start;
     let mut table_state = TableState::default().with_selected(Some(selected));
     frame.render_stateful_widget(run_table(app, rows, selected), list_area, &mut table_state);
 }
@@ -662,7 +689,7 @@ fn render_runs(frame: &mut Frame, area: Rect, app: &App) {
     }
     let state = &app.pipelines;
     let pipelines = state.pipelines();
-    let runs = state.visible_runs(&pipelines);
+    let runs = state.visible_runs();
     let mut title = format!("Pipeline runs ({})", runs.len());
     if state.refreshing {
         title.push_str(" · refreshing…");
@@ -706,13 +733,14 @@ fn render_runs(frame: &mut Frame, area: Rect, app: &App) {
     }
 
     let selected = state.runs.selected.min(runs.len() - 1);
-    let rows = runs
+    let window = visible_window(runs.len(), selected, list_area.height, &state.runs.offset);
+    let rows = runs[window.clone()]
         .iter()
         .map(|&(p, r)| {
             let pipeline = &pipelines[p];
             let run = &pipeline.runs[r];
-            let (status, running) = run_status(&state.data, pipeline, run);
-            let (start, end) = run_span(&state.data, run);
+            let (status, running) = (run.status, run.running);
+            let (start, end) = run_span(state.data(), run);
             let name = vec![
                 Span::raw(pipeline.name.clone()),
                 Span::styled(format!(" #{}", state.run_number(run)), t.dim()),
@@ -726,6 +754,7 @@ fn render_runs(frame: &mut Frame, area: Rect, app: &App) {
             }
         })
         .collect();
+    let selected = selected - window.start;
     let mut table_state = TableState::default().with_selected(Some(selected));
     frame.render_stateful_widget(run_table(app, rows, selected), list_area, &mut table_state);
 }
@@ -752,8 +781,7 @@ fn render_run(frame: &mut Frame, area: Rect, app: &App) {
         return frame.render_widget(message, area);
     }
     let state = &app.pipelines;
-    let pipelines = state.pipelines();
-    let Some((pipeline, index)) = state.find_run(&pipelines, view) else {
+    let Some((pipeline, index)) = state.find_run(view) else {
         let lines = vec![
             Line::raw(""),
             Line::styled("This run is no longer loaded", Style::new().italic()),
@@ -772,7 +800,7 @@ fn render_run(frame: &mut Frame, area: Rect, app: &App) {
         return frame.render_widget(message, area);
     };
     let run = &pipeline.runs[index];
-    let (status, running) = run_status(&state.data, pipeline, run);
+    let (status, running) = (run.status, run.running);
     let mut title = format!(
         "{} · #{} · {} of {} · {}",
         pipeline.name,
@@ -791,7 +819,7 @@ fn render_run(frame: &mut Frame, area: Rect, app: &App) {
     let inner = view_block(t, "").inner(area);
     // Builds plus the parts the run never reached, where they would have run
     // (why a run whose builds all succeeded can still be partial).
-    let tree = run_tree(&state.data, pipeline, run);
+    let tree = run_tree(state.data(), pipeline, run);
     let selected_row = tree
         .iter()
         .position(|row| row.item == TreeItem::Build(selected))
@@ -818,7 +846,7 @@ fn render_run(frame: &mut Frame, area: Rect, app: &App) {
                     Cell::from(""),
                 ]),
                 TreeItem::Build(b) => {
-                    let build = &state.data.builds[run.builds[*b]];
+                    let build = &state.data().builds[run.builds[*b]];
                     let (symbol, mut color) = build_symbol(t, build);
                     if i == selected_row {
                         color = t.on_selected(color);
@@ -868,7 +896,7 @@ fn render_run(frame: &mut Frame, area: Rect, app: &App) {
         .iter()
         .map(|row| match &row.item {
             TreeItem::Build(b) => {
-                let build = &state.data.builds[run.builds[*b]];
+                let build = &state.data().builds[run.builds[*b]];
                 let (symbol, color) = build_symbol(t, build);
                 (format!("{} #{}", build.job, build.number), symbol, color)
             }

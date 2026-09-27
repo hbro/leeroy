@@ -47,9 +47,9 @@ pub enum Action {
     TogglePromotion,
     /// Enter: take the ticked promotions (or the highlighted one).
     ConfirmPromote,
-    /// Outcome of [`Effect::Promote`]: per promotion, its label and whether
-    /// the plugin did it (`true`: linked to the run) or it was started directly.
-    Promoted(Vec<(String, Result<bool, String>)>),
+    /// Outcome of [`Effect::Promote`]: per promotion, whether the plugin did
+    /// it (`true`: linked to the run) or it was started directly.
+    Promoted(Vec<(Promotion, Result<bool, String>)>),
     /// `o`: open what's on screen in Jenkins' web UI.
     OpenInBrowser,
     /// Outcome of [`Effect::OpenBrowser`].
@@ -606,6 +606,9 @@ pub struct App {
     pub notice: Option<Notice>,
     /// The promotions overlay (`p` in the run view).
     pub promote: Option<PromoteList>,
+    /// Promotions taken whose build hasn't shown up yet (queued, quiet
+    /// period): not offered again meanwhile, so they aren't started twice.
+    pub pending_promotions: Vec<PendingPromotion>,
     pub view: View,
     pub show_help: bool,
     /// The instance overlay is open.
@@ -658,6 +661,7 @@ impl App {
             confirm_start: None,
             notice: None,
             promote: None,
+            pending_promotions: Vec::new(),
             view: View::Jobs,
             show_help: false,
             show_info: false,
@@ -714,6 +718,7 @@ impl App {
         self.build = None;
         self.console = None;
         self.run = None;
+        self.pending_promotions.clear();
         let Some(config) = self.settings.connection_config() else {
             self.connection = ConnectionStatus::NotConfigured;
             return None;
@@ -816,13 +821,15 @@ impl App {
                 if self.view != View::Run {
                     return Vec::new();
                 }
-                let pipelines = self.pipelines.pipelines();
                 let promotions = self
                     .run
                     .as_ref()
-                    .and_then(|view| self.pipelines.find_run(&pipelines, view))
-                    .map(|(p, r)| crate::pipelines::promotions(&self.pipelines.data, &p.runs[r]))
-                    .unwrap_or_default();
+                    .and_then(|view| self.pipelines.find_run(view))
+                    .map(|(p, r)| crate::pipelines::promotions(self.pipelines.data(), &p.runs[r]))
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|p| !self.pending_promotions.iter().any(|q| q.promotion == *p))
+                    .collect();
                 self.promote = Some(PromoteList {
                     promotions,
                     selected: 0,
@@ -867,16 +874,31 @@ impl App {
             Action::Promoted(results) => {
                 let failed: Vec<String> = results
                     .iter()
-                    .filter_map(|(label, r)| r.as_ref().err().map(|e| format!("{label}: {e}")))
+                    .filter_map(|(p, r)| r.as_ref().err().map(|e| format!("{}: {e}", p.job)))
                     .collect();
-                let done: Vec<&(String, Result<bool, String>)> =
+                let done: Vec<&(Promotion, Result<bool, String>)> =
                     results.iter().filter(|(_, r)| r.is_ok()).collect();
                 let unlinked = done.iter().any(|(_, r)| r == &Ok(false));
+                for (promotion, _) in &done {
+                    // Its newest build now: the promoted one will be newer.
+                    let newest = self
+                        .pipelines
+                        .data()
+                        .builds
+                        .iter()
+                        .filter(|b| b.job == promotion.job)
+                        .map(|b| b.number)
+                        .max();
+                    self.pending_promotions.push(PendingPromotion {
+                        promotion: promotion.clone(),
+                        newest,
+                    });
+                }
                 self.notice = Some(if !failed.is_empty() {
                     Notice::error(format!("Promotion failed: {}", failed.join("; ")), self.now)
                 } else {
                     let what = match done.as_slice() {
-                        [(label, _)] => label.clone(),
+                        [(promotion, _)] => promotion.job.clone(),
                         _ => format!("{} jobs", done.len()),
                     };
                     let mut text = format!("Promoted {what}");
@@ -971,7 +993,7 @@ impl App {
             }
             Action::OpenBuild if self.view == View::Runs => {
                 let pipelines = self.pipelines.pipelines();
-                let runs = self.pipelines.visible_runs(&pipelines);
+                let runs = self.pipelines.visible_runs();
                 if let Some(&(p, r)) = runs.get(self.pipelines.runs.selected) {
                     let number = self.pipelines.run_number(&pipelines[p].runs[r]);
                     self.run = Some(RunView::new(
@@ -1100,14 +1122,13 @@ impl App {
                     Action::SelectFirst => isize::MIN / 2,
                     _ => isize::MAX / 2,
                 };
-                let pipelines = self.pipelines.pipelines();
                 match self.view {
                     View::Pipelines => {
                         let len = self.pipelines.visible_pipelines().len();
                         self.pipelines.list.move_selection(delta, len);
                     }
                     View::Runs => {
-                        let len = self.pipelines.visible_runs(&pipelines).len();
+                        let len = self.pipelines.visible_runs().len();
                         self.pipelines.runs.move_selection(delta, len);
                     }
                     _ => {
@@ -1116,7 +1137,7 @@ impl App {
                         };
                         let len = self
                             .pipelines
-                            .find_run(&pipelines, view)
+                            .find_run(view)
                             .map_or(0, |(p, r)| p.runs[r].builds.len());
                         if let Some(view) = self.run.as_mut() {
                             view.selected = (view.selected as isize + delta)
@@ -1483,27 +1504,42 @@ impl App {
                 state.attempted_at = Some(now);
                 match result {
                     Ok(data) => {
-                        state.data = data;
+                        state.set_data(data);
+                        // Promotions whose build has shown up aren't pending anymore.
+                        self.pending_promotions.retain(|pending| {
+                            !state.data().builds.iter().any(|b| {
+                                b.job == pending.promotion.job
+                                    && pending.newest.is_none_or(|n| b.number > n)
+                            })
+                        });
                         state.fetched_at = Some(now);
                         state.load = PipelineLoad::Loaded;
-                        let pipelines = state.visible_pipelines();
-                        if let Some(i) = previous_pipeline
-                            .and_then(|job| pipelines.iter().position(|p| p.first_job == job))
-                        {
+                        // Work out the rows first: they borrow the state.
+                        let (pipeline_row, pipeline_rows) = {
+                            let pipelines = state.visible_pipelines();
+                            let row = previous_pipeline
+                                .and_then(|job| pipelines.iter().position(|p| p.first_job == job));
+                            (row, pipelines.len())
+                        };
+                        let (run_row, run_rows) = {
+                            let all = state.pipelines();
+                            let runs = state.visible_runs();
+                            let row = previous_run.and_then(|(job, number)| {
+                                runs.iter().position(|&(p, r)| {
+                                    all[p].first_job == job
+                                        && state.run_number(&all[p].runs[r]) == number
+                                })
+                            });
+                            (row, runs.len())
+                        };
+                        if let Some(i) = pipeline_row {
                             state.list.selected = i;
                         }
-                        state.list.move_selection(0, pipelines.len());
-                        let all = state.pipelines();
-                        let runs = state.visible_runs(&all);
-                        if let Some(i) = previous_run.and_then(|(job, number)| {
-                            runs.iter().position(|&(p, r)| {
-                                all[p].first_job == job
-                                    && state.run_number(&all[p].runs[r]) == number
-                            })
-                        }) {
+                        state.list.move_selection(0, pipeline_rows);
+                        if let Some(i) = run_row {
                             state.runs.selected = i;
                         }
-                        state.runs.move_selection(0, runs.len());
+                        state.runs.move_selection(0, run_rows);
                     }
                     Err(error) => state.load = PipelineLoad::Failed(error),
                 }
@@ -1738,7 +1774,7 @@ impl App {
             .map(|p| p.first_job.clone());
         let all = state.pipelines();
         let run = state
-            .visible_runs(&all)
+            .visible_runs()
             .get(state.runs.selected)
             .map(|&(p, r)| (all[p].first_job.clone(), state.run_number(&all[p].runs[r])));
         (pipeline, run)
@@ -1760,7 +1796,7 @@ impl App {
             View::Builds => return job(&self.history.visible().get(self.history.selected)?.job),
             View::Build | View::Console => return job(&self.build.as_ref()?.job),
             View::Pipelines => self.pipelines.visible_pipelines(),
-            View::Run => self.pipelines.pipelines(),
+            View::Run => self.pipelines.pipelines().iter().collect(),
             View::Runs | View::Settings => return None,
         };
         let pipeline = match self.view {
@@ -1820,10 +1856,10 @@ impl App {
             View::Runs => {
                 let pipelines = self.pipelines.pipelines();
                 self.pipelines
-                    .visible_runs(&pipelines)
+                    .visible_runs()
                     .get(self.pipelines.runs.selected)
                     .map(|&(p, r)| {
-                        let b = &self.pipelines.data.builds[pipelines[p].runs[r].first()];
+                        let b = &self.pipelines.data().builds[pipelines[p].runs[r].first()];
                         build(&b.job, b.number)
                     })
             }
@@ -1836,10 +1872,9 @@ impl App {
     /// `(job, number)` of the build selected in the run view.
     pub fn selected_run_build(&self) -> Option<(String, u64)> {
         let view = self.run.as_ref()?;
-        let pipelines = self.pipelines.pipelines();
-        let (pipeline, index) = self.pipelines.find_run(&pipelines, view)?;
+        let (pipeline, index) = self.pipelines.find_run(view)?;
         let run = &pipeline.runs[index];
-        let build = &self.pipelines.data.builds[*run.builds.get(view.selected)?];
+        let build = &self.pipelines.data().builds[*run.builds.get(view.selected)?];
         Some((build.job.clone(), build.number))
     }
 
@@ -2028,6 +2063,15 @@ impl App {
             | Context::Settings => {}
         }
     }
+}
+
+/// A promotion taken but whose build isn't there yet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingPromotion {
+    pub promotion: Promotion,
+    /// The job's newest build when it was promoted: any newer one is it
+    /// (whether or not it's linked to the run).
+    pub newest: Option<u64>,
 }
 
 /// The promotions overlay: a run's manual steps, some ticked.
@@ -3954,17 +3998,86 @@ mod tests {
             "the ticked one, not the highlighted one"
         );
 
-        let effects = app.update(Action::Promoted(vec![("prod".into(), Ok(false))]));
+        let promotion = |job: &str| Promotion {
+            from_job: "app".into(),
+            from_number: 3,
+            job: job.into(),
+        };
+        let effects = app.update(Action::Promoted(vec![(promotion("prod"), Ok(false))]));
         assert!(pipelines_fetch(&effects));
         let notice = &app.notice.as_ref().unwrap().text;
         assert!(notice.starts_with("Promoted prod"), "{notice}");
         assert!(notice.contains("not linked"), "{notice}");
 
         app.update(Action::Promoted(vec![(
-            "qa".into(),
+            promotion("qa"),
             Err("HTTP 500".into()),
         )]));
         assert!(app.notice.as_ref().unwrap().error);
+    }
+
+    #[test]
+    fn a_promotion_is_not_offered_again_until_its_build_shows_up() {
+        // pipeline_data() plus a manual step app → qa that hasn't run.
+        let mut data = pipeline_data();
+        data.jobs.push(crate::pipelines::PipelineJob {
+            name: "qa".into(),
+            status: crate::jobs::JobStatus::NotBuilt,
+            building: false,
+        });
+        data.static_edges.push(("app".into(), "qa".into()));
+        data.edges.push(("app".into(), "qa".into()));
+        let mut app = connected_with_jobs(&["a"]);
+        app.update(Action::SwitchTab(Tab::Pipelines));
+        let generation = app.connection_generation;
+        app.update(Action::PipelinesFetched {
+            generation,
+            result: Ok(data.clone()),
+        });
+        app.update(Action::OpenBuild);
+        let offered = |app: &mut App| {
+            app.update(Action::OpenPromote);
+            let jobs: Vec<String> = app
+                .promote
+                .as_ref()
+                .unwrap()
+                .promotions
+                .iter()
+                .map(|p| p.job.clone())
+                .collect();
+            app.update(Action::Back);
+            jobs
+        };
+        assert_eq!(offered(&mut app), ["qa"]);
+        let qa = Promotion {
+            from_job: "app".into(),
+            from_number: 3,
+            job: "qa".into(),
+        };
+        app.update(Action::Promoted(vec![(qa, Ok(true))]));
+        assert!(offered(&mut app).is_empty(), "queued: not offered twice");
+
+        // A refresh without the build yet: still pending.
+        app.update(Action::PipelinesFetched {
+            generation,
+            result: Ok(data.clone()),
+        });
+        assert!(offered(&mut app).is_empty());
+        // Its build appears: no longer pending (and, in the run, no longer open).
+        data.builds.push(crate::pipelines::RunBuild {
+            job: "qa".into(),
+            number: 1,
+            result: Some(crate::jobs::JobStatus::Success),
+            building: false,
+            started: SystemTime::UNIX_EPOCH,
+            duration: std::time::Duration::ZERO,
+            parent: Some(("app".into(), 3)),
+        });
+        app.update(Action::PipelinesFetched {
+            generation,
+            result: Ok(data),
+        });
+        assert!(app.pending_promotions.is_empty());
     }
 
     #[test]
