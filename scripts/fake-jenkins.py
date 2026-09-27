@@ -6,6 +6,13 @@
 
 Serves (under any path prefix, with an X-Jenkins header):
   GET /whoAmI/api/json   the current user
+  GET /api/json?tree=views[..], /view/Shop delivery/: a Build Pipeline view whose
+      page embeds the plugin's proxy; POST /$stapler/bound/<id>/triggerManualBuild
+      promotes (shop/test → shop/deploy is a manual step); logged to stdout
+  GET /crumbIssuer/api/json, POST /job/../build or buildWithParameters: start a
+      build (201; 403 without the crumb); logged to stdout
+  GET /api/json?tree=mode,...  instance details; /computer/api/json nodes;
+      /queue/api/json the build queue (the `i` overlay)
   GET /api/json          a job tree: folders, a multibranch project, every status;
                          with tree=...builds[...]{0,N}: each job's newest N builds
   GET /job/../api/json             the job: allBuilds (numbers, with gaps) + lastBuild
@@ -24,6 +31,7 @@ can be pointed at e.g. http://jenkins.example.com via proxy.url.
 --tls       serve HTTPS with a throwaway self-signed cert (needs openssl)
 --jobs N    add N generated jobs under generated/ (for long lists)
 --churn     change one job's status on every job-list request (auto-refresh)
+--no-views  no Build Pipeline view (promotions fall back to a plain build)
 """
 
 import argparse
@@ -72,6 +80,8 @@ STATIC_UPSTREAM = {
     "deploy/staging": ["backend/api/main", "frontend/web/main"],
     "tests/smoke": ["deploy/staging"],
     "deploy/production": ["tests/e2e"],
+    # A Build Pipeline plugin manual step: in the dependency graph, run by hand.
+    "shop/deploy": ["shop/test"],
 }
 # Pipeline jobs: no static relations; their `build job:` steps only show up
 # as upstream causes on the triggered builds.
@@ -81,8 +91,6 @@ PIPELINE_JOBS = {
     "backend/api/main",
     "frontend/web/main",
     "shop/build",
-    "shop/test",
-    "shop/deploy",
 }
 # Who triggers a job's builds, per slot k (0 = newest build): (upstream,
 # lag); upstream build = the upstream's slot k + lag. Alternatives rotate.
@@ -93,7 +101,8 @@ TRIGGERS = {
     "deploy/production": [("tests/e2e", 1)],
     "backend/api/main": [None, None, ("libs/core", 0)],  # sometimes by a lib
     "shop/test": [("shop/build", 0)],
-    "shop/deploy": [("shop/test", 0)],
+    # Promoted by hand a while after the tests: the newest run isn't yet.
+    "shop/deploy": [("shop/test", 1)],
 }
 # Position in the chain: triggered builds start a few minutes after their
 # trigger (see `started_ms`).
@@ -274,6 +283,8 @@ def build(full_name: str, color: str, number: int):
 
 
 RUN_CLASS = "org.jenkinsci.plugins.workflow.job.WorkflowRun"
+CRUMB = "fake-crumb-1234"
+PROXY_ID = "0f3e-42"
 
 
 def is_pipeline(full_name: str) -> bool:
@@ -460,10 +471,42 @@ def main() -> None:
     parser.add_argument("--tls", action="store_true")
     parser.add_argument("--jobs", type=int, default=0)
     parser.add_argument("--churn", action="store_true")
+    parser.add_argument("--no-views", action="store_true")
     args = parser.parse_args()
     job_requests = [0]
 
     class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            """Start a build (`build` / `buildWithParameters`): 201 + queue
+            item, like Jenkins. Needs the crumb (CSRF protection)."""
+            time.sleep(args.delay)
+            self.path = re.sub(r"^https?://[^/]+", "", self.path) or "/"
+            path = self.path.split("?")[0]
+            if self.headers.get("Jenkins-Crumb") != CRUMB:
+                return self.reply(403, {"error": "No valid crumb was included"})
+            if path == f"/$stapler/bound/{PROXY_ID}/triggerManualBuild":
+                length = int(self.headers.get("Content-Length", "0"))
+                upstream_number, job, upstream = json.loads(self.rfile.read(length))
+                print(f"promoted {job} from {upstream} #{upstream_number}", flush=True)
+                return self.reply_json(47)
+            if path.endswith(("/build", "/buildWithParameters")):
+                names = [
+                    unquote(p)
+                    for i, p in enumerate(path.split("/")[:-1])
+                    if i and path.split("/")[i - 1] == "job"
+                ]
+                print(
+                    f"triggered {'/'.join(names)} via {path.rsplit('/', 1)[1]}",
+                    flush=True,
+                )
+                self.send_response(201)
+                self.send_header("X-Jenkins", VERSION)
+                self.send_header("Location", "http://127.0.0.1/queue/item/103/")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            self.reply(404, {"error": "not found"})
+
         def do_GET(self) -> None:
             time.sleep(args.delay)
             if args.status:
@@ -483,6 +526,73 @@ def main() -> None:
                     user = base64.b64decode(auth[6:]).decode().split(":", 1)[0]
                 except ValueError:
                     pass
+            if path.endswith("/view/Shop%20delivery/") or path.endswith(
+                "/view/Shop delivery/"
+            ):
+                # A Build Pipeline view's page embeds its JavaScript proxy.
+                return self.reply_bytes(
+                    (
+                        "<html><script>var buildPipelineView = makeStaplerProxy("
+                        f"'/$stapler/bound/{PROXY_ID}','{CRUMB}',"
+                        "['getProjectBuildPipelineTree','triggerManualBuild','rerunBuild']);"
+                        "</script></html>"
+                    ).encode(),
+                    {},
+                )
+            if path.endswith("/crumbIssuer/api/json"):
+                return self.reply(
+                    200, {"crumb": CRUMB, "crumbRequestField": "Jenkins-Crumb"}
+                )
+            if path.endswith("/computer/api/json"):
+                return self.reply(
+                    200,
+                    {
+                        "busyExecutors": 3,
+                        "totalExecutors": 6,
+                        "computer": [
+                            {"displayName": "Built-In Node", "offline": False},
+                            {"displayName": "linux-agent-1", "offline": False},
+                            {"displayName": "linux-agent-2", "offline": False},
+                            {"displayName": "mac-agent", "offline": True},
+                        ],
+                    },
+                )
+            if path.endswith("/queue/api/json"):
+                return self.reply(200, {"items": [{"id": 101}, {"id": 102}]})
+            query = unquote(self.path.split("?", 1)[1]) if "?" in self.path else ""
+            if (
+                path.endswith("/api/json")
+                and "/job/" not in path
+                and "views[" in query
+                and args.no_views
+            ):
+                return self.reply(
+                    200, {"views": [{"_class": "hudson.model.AllView", "name": "all"}]}
+                )
+            if path.endswith("/api/json") and "/job/" not in path and "views[" in query:
+                return self.reply(
+                    200,
+                    {
+                        "views": [
+                            {"_class": "hudson.model.AllView", "name": "all"},
+                            {
+                                "_class": "au.com.centrumsystems.hudson.plugin."
+                                "buildpipeline.BuildPipelineView",
+                                "name": "Shop delivery",
+                            },
+                        ]
+                    },
+                )
+            if path.endswith("/api/json") and "/job/" not in path and "mode" in query:
+                return self.reply(
+                    200,
+                    {
+                        "mode": "NORMAL",
+                        "nodeDescription": "the Jenkins controller",
+                        "useSecurity": True,
+                        "quietingDown": False,
+                    },
+                )
             if path.endswith("/whoAmI/api/json"):
                 return self.reply(
                     200, {"name": user, "authenticated": user != "anonymous"}
@@ -505,11 +615,24 @@ def main() -> None:
                     tail = tail[:-2]
                 if not tail:
                     numbers = build_numbers(full_name, color)
+                    params = (
+                        [
+                            {
+                                "parameterDefinitions": [
+                                    {"name": "ENV"},
+                                    {"name": "DRY_RUN"},
+                                ]
+                            }
+                        ]
+                        if full_name.startswith("backend/")
+                        else [{}]
+                    )
                     return self.reply(
                         200,
                         {
                             "allBuilds": [{"number": n} for n in reversed(numbers)],
                             "lastBuild": last_build(full_name, color),
+                            "property": params,
                         },
                     )
                 if (
@@ -572,6 +695,16 @@ def main() -> None:
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+
+        def reply_json(self, value) -> None:
+            """A bare JSON value (what a JavaScript method returns)."""
+            data = json.dumps(value).encode()
+            self.send_response(200)
+            self.send_header("X-Jenkins", VERSION)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
 
         def reply(self, status: int, body: dict) -> None:
             data = json.dumps(body).encode()

@@ -9,8 +9,11 @@ use crate::{
     config::redact_url,
     console::{self, ConsoleChunk},
     history::{self, HistoryEntry},
+    instance::{self, InstanceInfo},
     jobs::{self, Job},
+    pipelines::Promotion,
     pipelines::{self, PipelineData},
+    promote,
 };
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -71,7 +74,9 @@ pub fn client(config: &ConnectionConfig) -> Result<reqwest::Client, String> {
         .no_proxy()
         // Certs are checked against the OS trust store (rustls-platform-verifier),
         // so internal CAs installed system-wide work without this.
-        .danger_accept_invalid_certs(config.skip_tls_verify);
+        .danger_accept_invalid_certs(config.skip_tls_verify)
+        // For the CSRF crumb, which belongs to a session (see `trigger_build`).
+        .cookie_store(true);
     if let Some(proxy) = &config.proxy {
         let proxy = reqwest::Proxy::all(proxy)
             .map_err(|err| format!("invalid proxy {}: {}", redact_url(proxy), chain(&err)))?;
@@ -125,6 +130,22 @@ pub async fn fetch_pipelines(config: &ConnectionConfig) -> Result<PipelineData, 
     );
     let response = get(config, &path, false).await?.ok_or("not found")?;
     pipelines::parse(&response.body)
+}
+
+/// Details of the instance for the `i` overlay (three small requests).
+pub async fn fetch_instance_info(config: &ConnectionConfig) -> Result<InstanceInfo, String> {
+    let body = |path: &'static str| async move {
+        get(config, path, false)
+            .await?
+            .map(|r| r.body)
+            .ok_or_else(|| format!("{path}: not found"))
+    };
+    let (root, nodes, queue) = tokio::try_join!(
+        body(instance::ROOT_PATH),
+        body(instance::NODES_PATH),
+        body(instance::QUEUE_PATH)
+    )?;
+    instance::parse(&root, &nodes, &queue)
 }
 
 /// Console output of build `number` of a job, from byte offset `start`.
@@ -238,9 +259,132 @@ async fn get(
     allow_not_found: bool,
 ) -> Result<Option<Response>, String> {
     let client = client(config)?;
+    let get = reqwest::Method::GET;
+    send(&client, config, get, path, allow_not_found, &[], None).await
+}
+
+/// The CSRF crumb header for POSTs with `client` (none when the protection
+/// is off). Jenkins ties it to the session cookie of the request that got it,
+/// so use the same client for the POST.
+async fn crumb(
+    client: &reqwest::Client,
+    config: &ConnectionConfig,
+) -> Result<Vec<(String, String)>, String> {
+    let get = reqwest::Method::GET;
+    let response = send(client, config, get, builds::CRUMB_PATH, true, &[], None).await?;
+    Ok(match response {
+        Some(response) => vec![builds::parse_crumb(&response.body)?],
+        None => Vec::new(),
+    })
+}
+
+/// Whether `job` takes parameters.
+async fn is_parameterized(
+    client: &reqwest::Client,
+    config: &ConnectionConfig,
+    job: &str,
+) -> Result<bool, String> {
+    let path = builds::parameters_path(job);
+    let get = reqwest::Method::GET;
+    let response = send(client, config, get, &path, true, &[], None)
+        .await?
+        .ok_or_else(|| format!("job {job} no longer exists"))?;
+    builds::has_parameters(&response.body)
+}
+
+/// Start a build of `full_name` with its default parameters, like "Build
+/// Now".
+pub async fn trigger_build(config: &ConnectionConfig, full_name: &str) -> Result<(), String> {
+    let client = client(config)?;
+    let parameterized = is_parameterized(&client, config, full_name).await?;
+    let crumb = crumb(&client, config).await?;
+    let path = builds::trigger_path(full_name, parameterized);
+    let post = reqwest::Method::POST;
+    send(&client, config, post, &path, false, &crumb, None).await?;
+    Ok(())
+}
+
+/// Take a manual step of a run (see [`crate::promote`]). `Ok(true)`: done by
+/// the Build Pipeline plugin, so the build joins the run; `Ok(false)`: no
+/// such view, the job was started directly (not linked to the run).
+pub async fn promote(config: &ConnectionConfig, promotion: &Promotion) -> Result<bool, String> {
+    let client = client(config)?;
+    let (get, post) = (reqwest::Method::GET, reqwest::Method::POST);
+    let crumb = crumb(&client, config).await?;
+
+    let views = send(
+        &client,
+        config,
+        get.clone(),
+        promote::VIEWS_PATH,
+        true,
+        &[],
+        None,
+    )
+    .await?;
+    let views = match views {
+        Some(response) => promote::pipeline_views(&response.body)?,
+        None => Vec::new(),
+    };
+    for view in views {
+        let path = promote::view_path(&view);
+        let page = send(&client, config, get.clone(), &path, true, &[], None).await?;
+        let Some((proxy, page_crumb)) = page.and_then(|p| promote::trigger_proxy(&p.body)) else {
+            continue;
+        };
+        let mut headers = crumb.clone();
+        if !page_crumb.is_empty() {
+            // How the page's own calls send it.
+            headers.push(("Crumb".to_owned(), page_crumb));
+        }
+        let body = (
+            "application/x-stapler-method-invocation;charset=UTF-8",
+            promote::trigger_arguments(promotion),
+        );
+        let call = format!("{proxy}/triggerManualBuild");
+        send(&client, config, post, &call, false, &headers, Some(body)).await?;
+        return Ok(true);
+    }
+
+    // No Build Pipeline view: start the job with the upstream build's parameters.
+    let path = promote::parameters_path(&promotion.from_job, promotion.from_number);
+    let parameters = match send(&client, config, get, &path, true, &[], None).await? {
+        Some(response) => promote::parameters(&response.body)?,
+        None => Vec::new(),
+    };
+    let parameterized = is_parameterized(&client, config, &promotion.job).await?;
+    let body = parameterized.then(|| {
+        let form = url::form_urlencoded::Serializer::new(String::new())
+            .extend_pairs(&parameters)
+            .finish();
+        ("application/x-www-form-urlencoded", form)
+    });
+    let path = builds::trigger_path(&promotion.job, parameterized);
+    send(&client, config, post, &path, false, &crumb, body).await?;
+    Ok(false)
+}
+
+/// Send a request with the configured headers plus `extra` ones (e.g. the
+/// CSRF crumb) and an optional `(content type, body)`. Non-2xx answers
+/// become errors (401/403 explaining who refused and why), except 404 with
+/// `allow_not_found`: `Ok(None)`.
+async fn send(
+    client: &reqwest::Client,
+    config: &ConnectionConfig,
+    method: reqwest::Method,
+    path: &str,
+    allow_not_found: bool,
+    extra: &[(String, String)],
+    body: Option<(&str, String)>,
+) -> Result<Option<Response>, String> {
     let endpoint = api_url(&config.url, path)?;
-    let mut request = client.get(endpoint);
-    for (name, value) in &config.headers {
+    let mut request = client.request(method, endpoint);
+    if let Some((content_type, body)) = body {
+        request = request
+            .header(reqwest::header::CONTENT_TYPE, content_type)
+            .body(body);
+    }
+    for (name, value) in config.headers.iter().chain(extra) {
         let name = reqwest::header::HeaderName::from_bytes(name.as_bytes())
             .map_err(|_| format!("invalid header name {name:?}"))?;
         let mut value = reqwest::header::HeaderValue::from_str(value)

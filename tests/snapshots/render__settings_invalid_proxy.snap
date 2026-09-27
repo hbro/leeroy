@@ -3,7 +3,7 @@ source: tests/render.rs
 expression: render_after(&actions).backend()
 ---
 " Leeroy  ○ not connected                                              h/?  help "
-" 1 Jobs   2 Builds   3 Pipelines   4 Runs                            0 Settings "
+" 1 Jobs   2 Builds   3 Pipelines   4 Pipeline runs                   0 Settings "
 "Settings ───────────────────────────────────────────────────────────────────────"
 "   Config file       /home/user/.config/leeroy/config.toml                      "
 "                                                                                "

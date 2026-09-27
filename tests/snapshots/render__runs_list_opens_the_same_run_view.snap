@@ -3,11 +3,11 @@ source: tests/render.rs
 expression: screen
 ---
 " Leeroy  ● https://ci.example.com · Jenkins 2.504.1 · me       h/?  help   ⟳ 0s "
-" 1 Jobs   2 Builds   3 Pipelines   4 Runs                            0 Settings "
-"Runs (3) ───────────────────────────────────────────────────────────────────────"
+" 1 Jobs   2 Builds   3 Pipelines   4 Pipeline runs                   0 Settings "
+"Pipeline runs (3) ──────────────────────────────────────────────────────────────"
 "▶ ● failure  shop #8                                            9m ago       20s"
 "  ⟳ unstable libs/core #12                                     22m ago  22m 00s…"
-"  ● success  shop #7                                            3h ago    1m 30s"
+"  ● partial  shop #7                                            3h ago    1m 30s"
 "                                                                                "
 "                                                                                "
 "                                                                                "

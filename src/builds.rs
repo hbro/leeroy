@@ -142,6 +142,67 @@ pub fn build_path(full_name: &str, which: BuildRef) -> String {
     }
 }
 
+/// Request path for whether a job takes parameters.
+pub fn parameters_path(full_name: &str) -> String {
+    format!(
+        "{}api/json?tree=property[parameterDefinitions[name]]",
+        job_path(full_name)
+    )
+}
+
+/// Path to POST to start a build with default parameters: Jenkins wants
+/// `buildWithParameters` for a parameterized job, `build` otherwise.
+pub fn trigger_path(full_name: &str, parameterized: bool) -> String {
+    let action = if parameterized {
+        "buildWithParameters"
+    } else {
+        "build"
+    };
+    format!("{}{action}", job_path(full_name))
+}
+
+#[derive(Deserialize)]
+struct RawJobProperties {
+    #[serde(default)]
+    property: Vec<Option<RawProperty>>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawProperty {
+    #[serde(default)]
+    parameter_definitions: Vec<serde_json::Value>,
+}
+
+/// Whether the answer to [`parameters_path`] lists any parameter.
+pub fn has_parameters(json: &str) -> Result<bool, String> {
+    let raw: RawJobProperties =
+        serde_json::from_str(json).map_err(|err| format!("unexpected job data: {err}"))?;
+    Ok(raw
+        .property
+        .iter()
+        .flatten()
+        .any(|p| !p.parameter_definitions.is_empty()))
+}
+
+/// Jenkins' CSRF protection: `crumbIssuer/api/json` gives the header to send
+/// with POSTs (404 when the protection is off).
+pub const CRUMB_PATH: &str = "crumbIssuer/api/json";
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawCrumb {
+    crumb: String,
+    crumb_request_field: String,
+}
+
+/// `(header name, value)` from the crumb issuer's answer.
+pub fn parse_crumb(json: &str) -> Result<(String, String), String> {
+    let raw: RawCrumb =
+        serde_json::from_str(json).map_err(|err| format!("unexpected crumb data: {err}"))?;
+    Ok((raw.crumb_request_field, raw.crumb))
+}
+
 /// Request path for just a job's build numbers.
 pub fn numbers_path(full_name: &str) -> String {
     format!(
@@ -673,6 +734,21 @@ mod tests {
             ]
         );
         assert!(parse_stages("<html>").is_err());
+    }
+
+    #[test]
+    fn triggering_helpers() {
+        assert_eq!(trigger_path("a/b", false), "job/a/job/b/build");
+        assert_eq!(trigger_path("a", true), "job/a/buildWithParameters");
+        assert!(parameters_path("a").ends_with("tree=property[parameterDefinitions[name]]"));
+        let with = r#"{"property": [{}, null, {"parameterDefinitions": [{"name": "ENV"}]}]}"#;
+        assert!(has_parameters(with).unwrap());
+        assert!(!has_parameters(r#"{"property": [{}]}"#).unwrap());
+        assert!(!has_parameters("{}").unwrap());
+        assert_eq!(
+            parse_crumb(r#"{"crumb": "abc", "crumbRequestField": "Jenkins-Crumb"}"#).unwrap(),
+            ("Jenkins-Crumb".to_owned(), "abc".to_owned())
+        );
     }
 
     #[test]

@@ -80,7 +80,10 @@ Rules:
   text colours go through `t.on_selected()` there. Tests in `theme.rs` check
   every theme for fg != bg; `selected_row_status_stays_readable` renders both.
 - Global keys (`GLOBAL_BINDINGS`; no bottom bar, listed in the help popup, the
-  header shows an `h/?` hint): q, h/?, r (refresh), R (toggle auto-refresh). The refresh status is a compact `⟳ 4s` at the right end of the
+  header shows an `h/?` hint): q, h/?, i (instance overlay: `src/instance.rs`,
+  three requests fetched fresh on every open, header names only), r (refresh),
+  R (toggle auto-refresh). The help popup's section for the view below is
+  titled "Navigation". The refresh status is a compact `⟳ 4s` at the right end of the
   header (icon green = auto-refresh on, gray = off; `…` fetching, `✕` failed).
 - Build view (`View::Build`, part of the Jobs tab): `Enter` on a job opens it
   and fetches unconditionally. `BuildRef::Latest` fetches the job's build numbers
@@ -94,7 +97,7 @@ Rules:
   Builds): Esc returns there and `App::tab()` highlights that tab. Opened at a
   number (from Builds), the first fetch also gets the job's build numbers
   (`want_numbers`) so ←/→ work.
-- Pipelines (`3`) and Runs (`4`) share one fetch (`Effect::FetchPipelines`,
+- Pipelines (`3`) and Pipeline runs (`4`, `Tab::Runs`) share one fetch (`Effect::FetchPipelines`,
   one in flight, auto-refresh/`r` like the other tabs, reset on reconnect).
   Enter opens `View::Run` (`App::run: RunView`, `RunRef::Latest` from
   Pipelines, `Number` from Runs; `origin` for Esc and `App::tab`). Run view:
@@ -103,6 +106,21 @@ Rules:
   `origin: View::Run` (Esc → run view → list). List rows are
   `ui::run_table`; the boxes are painted by `ui::paint_boxes` (scrolls to the
   selection, records the scroll in a `Cell`, returns the `more ←→↑↓` hint).
+- Writing to Jenkins: `b` (Pipelines tab, run view) → `Context::ConfirmStart`
+  prompt (takes every key, like the quit prompt) → `Effect::TriggerBuild`.
+  `jenkins::trigger_build` uses ONE client (cookies on): parameter check
+  (`buildWithParameters` vs `build`), crumb from `crumbIssuer/api/json` (404 =
+  CSRF off; crumbs are tied to the session cookie), POST. Outcomes show as an
+  `App::notice` at the right of the bottom bar for `NOTICE_FOR`. `o` =
+  `App::browser_url()` (pure; configured URL minus credentials) →
+  `Effect::OpenBrowser` (xdg-open / open / rundll32, output discarded).
+- Promotions (`p`, run view → `Context::Promote`, `App::promote`): targets =
+  `pipelines::promotions` (static downstream jobs of a successful build it
+  didn't trigger; manual steps are in Jenkins' dependency graph). Executed by
+  `jenkins::promote`: via a Build Pipeline view's page proxy
+  (`makeStaplerProxy`, `triggerManualBuild`, see `src/promote.rs`), else a
+  plain build with the upstream build's parameters (`Ok(false)`: not linked).
+  Fake: `shop/test → shop/deploy` is manual; `--no-views` for the fallback.
 - Build view stages: for a `WorkflowRun` (`Build::pipeline`, from `_class`),
   `jenkins::fetch_build` also gets `<n>/wfapi/describe`; 404 (no Stage View
   plugin) or any error = no stages section, never a failed build view.

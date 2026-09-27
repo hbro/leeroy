@@ -201,7 +201,7 @@ Content lives in tabs, selected with the digit keys shown in the tab bar:
 | `1` | Jobs |
 | `2` | Builds (build history) |
 | `3` | Pipelines |
-| `4` | Runs (of all pipelines) |
+| `4` | Pipeline runs (of all pipelines) |
 | `0` | Settings (far right of the tab bar) |
 
 Global keys, available everywhere except while typing in a field (the full list
@@ -212,6 +212,8 @@ is in the help popup, `h` or `?`, hinted at the right of the header):
 | `q` | quit (asks first: `y`/`Enter`/`q` quits, `n`/`Esc` stays; setting `ui.confirm_quit`) |
 | `Ctrl-C` | quit immediately, from anywhere |
 | `h` / `?` | help |
+| `o` | open what's on screen (job, build, console, pipeline, run) in Jenkins' web UI |
+| `i` | about the Jenkins instance: version, user, nodes, executors, queue, and how Leeroy connects (TLS, proxy, header names) |
 | `r` | refresh now (reconnects if the connection failed) |
 | `R` | toggle auto-refresh for this session |
 
@@ -308,6 +310,7 @@ run that's still going.
 | --- | --- |
 | `↑/↓` `j/k`, `PgUp/PgDn`, `g/G` | move |
 | `Enter` | open the latest run |
+| `b` | start a new run (asks first; default parameter values) |
 | `/` | filter by name |
 
 Leeroy finds the relations in two places, because Jenkins records them in two
@@ -316,7 +319,7 @@ incomplete ways: the job configuration (freestyle "build other projects" and
 also covers a Jenkinsfile's `build job:` step). One request asks every job for
 both, looking at its last 20 builds, so runs older than that aren't shown.
 
-### Runs
+### Pipeline runs
 
 Every run of every pipeline, newest first, named like its pipeline plus the
 number of the build that started it (`app #12`). `Enter` opens it in the run
@@ -334,10 +337,26 @@ selected one in sight and the title says where there's more (`more ↓`).
 | --- | --- |
 | `←` / `→` | older / newer run of the pipeline |
 | `Home` / `End` | first (oldest loaded) / latest run |
-| `v` | tree ⇄ boxes |
+| `v` | tree ⇄ boxes (view) |
 | `↑/↓` `j/k` | select a build |
 | `Enter` | open the selected build (details, console with `c`) |
+| `p` | promote: the run's manual steps, `Space` ticks several, `Enter` takes them |
+| `b` | start a new run of the pipeline (asks first) |
 | `Esc` | back to the list |
+
+### Promotions
+
+`p` in the run view lists the run's manual steps: every job downstream (in the
+job configuration) of a successfully finished build of the run that it hasn't
+triggered, e.g. `shop/test #49 → shop/deploy` for a Build Pipeline plugin
+"Manually Execute Downstream Project" step. `Space` ticks one or more, `Enter`
+takes the ticked ones (or the highlighted one when none is ticked).
+
+Leeroy takes a step the way the Build Pipeline plugin's own page does, through a
+Build Pipeline view: the new build then has the upstream build as its cause
+(it joins the run) and gets its parameters. Without such a view, the job is
+started directly with the upstream build's parameters; it runs, but isn't linked
+to the run (the notice says so).
 
 ## Development
 

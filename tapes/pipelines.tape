@@ -11,6 +11,13 @@ Show
 Screenshot target/screenshots/pipelines.png
 Sleep 500ms
 Hide
+Type "b"
+Sleep 300ms
+Show
+Screenshot target/screenshots/pipelines-start-prompt.png
+Sleep 500ms
+Hide
+Type "n"
 Enter
 Down 2
 Sleep 300ms
@@ -28,6 +35,16 @@ Left
 Sleep 300ms
 Show
 Screenshot target/screenshots/pipelines-run-older.png
+Sleep 500ms
+Hide
+Escape
+Type "G"
+Enter
+Type "p"
+Space
+Sleep 300ms
+Show
+Screenshot target/screenshots/pipelines-promote.png
 Sleep 500ms
 Hide
 Type "q"

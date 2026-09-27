@@ -227,6 +227,53 @@ impl Executor {
                 });
                 self.history_task = Some(task.abort_handle());
             }
+            Effect::TriggerBuild { job, name, config } => {
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    let result = jenkins::trigger_build(&config, &job).await;
+                    match &result {
+                        Ok(()) => tracing::info!(job, "triggered a build"),
+                        Err(err) => tracing::warn!(job, %err, "triggering a build failed"),
+                    }
+                    let _ = tx.send(Action::BuildTriggered { name, result });
+                });
+            }
+            Effect::Promote { promotions, config } => {
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    // One after the other, like clicking them in turn.
+                    let mut results = Vec::new();
+                    for promotion in &promotions {
+                        let result = jenkins::promote(&config, promotion).await;
+                        match &result {
+                            Ok(linked) => tracing::info!(to = promotion.job, linked, "promoted"),
+                            Err(err) => {
+                                tracing::warn!(to = promotion.job, %err, "promotion failed")
+                            }
+                        }
+                        results.push((promotion.job.clone(), result));
+                    }
+                    let _ = tx.send(Action::Promoted(results));
+                });
+            }
+            Effect::OpenBrowser { url } => {
+                let result = open_url(&url);
+                if let Err(err) = &result {
+                    tracing::warn!(%err, "opening a browser failed");
+                }
+                let _ = tx.send(Action::BrowserOpened(result));
+            }
+            Effect::FetchInstanceInfo { generation, config } => {
+                // Short-lived and harmless to overlap: not tracked or aborted.
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    let result = jenkins::fetch_instance_info(&config).await;
+                    if let Err(err) = &result {
+                        tracing::warn!(%err, "fetching instance info failed");
+                    }
+                    let _ = tx.send(Action::InfoFetched { generation, result });
+                });
+            }
             Effect::FetchPipelines { generation, config } => {
                 if let Some(previous) = self.pipelines_task.take() {
                     previous.abort();
@@ -329,6 +376,31 @@ fn detect_appearance() -> Option<Appearance> {
         }
     }
     .inspect(|appearance| tracing::info!(?appearance, "terminal background detected"))
+}
+
+/// Open `url` with the system's handler, detached and silent (stdout and
+/// stderr belong to the TUI).
+fn open_url(url: &str) -> Result<(), String> {
+    let mut command = if cfg!(target_os = "macos") {
+        std::process::Command::new("open")
+    } else if cfg!(windows) {
+        // `start` via cmd would treat `&` in the URL as a command separator.
+        let mut command = std::process::Command::new("rundll32");
+        command.arg("url.dll,FileProtocolHandler");
+        command
+    } else {
+        std::process::Command::new("xdg-open")
+    };
+    let mut child = command
+        .arg(url)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|err| err.to_string())?;
+    // Reap it when it exits, without waiting here.
+    std::thread::spawn(move || child.wait());
+    Ok(())
 }
 
 /// Log to a file: stdout belongs to the TUI. Location: see

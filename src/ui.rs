@@ -12,13 +12,14 @@ use ratatui::{
 };
 
 use crate::{
-    app::{App, ConnectionStatus, SettingsRow, StatusMessage, Tab, View},
+    app::{App, ConnectionStatus, NOTICE_FOR, SettingsRow, StatusMessage, Tab, View},
     builds::{Build, BuildLoad, BuildRef, Stage, StageStatus, format_duration},
     config::{DEFAULT_REFRESH_SECS, HEADERS_DOC, SettingKey, header_env_var, redact_url},
     console::ConsoleLoad,
     event::{Binding, GLOBAL_BINDINGS, context_bindings},
     graph::{self, Cell as GraphCell},
     history::HistoryLoad,
+    instance::InfoLoad,
     jobs::{JobStatus, JobsLoad},
     pipelines::{PipelineLoad, RUN_BUILDS, RunStatus, run_span, run_status},
     proxy::SystemProxy,
@@ -52,6 +53,15 @@ pub fn render(frame: &mut Frame, app: &App) {
 
     if app.show_help {
         render_help(frame, body, app);
+    }
+    if app.show_info {
+        render_info(frame, body, app);
+    }
+    if app.promote.is_some() {
+        render_promote(frame, body, app);
+    }
+    if app.confirm_start.is_some() {
+        render_confirm_start(frame, body, app);
     }
     if app.confirm_quit {
         render_confirm_quit(frame, body, app.theme());
@@ -647,13 +657,13 @@ fn render_runs(frame: &mut Frame, area: Rect, app: &App) {
         let message = Paragraph::new(lines)
             .alignment(Alignment::Center)
             .wrap(Wrap { trim: true })
-            .block(view_block(t, "Runs"));
+            .block(view_block(t, "Pipeline runs"));
         return frame.render_widget(message, area);
     }
     let state = &app.pipelines;
     let pipelines = state.pipelines();
     let runs = state.visible_runs(&pipelines);
-    let mut title = format!("Runs ({})", runs.len());
+    let mut title = format!("Pipeline runs ({})", runs.len());
     if state.refreshing {
         title.push_str(" · refreshing…");
     }
@@ -674,7 +684,7 @@ fn render_runs(frame: &mut Frame, area: Rect, app: &App) {
         let lines = if filter.is_empty() {
             vec![
                 Line::raw(""),
-                Line::styled("No runs", Style::new().italic()),
+                Line::styled("No pipeline runs", Style::new().italic()),
                 Line::styled(
                     format!("None of the last {RUN_BUILDS} builds of any job triggered another"),
                     t.dim(),
@@ -684,7 +694,7 @@ fn render_runs(frame: &mut Frame, area: Rect, app: &App) {
             vec![
                 Line::raw(""),
                 Line::styled(
-                    format!("No runs matching \"{filter}\""),
+                    format!("No pipeline runs matching \"{filter}\""),
                     Style::new().italic(),
                 ),
             ]
@@ -1491,6 +1501,22 @@ fn render_context_bar(frame: &mut Frame, area: Rect, app: &App) {
         .collect();
     let spans = binding_spans(&bindings, t.on_accent);
     frame.render_widget(Paragraph::new(Line::from(spans)).style(t.context_bar), area);
+    // The outcome of the last action, for a few seconds, at the right end.
+    if let Some(notice) = app
+        .notice
+        .as_ref()
+        .filter(|n| app.now.saturating_duration_since(n.at) < NOTICE_FOR)
+    {
+        let color = if notice.error { t.error } else { t.success };
+        let text = format!(" {} ", notice.text);
+        let width = (text.chars().count() as u16).min(area.width);
+        let [_, right] =
+            Layout::horizontal([Constraint::Min(0), Constraint::Length(width)]).areas(area);
+        frame.render_widget(
+            Paragraph::new(Span::styled(text, t.context_bar.fg(color).bold())),
+            right,
+        );
+    }
 }
 
 /// `⟳ 4s`: how old the data is; the icon is green while auto-refresh is on,
@@ -1590,6 +1616,206 @@ fn render_confirm_quit(frame: &mut Frame, area: Rect, t: &Theme) {
     frame.render_widget(Paragraph::new(lines).block(block), popup);
 }
 
+/// The `i` overlay: the connected instance and how Leeroy reaches it.
+fn render_info(frame: &mut Frame, area: Rect, app: &App) {
+    let t = app.theme();
+    let dim = t.dim();
+    let row = |label: &str, value: Span<'static>| {
+        Line::from(vec![Span::styled(format!(" {label:<12}"), dim), value])
+    };
+    let mut lines = vec![Line::raw("")];
+    match &app.connection {
+        ConnectionStatus::Connected { url, info } => {
+            lines.push(row("URL", Span::raw(url.clone())));
+            let version = info.version.clone().unwrap_or_else(|| "unknown".into());
+            lines.push(row("Version", Span::raw(format!("Jenkins {version}"))));
+            lines.push(row("User", Span::raw(info.user.clone())));
+        }
+        _ => {
+            lines.push(Line::styled(" Not connected", Style::new().italic()));
+            lines.push(Line::styled(" See the settings (0)", dim));
+        }
+    }
+    match &app.info {
+        InfoLoad::Loaded(info) => {
+            lines.push(row(
+                "Security",
+                Span::raw(if info.security {
+                    "on"
+                } else {
+                    "off (anyone can do anything)"
+                }),
+            ));
+            lines.push(row(
+                "Nodes",
+                Span::raw(format!(
+                    "{} of {} online",
+                    info.nodes_online, info.nodes_total
+                )),
+            ));
+            lines.push(row(
+                "Executors",
+                Span::raw(format!(
+                    "{} of {} busy",
+                    info.busy_executors, info.total_executors
+                )),
+            ));
+            lines.push(row("Queue", Span::raw(format!("{} waiting", info.queued))));
+            if info.quieting_down {
+                lines.push(row(
+                    "Status",
+                    Span::styled(
+                        "⚠ quieting down: no new builds start",
+                        Style::new().fg(t.warning).bold(),
+                    ),
+                ));
+            }
+            if let Some(description) = &info.description {
+                lines.push(row("About", Span::raw(description.clone())));
+            }
+        }
+        InfoLoad::Loading => lines.push(Line::styled(" Loading…", Style::new().italic())),
+        InfoLoad::Failed(error) => {
+            lines.push(Line::styled(format!(" {error}"), Style::new().fg(t.error)))
+        }
+        InfoLoad::NotLoaded => {}
+    }
+    if let Some(config) = app.settings.connection_config() {
+        lines.push(Line::raw(""));
+        let tls = if config.skip_tls_verify {
+            Span::styled("NOT VERIFIED (insecure)", Style::new().fg(t.error).bold())
+        } else {
+            Span::raw("verified")
+        };
+        lines.push(row("TLS", tls));
+        let proxy = match &config.proxy {
+            Some(proxy) => redact_url(proxy),
+            None => "none (direct)".into(),
+        };
+        lines.push(row("Proxy", Span::raw(proxy)));
+        let headers: Vec<&str> = config.headers.iter().map(|(n, _)| n.as_str()).collect();
+        let headers = if headers.is_empty() {
+            "none".to_owned()
+        } else {
+            headers.join(", ") // names only: values are credentials
+        };
+        lines.push(row("Headers", Span::raw(headers)));
+    }
+    lines.push(Line::raw(""));
+
+    let width = (area.width.saturating_sub(4)).min(64);
+    let popup = centered(area, width, lines.len() as u16 + 2);
+    let block = Block::bordered()
+        .title(" Jenkins instance ")
+        .border_type(BorderType::Double)
+        .border_style(Style::new().fg(t.accent));
+    frame.render_widget(Clear, popup);
+    frame.render_widget(Paragraph::new(lines).block(block), popup);
+}
+
+/// The promotions overlay: the run's manual steps, ticked with Space.
+fn render_promote(frame: &mut Frame, area: Rect, app: &App) {
+    let Some(list) = &app.promote else {
+        return;
+    };
+    let t = app.theme();
+    let mut lines = vec![Line::raw("")];
+    if list.promotions.is_empty() {
+        lines.push(Line::styled(
+            "  Nothing to promote in this run",
+            Style::new().italic(),
+        ));
+        lines.push(Line::styled(
+            "  (no manual steps after its successful builds)",
+            t.dim(),
+        ));
+    }
+    for (i, promotion) in list.promotions.iter().enumerate() {
+        let selected = i == list.selected;
+        let tick = if list.ticked.contains(&i) {
+            "[x]"
+        } else {
+            "[ ]"
+        };
+        let base = if selected {
+            Style::new().bg(t.selected_bg).bold()
+        } else {
+            Style::new()
+        };
+        let dim = Style::new().fg(if selected {
+            t.on_selected(t.dim)
+        } else {
+            t.dim
+        });
+        lines.push(Line::from(vec![
+            Span::styled(if selected { " ▶ " } else { "   " }, base),
+            Span::styled(format!("{tick} "), base.fg(t.highlight)),
+            Span::styled(
+                format!("{} #{}", promotion.from_job, promotion.from_number),
+                base.patch(dim),
+            ),
+            Span::styled(" → ", base.patch(dim)),
+            Span::styled(format!("{} ", promotion.job), base),
+        ]));
+    }
+    lines.push(Line::raw(""));
+    let width = lines
+        .iter()
+        .map(|l| l.width() as u16 + 4)
+        .max()
+        .unwrap_or(40)
+        .clamp(44, area.width.saturating_sub(4));
+    let popup = centered(area, width, lines.len() as u16 + 2);
+    let block = Block::bordered()
+        .title(" Promote ")
+        .border_type(BorderType::Double)
+        .border_style(Style::new().fg(t.accent));
+    frame.render_widget(Clear, popup);
+    frame.render_widget(Paragraph::new(lines).block(block), popup);
+}
+
+fn render_confirm_start(frame: &mut Frame, area: Rect, app: &App) {
+    let Some(start) = &app.confirm_start else {
+        return;
+    };
+    let t = app.theme();
+    let key = Style::new().bold();
+    let mut name = vec![Span::raw("  "), Span::styled(start.name.clone(), key)];
+    if start.name != start.job {
+        name.push(Span::styled(format!("  ({})", start.job), t.dim()));
+    }
+    let lines = vec![
+        Line::raw(""),
+        Line::from(name),
+        Line::styled("  with its default parameters", t.dim()),
+        Line::raw(""),
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled("y", key),
+            Span::raw(" / "),
+            Span::styled("Enter", key),
+            Span::raw(" start    "),
+            Span::styled("n", key),
+            Span::raw(" / "),
+            Span::styled("Esc", key),
+            Span::raw(" cancel"),
+        ]),
+    ];
+    let width = lines
+        .iter()
+        .map(|l| l.width() as u16 + 4)
+        .max()
+        .unwrap_or(40)
+        .clamp(40, area.width.saturating_sub(4));
+    let popup = centered(area, width, lines.len() as u16 + 2);
+    let block = Block::bordered()
+        .title(" Start a run? ")
+        .border_type(BorderType::Double)
+        .border_style(Style::new().fg(t.warning));
+    frame.render_widget(Clear, popup);
+    frame.render_widget(Paragraph::new(lines).block(block), popup);
+}
+
 fn render_help(frame: &mut Frame, area: Rect, app: &App) {
     let t = app.theme();
     let key_style = Style::new().add_modifier(Modifier::BOLD);
@@ -1607,34 +1833,48 @@ fn render_help(frame: &mut Frame, area: Rect, app: &App) {
             .collect()
     };
 
+    // Two per row: the popup has to fit on a 24-line terminal.
+    let pairs = |items: Vec<(&str, &str)>| -> Vec<Line<'static>> {
+        items
+            .chunks(2)
+            .map(|pair| {
+                let mut spans = Vec::new();
+                for (i, (key, desc)) in pair.iter().enumerate() {
+                    let key = if i == 0 {
+                        format!("{key:>8}")
+                    } else {
+                        format!("{key:>3}")
+                    };
+                    spans.push(Span::styled(key, key_style));
+                    spans.push(Span::raw(format!("  {desc:<16}")));
+                }
+                Line::from(spans)
+            })
+            .collect()
+    };
+
     // Describe the view underneath the popup, not the popup itself.
     let view_context = app.view.context();
     let mut lines = vec![section("Global")];
-    lines.extend(rows(GLOBAL_BINDINGS));
+    lines.extend(pairs(
+        GLOBAL_BINDINGS.iter().map(|b| (b.key, b.desc)).collect(),
+    ));
     lines.push(Line::raw(""));
     lines.push(section("Tabs"));
-    // Two per row: the popup has to fit on a 24-line terminal.
-    for pair in Tab::ALL.chunks(2) {
-        let mut spans = Vec::new();
-        for (i, tab) in pair.iter().enumerate() {
-            let key = if i == 0 {
-                format!("{:>8}", tab.key_label())
-            } else {
-                format!("{:>3}", tab.key_label())
-            };
-            spans.push(Span::styled(key, key_style));
-            spans.push(Span::raw(format!("  {:<11}", tab.title())));
-        }
-        lines.push(Line::from(spans));
-    }
+    lines.extend(pairs(
+        Tab::ALL
+            .iter()
+            .map(|t| (t.key_label(), t.title()))
+            .collect(),
+    ));
     let view_bindings = context_bindings(view_context);
     if !view_bindings.is_empty() {
         lines.push(Line::raw(""));
-        lines.push(section(view_context.title()));
+        lines.push(section("Navigation"));
         lines.extend(rows(view_bindings));
     }
 
-    let popup = centered(area, 40, lines.len() as u16 + 2);
+    let popup = centered(area, 54, lines.len() as u16 + 2);
     let block = Block::bordered()
         .title(" Help ")
         .border_type(BorderType::Double)

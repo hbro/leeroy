@@ -1,0 +1,28 @@
+---
+source: tests/render.rs
+expression: screen
+---
+" Leeroy  ● https://ci.example.com · Jenkins 2.504.1 · me       h/?  help   ⟳ 0s "
+" 1 Jobs   2 Builds   3 Pipelines   4 Pipeline runs                   0 Settings "
+"Jobs (6) ───────────────────────────────────────────────────────────────────────"
+"▶ ● success     backend/api/main                                                "
+"  ● fail╔ Jenkins instance ════════════════════════════════════════════╗        "
+"  ● unst║                                                              ║        "
+"  ⊘ disa║ URL         https://ci.example.com                           ║        "
+"  ● abor║ Version     Jenkins 2.504.1                                  ║        "
+"  ○ not ║ User        me                                               ║        "
+"        ║ Security    on                                               ║        "
+"        ║ Nodes       2 of 3 online                                    ║        "
+"        ║ Executors   1 of 4 busy                                      ║        "
+"        ║ Queue       5 waiting                                        ║        "
+"        ║ Status      ⚠ quieting down: no new builds start             ║        "
+"        ║ About       Build farm                                       ║        "
+"        ║                                                              ║        "
+"        ║ TLS         verified                                         ║        "
+"        ║ Proxy       none (direct)                                    ║        "
+"        ║ Headers     none                                             ║        "
+"        ║                                                              ║        "
+"        ╚══════════════════════════════════════════════════════════════╝        "
+"                                                                                "
+"────────────────────────────────────────────────────────────────────────────────"
+" i/Esc  close                                                                   "

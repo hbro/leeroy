@@ -38,6 +38,8 @@ const fn nav(key: &'static str, desc: &'static str) -> Binding {
 pub const GLOBAL_BINDINGS: &[Binding] = &[
     bind("q", "quit"),
     bind("h/?", "help"),
+    bind("i", "instance info"),
+    bind("o", "open in browser"),
     bind("r", "refresh"),
     bind("R", "toggle auto-refresh"),
 ];
@@ -84,11 +86,13 @@ pub fn context_bindings(context: Context) -> &'static [Binding] {
     const PIPELINES: &[Binding] = &[
         nav("↑/↓", "select"),
         bind("Enter", "latest run"),
+        bind("b", "start run"),
         bind("/", "filter"),
     ];
     const PIPELINES_FILTERED: &[Binding] = &[
         nav("↑/↓", "select"),
         bind("Enter", "latest run"),
+        bind("b", "start run"),
         bind("/", "filter"),
         bind("Esc", "clear filter"),
     ];
@@ -106,9 +110,12 @@ pub fn context_bindings(context: Context) -> &'static [Binding] {
     // Ordered by importance: at 80 columns the last one may be cut off.
     const RUN: &[Binding] = &[
         bind("←/→", "older/newer"),
-        bind("v", "tree/boxes"),
+        bind("v", "view"),
         bind("Enter", "open build"),
-        bind("Esc", "back"),
+        bind("p", "promote"),
+        bind("b", "start run"),
+        // Esc is "back" everywhere; no room for it here at 80 columns.
+        nav("Esc", "back"),
         nav("↑/↓", "select"),
         nav("Home/End", "first/last"),
     ];
@@ -127,9 +134,19 @@ pub fn context_bindings(context: Context) -> &'static [Binding] {
         bind("C-u", "clear"),
     ];
     const HELP: &[Binding] = &[bind("Esc", "close")];
+    const INFO: &[Binding] = &[bind("i/Esc", "close")];
     const CONFIRM_QUIT: &[Binding] = &[bind("y/Enter", "quit"), bind("n/Esc", "stay")];
+    const CONFIRM_START: &[Binding] = &[bind("y/Enter", "start"), bind("n/Esc", "cancel")];
+    const PROMOTE: &[Binding] = &[
+        bind("Space", "tick"),
+        bind("Enter", "promote"),
+        bind("Esc", "cancel"),
+        nav("↑/↓", "select"),
+    ];
     match context {
         Context::ConfirmQuit => CONFIRM_QUIT,
+        Context::ConfirmStart => CONFIRM_START,
+        Context::Promote => PROMOTE,
         Context::Jobs => JOBS,
         Context::JobsFiltered => JOBS_FILTERED,
         Context::JobsFilter
@@ -148,6 +165,7 @@ pub fn context_bindings(context: Context) -> &'static [Binding] {
         Context::Settings => SETTINGS,
         Context::EditSetting => EDIT,
         Context::Help => HELP,
+        Context::Info => INFO,
     }
 }
 
@@ -168,6 +186,27 @@ pub fn map_key(app: &App, key: KeyEvent) -> Option<Action> {
         return match key.code {
             KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => Some(Action::Quit),
             KeyCode::Char('q') => Some(Action::RequestQuit),
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => Some(Action::Back),
+            _ => None,
+        };
+    }
+    // The promotions list takes only its own keys.
+    if context == Context::Promote {
+        return match key.code {
+            KeyCode::Down | KeyCode::Char('j') => Some(Action::SelectNext),
+            KeyCode::Up | KeyCode::Char('k') => Some(Action::SelectPrev),
+            KeyCode::Char(' ') => Some(Action::TogglePromotion),
+            KeyCode::Enter => Some(Action::ConfirmPromote),
+            KeyCode::Esc => Some(Action::Back),
+            _ => None,
+        };
+    }
+    // Same for "Start a run?": nothing else happens by accident.
+    if context == Context::ConfirmStart {
+        return match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                Some(Action::ConfirmStartRun)
+            }
             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => Some(Action::Back),
             _ => None,
         };
@@ -203,6 +242,8 @@ pub fn map_key(app: &App, key: KeyEvent) -> Option<Action> {
         KeyCode::Char(c @ '0'..='9') => return Tab::from_key(c).map(Action::SwitchTab),
         KeyCode::Char('q') => return Some(Action::RequestQuit),
         KeyCode::Char('?') | KeyCode::Char('h') => return Some(Action::ToggleHelp),
+        KeyCode::Char('i') => return Some(Action::ToggleInfo),
+        KeyCode::Char('o') => return Some(Action::OpenInBrowser),
         // Some terminals report Shift+r as 'r' with SHIFT instead of 'R'.
         KeyCode::Char('R') => return Some(Action::ToggleAutoRefresh),
         KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::SHIFT) => {
@@ -229,9 +270,14 @@ pub fn map_key(app: &App, key: KeyEvent) -> Option<Action> {
             KeyCode::Char('g') => Some(Action::SelectFirst),
             KeyCode::Char('G') => Some(Action::SelectLast),
             KeyCode::Char('v') => Some(Action::ToggleRunView),
+            KeyCode::Char('b') => Some(Action::RequestStartRun),
+            KeyCode::Char('p') => Some(Action::OpenPromote),
             KeyCode::Enter => Some(Action::OpenBuild),
             _ => None,
         },
+        (Context::Pipelines | Context::PipelinesFiltered, KeyCode::Char('b')) => {
+            Some(Action::RequestStartRun)
+        }
         (
             Context::Jobs
             | Context::JobsFiltered
@@ -290,8 +336,10 @@ mod tests {
     use super::*;
     use crate::app::View;
 
-    const ALL_CONTEXTS: [Context; 19] = [
+    const ALL_CONTEXTS: [Context; 22] = [
         Context::ConfirmQuit,
+        Context::ConfirmStart,
+        Context::Promote,
         Context::Jobs,
         Context::JobsFiltered,
         Context::JobsFilter,
@@ -310,6 +358,7 @@ mod tests {
         Context::Settings,
         Context::EditSetting,
         Context::Help,
+        Context::Info,
     ];
 
     fn key(code: KeyCode) -> KeyEvent {
@@ -325,6 +374,19 @@ mod tests {
         match context {
             Context::Jobs => {}
             Context::ConfirmQuit => app.confirm_quit = true,
+            Context::Promote => {
+                app.promote = Some(crate::app::PromoteList {
+                    promotions: Vec::new(),
+                    selected: 0,
+                    ticked: Default::default(),
+                })
+            }
+            Context::ConfirmStart => {
+                app.confirm_start = Some(crate::app::StartRun {
+                    job: "a".into(),
+                    name: "a".into(),
+                })
+            }
             Context::JobsFiltered => app.jobs.filter = "api".into(),
             Context::JobsFilter => app.jobs.filter_input = Some(Default::default()),
             Context::Builds => app.view = View::Builds,
@@ -376,6 +438,7 @@ mod tests {
                 app.settings.editing = Some(Default::default());
             }
             Context::Help => app.show_help = true,
+            Context::Info => app.show_info = true,
         }
         assert_eq!(app.context(), context);
         app
@@ -390,6 +453,7 @@ mod tests {
             .split('/')
             .map(|part| match part {
                 "Esc" => key(KeyCode::Esc),
+                "Space" => key(KeyCode::Char(' ')),
                 "Enter" => key(KeyCode::Enter),
                 "↑" => key(KeyCode::Up),
                 "↓" => key(KeyCode::Down),

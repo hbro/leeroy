@@ -72,6 +72,9 @@ pub struct PipelineData {
     pub jobs: Vec<PipelineJob>,
     /// `(upstream, downstream)`, both known jobs, sorted.
     pub edges: Vec<(String, String)>,
+    /// The part of `edges` from the job configuration (Jenkins' dependency
+    /// graph), which includes manual steps that haven't run.
+    pub static_edges: Vec<(String, String)>,
     pub builds: Vec<RunBuild>,
 }
 
@@ -148,6 +151,10 @@ pub fn parse(json: &str) -> Result<PipelineData, String> {
     collect(root.jobs, &mut jobs, &mut edges, &mut builds);
     jobs.sort_by(|a: &PipelineJob, b| a.name.cmp(&b.name));
     let known: BTreeSet<&str> = jobs.iter().map(|j| j.name.as_str()).collect();
+    let keep = |(a, b): &(String, String)| {
+        a != b && known.contains(a.as_str()) && known.contains(b.as_str())
+    };
+    let static_edges: Vec<(String, String)> = edges.iter().filter(|e| keep(e)).cloned().collect();
     // Observed edges: whoever triggered a build is upstream of its job.
     for build in &builds {
         if let Some((upstream, _)) = &build.parent {
@@ -155,13 +162,11 @@ pub fn parse(json: &str) -> Result<PipelineData, String> {
         }
     }
     // Relations to jobs outside what we can see (deleted, too deep) are dropped.
-    let edges = edges
-        .into_iter()
-        .filter(|(a, b)| a != b && known.contains(a.as_str()) && known.contains(b.as_str()))
-        .collect();
+    let edges = edges.into_iter().filter(|e| keep(e)).collect();
     Ok(PipelineData {
         jobs,
         edges,
+        static_edges,
         builds,
     })
 }
@@ -486,6 +491,50 @@ pub fn run_span(data: &PipelineData, run: &Run) -> (SystemTime, Option<SystemTim
         .max()
         .unwrap_or(start);
     (start, Some(end))
+}
+
+/// A manual step a run could take next: `job`, from `from_job` #`from_number`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Promotion {
+    pub from_job: String,
+    pub from_number: u64,
+    pub job: String,
+}
+
+impl Promotion {
+    pub fn label(&self) -> String {
+        format!("{} #{} → {}", self.from_job, self.from_number, self.job)
+    }
+}
+
+/// The run's available promotions: for every successfully finished build,
+/// the jobs downstream of it in the job configuration (manual steps like the
+/// Build Pipeline plugin's are declared there too) that it hasn't triggered.
+pub fn promotions(data: &PipelineData, run: &Run) -> Vec<Promotion> {
+    let mut out = Vec::new();
+    for (i, &b) in run.builds.iter().enumerate() {
+        let build = &data.builds[b];
+        if build.building || build.result != Some(JobStatus::Success) {
+            continue;
+        }
+        let triggered: BTreeSet<&str> = run
+            .parents
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| **p == Some(i))
+            .map(|(c, _)| data.builds[run.builds[c]].job.as_str())
+            .collect();
+        for (from, to) in &data.static_edges {
+            if *from == build.job && !triggered.contains(to.as_str()) {
+                out.push(Promotion {
+                    from_job: build.job.clone(),
+                    from_number: build.number,
+                    job: to.clone(),
+                });
+            }
+        }
+    }
+    out
 }
 
 /// A list tab's filter and selection.
@@ -820,6 +869,23 @@ mod tests {
             run_status(&all, pipeline, &pipeline.runs[0]),
             (RunStatus::Success, false)
         );
+    }
+
+    #[test]
+    fn promotions_are_untriggered_static_downstreams_of_successful_builds() {
+        let data = data();
+        let pipeline = &pipelines(&data)[0];
+        // #12 → deploy #40 → e2e #7 (running): deploy's static downstream
+        // app/smoke didn't run; app/build → app/deploy did.
+        let labels: Vec<String> = promotions(&data, &pipeline.runs[0])
+            .iter()
+            .map(Promotion::label)
+            .collect();
+        assert_eq!(labels, ["app/deploy #40 → app/smoke"]);
+        // #11 failed: nothing to promote.
+        assert!(promotions(&data, &pipeline.runs[1]).is_empty());
+        // #10 → deploy #39 → smoke #5: both steps taken.
+        assert!(promotions(&data, &pipeline.runs[2]).is_empty());
     }
 
     #[test]

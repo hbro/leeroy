@@ -9,9 +9,10 @@ use crate::{
     console::{ConsoleChunk, ConsoleLoad, ConsoleView},
     history::{HistoryEntry, HistoryLoad, HistoryState},
     input::TextInput,
+    instance::{InfoLoad, InstanceInfo},
     jenkins::{ConnectionConfig, ServerInfo},
     jobs::{Job, JobsLoad, JobsState},
-    pipelines::{PipelineData, PipelineLoad, PipelineState, RunRef, RunView},
+    pipelines::{PipelineData, PipelineLoad, PipelineState, Promotion, RunRef, RunView},
     proxy::{ProxyEnv, SystemProxy},
     theme::{Appearance, Theme},
 };
@@ -28,6 +29,31 @@ pub enum Action {
     /// `q`: quit, after confirmation if the `ui.confirm_quit` setting is on.
     RequestQuit,
     ToggleHelp,
+    /// `i`: open/close the overlay about the connected Jenkins instance.
+    ToggleInfo,
+    /// `b` (Pipelines tab, run view): ask whether to start a run of the
+    /// pipeline.
+    RequestStartRun,
+    /// Confirmed: start it.
+    ConfirmStartRun,
+    /// Outcome of [`Effect::TriggerBuild`] for pipeline `name`.
+    BuildTriggered {
+        name: String,
+        result: Result<(), String>,
+    },
+    /// `p` (run view): list the run's promotions (manual steps).
+    OpenPromote,
+    /// Space in that list: tick/untick the highlighted promotion.
+    TogglePromotion,
+    /// Enter: take the ticked promotions (or the highlighted one).
+    ConfirmPromote,
+    /// Outcome of [`Effect::Promote`]: per promotion, its label and whether
+    /// the plugin did it (`true`: linked to the run) or it was started directly.
+    Promoted(Vec<(String, Result<bool, String>)>),
+    /// `o`: open what's on screen in Jenkins' web UI.
+    OpenInBrowser,
+    /// Outcome of [`Effect::OpenBrowser`].
+    BrowserOpened(Result<(), String>),
     /// Close the current context (overlay, edit, sub-view). No-op at the root view.
     Back,
     /// Timer tick with the current time, monotonic (auto-refresh, data age)
@@ -90,6 +116,11 @@ pub enum Action {
         generation: u64,
         limit: usize,
         result: Result<Vec<HistoryEntry>, String>,
+    },
+    /// Outcome of [`Effect::FetchInstanceInfo`].
+    InfoFetched {
+        generation: u64,
+        result: Result<InstanceInfo, String>,
     },
     /// Outcome of [`Effect::FetchPipelines`].
     PipelinesFetched {
@@ -158,6 +189,28 @@ pub enum Effect {
         limit: usize,
         config: ConnectionConfig,
     },
+    /// Start a build of `job` with its default parameters; answer with
+    /// [`Action::BuildTriggered`] (`name`: what to call it in the notice).
+    TriggerBuild {
+        job: String,
+        name: String,
+        config: ConnectionConfig,
+    },
+    /// Take `promotions` one after the other; answer with [`Action::Promoted`].
+    Promote {
+        promotions: Vec<Promotion>,
+        config: ConnectionConfig,
+    },
+    /// Open `url` in the default browser; answer with [`Action::BrowserOpened`].
+    OpenBrowser {
+        url: String,
+    },
+    /// Load details of the instance for the `i` overlay; answer with
+    /// [`Action::InfoFetched`].
+    FetchInstanceInfo {
+        generation: u64,
+        config: ConnectionConfig,
+    },
     /// Load job relations and recent builds' causes (Pipelines and Runs
     /// tabs); answer with [`Action::PipelinesFetched`].
     FetchPipelines {
@@ -191,7 +244,7 @@ impl Tab {
             Tab::Jobs => "Jobs",
             Tab::Builds => "Builds",
             Tab::Pipelines => "Pipelines",
-            Tab::Runs => "Runs",
+            Tab::Runs => "Pipeline runs",
             Tab::Settings => "Settings",
         }
     }
@@ -298,6 +351,10 @@ impl View {
 pub enum Context {
     /// "Quit Leeroy?" prompt, on top of everything else.
     ConfirmQuit,
+    /// "Start a run?" prompt.
+    ConfirmStart,
+    /// The run's promotions (`p`).
+    Promote,
     Jobs,
     /// Jobs tab with a filter applied (Esc clears it).
     JobsFiltered,
@@ -320,6 +377,8 @@ pub enum Context {
     Settings,
     EditSetting,
     Help,
+    /// The instance overlay (`i`).
+    Info,
 }
 
 impl Context {
@@ -332,14 +391,17 @@ impl Context {
             | Context::RunsFilter => "Filter",
             Context::Builds | Context::BuildsFiltered => "Builds",
             Context::Pipelines | Context::PipelinesFiltered => "Pipelines",
-            Context::Runs | Context::RunsFiltered => "Runs",
+            Context::Runs | Context::RunsFiltered => "Pipeline runs",
             Context::Run => "Run",
             Context::ConfirmQuit => "Quit?",
+            Context::ConfirmStart => "Start run?",
+            Context::Promote => "Promote",
             Context::Build => "Build",
             Context::Console => "Console",
             Context::Settings => "Settings",
             Context::EditSetting => "Edit",
             Context::Help => "Help",
+            Context::Info => "Instance",
         }
     }
 
@@ -362,10 +424,13 @@ impl Context {
             | Context::RunsFilter
             | Context::Run
             | Context::ConfirmQuit
+            | Context::ConfirmStart
+            | Context::Promote
             | Context::Build
             | Context::Console
             | Context::EditSetting
-            | Context::Help => true,
+            | Context::Help
+            | Context::Info => true,
         }
     }
 
@@ -384,7 +449,11 @@ impl Context {
     /// Global keys (bottom bar) don't work here: text input, or a prompt
     /// that only takes its own answers. The global bar is dimmed then.
     pub fn global_keys_off(self) -> bool {
-        self.captures_input() || self == Context::ConfirmQuit
+        self.captures_input()
+            || matches!(
+                self,
+                Context::ConfirmQuit | Context::ConfirmStart | Context::Promote
+            )
     }
 }
 
@@ -531,8 +600,18 @@ pub struct App {
     pub running: bool,
     /// The quit confirmation prompt is open.
     pub confirm_quit: bool,
+    /// The "Start a run?" prompt is open for this pipeline.
+    pub confirm_start: Option<StartRun>,
+    /// A short message about the last action (bottom bar, right).
+    pub notice: Option<Notice>,
+    /// The promotions overlay (`p` in the run view).
+    pub promote: Option<PromoteList>,
     pub view: View,
     pub show_help: bool,
+    /// The instance overlay is open.
+    pub show_info: bool,
+    /// Its data, fetched each time it opens.
+    pub info: InfoLoad,
     pub connection: ConnectionStatus,
     /// Id of the latest connection attempt; results of older ones are stale.
     pub connection_generation: u64,
@@ -576,8 +655,13 @@ impl App {
         Self {
             running: true,
             confirm_quit: false,
+            confirm_start: None,
+            notice: None,
+            promote: None,
             view: View::Jobs,
             show_help: false,
+            show_info: false,
+            info: InfoLoad::NotLoaded,
             connection: ConnectionStatus::NotConfigured,
             connection_generation: 0,
             auto_refresh: settings.effective().is_on(SettingKey::RefreshAuto),
@@ -647,8 +731,14 @@ impl App {
     pub fn context(&self) -> Context {
         if self.confirm_quit {
             Context::ConfirmQuit
+        } else if self.confirm_start.is_some() {
+            Context::ConfirmStart
+        } else if self.promote.is_some() {
+            Context::Promote
         } else if self.show_help {
             Context::Help
+        } else if self.show_info {
+            Context::Info
         } else if self.view == View::Settings && self.settings.editing.is_some() {
             Context::EditSetting
         } else if self.view == View::Jobs && self.jobs.filter_input.is_some() {
@@ -687,6 +777,143 @@ impl App {
                 }
             }
             Action::ToggleHelp => self.show_help = !self.show_help,
+            Action::ToggleInfo => {
+                self.show_info = !self.show_info;
+                self.show_help = false;
+                if self.show_info {
+                    return self.fetch_info();
+                }
+            }
+            Action::RequestStartRun => {
+                self.confirm_start = self.pipeline_to_start();
+            }
+            Action::ConfirmStartRun => {
+                let Some(start) = self.confirm_start.take() else {
+                    return Vec::new();
+                };
+                let Some(config) = self.settings.connection_config() else {
+                    return Vec::new();
+                };
+                return vec![Effect::TriggerBuild {
+                    job: start.job,
+                    name: start.name,
+                    config,
+                }];
+            }
+            Action::BuildTriggered { name, result } => {
+                let ok = result.is_ok();
+                self.notice = Some(match result {
+                    Ok(()) => Notice::info(format!("Started a run of {name}"), self.now),
+                    Err(err) => Notice::error(format!("Could not start {name}: {err}"), self.now),
+                });
+                if ok {
+                    // The new build appears once Jenkins starts it; look now.
+                    return self.fetch_pipelines();
+                }
+            }
+            Action::OpenPromote => {
+                if self.view != View::Run {
+                    return Vec::new();
+                }
+                let pipelines = self.pipelines.pipelines();
+                let promotions = self
+                    .run
+                    .as_ref()
+                    .and_then(|view| self.pipelines.find_run(&pipelines, view))
+                    .map(|(p, r)| crate::pipelines::promotions(&self.pipelines.data, &p.runs[r]))
+                    .unwrap_or_default();
+                self.promote = Some(PromoteList {
+                    promotions,
+                    selected: 0,
+                    ticked: Default::default(),
+                });
+            }
+            Action::TogglePromotion => {
+                if let Some(list) = self.promote.as_mut()
+                    && !list.promotions.is_empty()
+                    && !list.ticked.remove(&list.selected)
+                {
+                    list.ticked.insert(list.selected);
+                }
+            }
+            Action::ConfirmPromote => {
+                let Some(list) = self.promote.take() else {
+                    return Vec::new();
+                };
+                let chosen: Vec<Promotion> = if list.ticked.is_empty() {
+                    list.promotions
+                        .get(list.selected)
+                        .cloned()
+                        .into_iter()
+                        .collect()
+                } else {
+                    list.ticked
+                        .iter()
+                        .filter_map(|&i| list.promotions.get(i).cloned())
+                        .collect()
+                };
+                let Some(config) = self.settings.connection_config() else {
+                    return Vec::new();
+                };
+                if chosen.is_empty() {
+                    return Vec::new();
+                }
+                return vec![Effect::Promote {
+                    promotions: chosen,
+                    config,
+                }];
+            }
+            Action::Promoted(results) => {
+                let failed: Vec<String> = results
+                    .iter()
+                    .filter_map(|(label, r)| r.as_ref().err().map(|e| format!("{label}: {e}")))
+                    .collect();
+                let done: Vec<&(String, Result<bool, String>)> =
+                    results.iter().filter(|(_, r)| r.is_ok()).collect();
+                let unlinked = done.iter().any(|(_, r)| r == &Ok(false));
+                self.notice = Some(if !failed.is_empty() {
+                    Notice::error(format!("Promotion failed: {}", failed.join("; ")), self.now)
+                } else {
+                    let what = match done.as_slice() {
+                        [(label, _)] => label.clone(),
+                        _ => format!("{} jobs", done.len()),
+                    };
+                    let mut text = format!("Promoted {what}");
+                    if unlinked {
+                        text.push_str(" (no Build Pipeline view: started directly, not linked)");
+                    }
+                    Notice::info(text, self.now)
+                });
+                if !done.is_empty() {
+                    return self.fetch_pipelines();
+                }
+            }
+            Action::OpenInBrowser => {
+                return match self.browser_url() {
+                    Some(url) => vec![Effect::OpenBrowser { url }],
+                    None => {
+                        self.notice =
+                            Some(Notice::error("No Jenkins URL configured".into(), self.now));
+                        Vec::new()
+                    }
+                };
+            }
+            Action::BrowserOpened(result) => {
+                if let Err(err) = result {
+                    self.notice = Some(Notice::error(
+                        format!("Could not open a browser: {err}"),
+                        self.now,
+                    ));
+                }
+            }
+            Action::InfoFetched { generation, result } => {
+                if generation == self.connection_generation && self.show_info {
+                    self.info = match result {
+                        Ok(info) => InfoLoad::Loaded(info),
+                        Err(error) => InfoLoad::Failed(error),
+                    };
+                }
+            }
             Action::Back => self.back(),
             Action::Tick(now, wall) => {
                 self.now = now;
@@ -844,6 +1071,15 @@ impl App {
                 // Moving down at the last row loads the next page.
                 if delta > 0 && was_at_end && self.history.has_more() {
                     return self.fetch_history(self.history.limit + self.history_page());
+                }
+            }
+            Action::SelectNext | Action::SelectPrev if self.promote.is_some() => {
+                if let Some(list) = self.promote.as_mut() {
+                    let last = list.promotions.len().saturating_sub(1);
+                    list.selected = match action {
+                        Action::SelectNext => (list.selected + 1).min(last),
+                        _ => list.selected.saturating_sub(1),
+                    };
                 }
             }
             Action::SelectNext
@@ -1455,6 +1691,21 @@ impl App {
         }]
     }
 
+    /// Fresh instance details for the overlay (only when connected).
+    fn fetch_info(&mut self) -> Vec<Effect> {
+        let connected = matches!(self.connection, ConnectionStatus::Connected { .. });
+        let config = self.settings.connection_config().filter(|_| connected);
+        let Some(config) = config else {
+            self.info = InfoLoad::NotLoaded;
+            return Vec::new();
+        };
+        self.info = InfoLoad::Loading;
+        vec![Effect::FetchInstanceInfo {
+            generation: self.connection_generation,
+            config,
+        }]
+    }
+
     /// Fetch job relations and runs, unless a fetch is already in flight
     /// (same no-pile-up rule as elsewhere).
     fn fetch_pipelines(&mut self) -> Vec<Effect> {
@@ -1490,6 +1741,83 @@ impl App {
             .get(state.runs.selected)
             .map(|&(p, r)| (all[p].first_job.clone(), state.run_number(&all[p].runs[r])));
         (pipeline, run)
+    }
+
+    /// The pipeline `b` would start: selected in the Pipelines tab, or the one
+    /// the run view shows.
+    fn pipeline_to_start(&self) -> Option<StartRun> {
+        let pipelines = match self.view {
+            View::Pipelines => self.pipelines.visible_pipelines(),
+            View::Run => self.pipelines.pipelines(),
+            _ => return None,
+        };
+        let pipeline = match self.view {
+            View::Pipelines => pipelines.get(self.pipelines.list.selected)?,
+            _ => {
+                let view = self.run.as_ref()?;
+                pipelines.iter().find(|p| p.first_job == view.first_job)?
+            }
+        };
+        Some(StartRun {
+            job: pipeline.first_job.clone(),
+            name: pipeline.name.clone(),
+        })
+    }
+
+    /// Jenkins' page for what's on screen: the selected job, build, run's
+    /// build, console, … Built from the configured URL without credentials
+    /// (they'd end up in the browser's history).
+    pub fn browser_url(&self) -> Option<String> {
+        use crate::builds::job_path;
+        let config = self.settings.connection_config()?;
+        let mut base = url::Url::parse(&config.url).ok()?;
+        let _ = base.set_username("");
+        let _ = base.set_password(None);
+        if !base.path().ends_with('/') {
+            base.set_path(&format!("{}/", base.path()));
+        }
+        let build = |job: &str, number: u64| format!("{}{number}/", job_path(job));
+        let path = match self.view {
+            View::Jobs => self
+                .jobs
+                .visible()
+                .get(self.jobs.selected)
+                .map(|j| job_path(&j.full_name)),
+            View::Builds => self
+                .history
+                .visible()
+                .get(self.history.selected)
+                .map(|e| build(&e.job, e.number)),
+            View::Build | View::Console => self.build.as_ref().map(|b| {
+                let page = match b.current_number() {
+                    Some(n) => build(&b.job, n),
+                    None => job_path(&b.job),
+                };
+                if self.view == View::Console {
+                    format!("{page}console")
+                } else {
+                    page
+                }
+            }),
+            View::Pipelines => self
+                .pipelines
+                .visible_pipelines()
+                .get(self.pipelines.list.selected)
+                .map(|p| job_path(&p.first_job)),
+            View::Runs => {
+                let pipelines = self.pipelines.pipelines();
+                self.pipelines
+                    .visible_runs(&pipelines)
+                    .get(self.pipelines.runs.selected)
+                    .map(|&(p, r)| {
+                        let b = &self.pipelines.data.builds[pipelines[p].runs[r].first()];
+                        build(&b.job, b.number)
+                    })
+            }
+            View::Run => self.selected_run_build().map(|(job, n)| build(&job, n)),
+            View::Settings => Some(String::new()),
+        };
+        Some(base.join(&path.unwrap_or_default()).ok()?.to_string())
     }
 
     /// `(job, number)` of the build selected in the run view.
@@ -1648,7 +1976,10 @@ impl App {
     fn back(&mut self) {
         match self.context() {
             Context::ConfirmQuit => self.confirm_quit = false,
+            Context::ConfirmStart => self.confirm_start = None,
+            Context::Promote => self.promote = None,
             Context::Help => self.show_help = false,
+            Context::Info => self.show_info = false,
             Context::EditSetting => self.settings.editing = None,
             // Cancel typing: the previously applied filter stays.
             Context::JobsFilter => self.jobs.filter_input = None,
@@ -1682,6 +2013,54 @@ impl App {
             | Context::Pipelines
             | Context::Runs
             | Context::Settings => {}
+        }
+    }
+}
+
+/// The promotions overlay: a run's manual steps, some ticked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromoteList {
+    pub promotions: Vec<Promotion>,
+    /// Highlighted row.
+    pub selected: usize,
+    /// Rows ticked with Space.
+    pub ticked: std::collections::BTreeSet<usize>,
+}
+
+/// A pipeline to start (the "Start a run?" prompt).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StartRun {
+    /// Its first job: the one that gets built.
+    pub job: String,
+    pub name: String,
+}
+
+/// How long a [`Notice`] stays on screen.
+pub const NOTICE_FOR: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// A short message about the outcome of an action.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Notice {
+    pub text: String,
+    pub error: bool,
+    /// When it was shown ([`App::now`]); it disappears [`NOTICE_FOR`] later.
+    pub at: Instant,
+}
+
+impl Notice {
+    pub fn info(text: String, at: Instant) -> Self {
+        Self {
+            text,
+            error: false,
+            at,
+        }
+    }
+
+    pub fn error(text: String, at: Instant) -> Self {
+        Self {
+            text,
+            error: true,
+            at,
         }
     }
 }
@@ -3371,5 +3750,223 @@ mod tests {
             };
             assert_eq!(applied, text, "{tab:?}");
         }
+    }
+
+    fn instance_info() -> InstanceInfo {
+        InstanceInfo {
+            mode: Some("NORMAL".into()),
+            description: None,
+            security: true,
+            quieting_down: false,
+            nodes_online: 2,
+            nodes_total: 3,
+            busy_executors: 1,
+            total_executors: 4,
+            queued: 0,
+        }
+    }
+
+    #[test]
+    fn info_overlay_fetches_fresh_details_each_time() {
+        let mut app = connected_with_jobs(&["a"]);
+        let effects = app.update(Action::ToggleInfo);
+        assert!(matches!(
+            effects.as_slice(),
+            [Effect::FetchInstanceInfo { .. }]
+        ));
+        assert_eq!(app.context(), Context::Info);
+        assert_eq!(app.info, InfoLoad::Loading);
+        let generation = app.connection_generation;
+        app.update(Action::InfoFetched {
+            generation,
+            result: Ok(instance_info()),
+        });
+        assert_eq!(app.info, InfoLoad::Loaded(instance_info()));
+        app.update(Action::Back);
+        assert_eq!(app.context(), Context::Jobs, "Esc closes it");
+        assert!(
+            !app.update(Action::ToggleInfo).is_empty(),
+            "reopening refetches"
+        );
+        app.update(Action::ToggleInfo);
+        assert!(!app.show_info, "i closes it too");
+    }
+
+    #[test]
+    fn info_overlay_when_not_connected_or_stale() {
+        let mut app = App::default();
+        assert!(app.update(Action::ToggleInfo).is_empty(), "nothing to ask");
+        assert_eq!(app.info, InfoLoad::NotLoaded);
+
+        let mut app = connected_with_jobs(&["a"]);
+        app.update(Action::ToggleInfo);
+        app.update(Action::InfoFetched {
+            generation: app.connection_generation - 1,
+            result: Ok(instance_info()),
+        });
+        assert_eq!(app.info, InfoLoad::Loading, "an older connection's answer");
+    }
+
+    fn on_pipelines() -> App {
+        let mut app = connected_with_jobs(&["a"]);
+        app.update(Action::SwitchTab(Tab::Pipelines));
+        let generation = app.connection_generation;
+        app.update(Action::PipelinesFetched {
+            generation,
+            result: Ok(pipeline_data()),
+        });
+        app
+    }
+
+    #[test]
+    fn starting_a_run_asks_first() {
+        let mut app = on_pipelines();
+        assert!(app.update(Action::RequestStartRun).is_empty(), "only asks");
+        assert_eq!(app.context(), Context::ConfirmStart);
+        let effects = app.update(Action::ConfirmStartRun);
+        assert!(matches!(
+            effects.as_slice(),
+            [Effect::TriggerBuild { job, .. }] if job == "app"
+        ));
+        assert_eq!(app.context(), Context::Pipelines, "prompt closed");
+
+        let effects = app.update(Action::BuildTriggered {
+            name: "app".into(),
+            result: Ok(()),
+        });
+        assert!(pipelines_fetch(&effects), "looks for the new run");
+        assert_eq!(app.notice.as_ref().unwrap().text, "Started a run of app");
+
+        app.update(Action::BuildTriggered {
+            name: "app".into(),
+            result: Err("HTTP 403".into()),
+        });
+        assert!(app.notice.as_ref().unwrap().error);
+    }
+
+    #[test]
+    fn cancelling_or_elsewhere_starts_nothing() {
+        let mut app = on_pipelines();
+        app.update(Action::RequestStartRun);
+        app.update(Action::Back);
+        assert_eq!(app.confirm_start, None);
+        assert!(app.update(Action::ConfirmStartRun).is_empty());
+        app.update(Action::SwitchTab(Tab::Jobs));
+        app.update(Action::RequestStartRun);
+        assert_eq!(app.confirm_start, None, "only for pipelines");
+    }
+
+    #[test]
+    fn browser_urls_follow_the_screen_without_credentials() {
+        let mut app = connected_with_jobs(&["team/app"]);
+        app.settings.file.set(
+            SettingKey::JenkinsUrl,
+            Some("https://me:secret@ci.example.com/jenkins".into()),
+        );
+        let url = |app: &App| app.browser_url().unwrap();
+        assert_eq!(
+            url(&app),
+            "https://ci.example.com/jenkins/job/team/job/app/"
+        );
+        app.update(Action::OpenBuild);
+        let generation = app.connection_generation;
+        app.update(Action::BuildFetched {
+            generation,
+            job: "team/app".into(),
+            which: BuildRef::Latest,
+            result: Ok(BuildPage {
+                build: Some(sample_build(7)),
+                numbers: Some(vec![7]),
+            }),
+        });
+        assert_eq!(
+            url(&app),
+            "https://ci.example.com/jenkins/job/team/job/app/7/"
+        );
+        app.update(Action::OpenConsole);
+        assert_eq!(
+            url(&app),
+            "https://ci.example.com/jenkins/job/team/job/app/7/console"
+        );
+        app.update(Action::SwitchTab(Tab::Settings));
+        assert_eq!(url(&app), "https://ci.example.com/jenkins/");
+        assert!(matches!(
+            app.update(Action::OpenInBrowser).as_slice(),
+            [Effect::OpenBrowser { url }] if !url.contains("secret")
+        ));
+    }
+
+    #[test]
+    fn promoting_ticked_or_highlighted_steps() {
+        let mut app = on_pipelines();
+        app.update(Action::OpenBuild); // app's latest run
+        app.update(Action::OpenPromote);
+        assert_eq!(app.context(), Context::Promote);
+        let list = app.promote.as_ref().unwrap();
+        // pipeline_data(): app/build → app/deploy statically, and triggered.
+        assert!(list.promotions.is_empty(), "nothing manual left: {list:?}");
+        app.update(Action::Back);
+        assert!(app.promote.is_none());
+
+        // A run with two manual steps left.
+        app.promote = Some(PromoteList {
+            promotions: vec![
+                Promotion {
+                    from_job: "app".into(),
+                    from_number: 3,
+                    job: "qa".into(),
+                },
+                Promotion {
+                    from_job: "app".into(),
+                    from_number: 3,
+                    job: "prod".into(),
+                },
+            ],
+            selected: 0,
+            ticked: Default::default(),
+        });
+        app.update(Action::SelectNext);
+        app.update(Action::TogglePromotion);
+        app.update(Action::TogglePromotion); // untick
+        app.update(Action::TogglePromotion);
+        app.update(Action::SelectPrev);
+        let effects = app.update(Action::ConfirmPromote);
+        assert!(
+            matches!(
+                effects.as_slice(),
+                [Effect::Promote { promotions, .. }] if promotions.len() == 1 && promotions[0].job == "prod"
+            ),
+            "the ticked one, not the highlighted one"
+        );
+
+        let effects = app.update(Action::Promoted(vec![("prod".into(), Ok(false))]));
+        assert!(pipelines_fetch(&effects));
+        let notice = &app.notice.as_ref().unwrap().text;
+        assert!(notice.starts_with("Promoted prod"), "{notice}");
+        assert!(notice.contains("not linked"), "{notice}");
+
+        app.update(Action::Promoted(vec![(
+            "qa".into(),
+            Err("HTTP 500".into()),
+        )]));
+        assert!(app.notice.as_ref().unwrap().error);
+    }
+
+    #[test]
+    fn nothing_ticked_promotes_the_highlighted_step() {
+        let mut app = on_pipelines();
+        app.promote = Some(PromoteList {
+            promotions: vec![Promotion {
+                from_job: "app".into(),
+                from_number: 3,
+                job: "qa".into(),
+            }],
+            selected: 0,
+            ticked: Default::default(),
+        });
+        assert!(matches!(
+            app.update(Action::ConfirmPromote).as_slice(),
+            [Effect::Promote { promotions, .. }] if promotions[0].job == "qa"
+        ));
     }
 }

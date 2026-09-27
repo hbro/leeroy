@@ -16,11 +16,23 @@ A release's section is used as its GitHub release notes.
   prefix, with the status of its latest run (success, partial, unstable,
   aborted, failure). Relations come from both the job configuration and the
   builds' upstream causes, so Jenkinsfile `build job:` steps count too.
-- Runs tab: every run of every pipeline, newest first.
+- Pipeline runs tab: every run of every pipeline, newest first.
 - Run view (Enter in either tab): the run's builds as a tree or (`v`) as
   stacked boxes, older/newer runs with `←`/`→`, Enter opens a build.
 - Build view: the stages of Pipeline builds, when Jenkins has the Pipeline Stage
   View plugin.
+- `b` on the Pipelines tab or in the run view: start a new run of the pipeline
+  (after a y/n prompt, with default parameter values).
+- `p` in the run view: promote, i.e. take the run's manual steps (e.g. the Build
+  Pipeline plugin's), several at once; the new builds join the run.
+- `o`: open what's on screen in Jenkins' web UI (without URL credentials).
+- `i`: an overlay about the connected Jenkins instance (version, user, nodes,
+  executors, queue, quieting down) and how Leeroy reaches it.
+
+### Changed
+
+- The help popup lists the current view's keys under "Navigation"; arrow,
+  Home/End and PgUp/PgDn keys are only listed there, not in the bottom bar.
 
 ## [0.2.0] - 2026-09-26
 

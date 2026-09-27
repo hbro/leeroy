@@ -3,7 +3,7 @@ source: tests/render.rs
 expression: tree
 ---
 " Leeroy  ● https://ci.example.com · Jenkins 2.504.1 · me       h/?  help   ⟳ 0s "
-" 1 Jobs   2 Builds   3 Pipelines   4 Runs                            0 Settings "
+" 1 Jobs   2 Builds   3 Pipelines   4 Pipeline runs                   0 Settings "
 "libs/core · #12 · 1 of 1 · unstable · running ──────────────────────────────────"
 "▶ ● libs/core #12                                              22m ago       40s"
 "  └─ ● backend/api/main #56                                    18m ago    1m 35s"
@@ -25,4 +25,4 @@ expression: tree
 "                                                                                "
 "                                                                                "
 "────────────────────────────────────────────────────────────────────────────────"
-" ←/→  older/newer   v  tree/boxes   Enter  open build   Esc  back               "
+" ←/→  older/newer   v  view   Enter  open build   p  promote   b  start run     "

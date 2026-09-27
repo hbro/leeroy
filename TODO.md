@@ -21,18 +21,25 @@
 - [x] **Remove the `s` shortcut for settings**: the help popup still lists `s`
   for opening the settings, but that's `0` now; `s` shouldn't do it anymore.
 
-- [ ] **Promotions from a pipeline run**: in the run view, `p` opens an overlay
+- [x] **Promotions from a pipeline run**: in the run view, `p` opens an overlay
   listing the run's available (manual) promotion targets. Space toggles a target
   (`[x]`, several at once), Enter confirms and promotes.
 
-- [ ] **Start a pipeline run**: on the Pipelines tab (selected pipeline) and in
+- [x] **Start a pipeline run**: on the Pipelines tab (selected pipeline) and in
   the run view, trigger a fresh run of that pipeline.
 
 - [x] **Filters remembered per tab**: each tab keeps its own applied filter when
   switching tabs (already the case; guarded by `each_tab_remembers_its_filter`).
 
-- [ ] **Instance info overlay**: hotkey `i` shows an overlay with information
+- [x] **Instance info overlay**: hotkey `i` shows an overlay with information
   about the connected Jenkins instance.
 
-- [ ] **Help section naming**: the help popup's section for the current view is
+- [x] **Help section naming**: the help popup's section for the current view is
   titled after the view (e.g. "Pipelines"); label it "Navigation" instead.
+
+- [x] **Open in the browser**: a hotkey that opens the item on screen (job,
+  build, console, pipeline run) in Jenkins' web UI.
+
+- [ ] **Start a build of a job**: `b` on the Jobs tab starts a build of the
+  selected job; in the build view (and console), `b` starts a new build of the
+  job the shown build belongs to. Same y/n prompt as for pipelines.

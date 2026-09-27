@@ -83,6 +83,89 @@ fn help_fits_on_every_screen() {
 }
 
 #[test]
+fn instance_info_overlay() {
+    let mut app = app_with_jobs();
+    app.update(Action::ToggleInfo);
+    let generation = app.connection_generation;
+    app.update(Action::InfoFetched {
+        generation,
+        result: Ok(leeroy::instance::InstanceInfo {
+            mode: Some("NORMAL".into()),
+            description: Some("Build farm".into()),
+            security: true,
+            quieting_down: true,
+            nodes_online: 2,
+            nodes_total: 3,
+            busy_executors: 1,
+            total_executors: 4,
+            queued: 5,
+        }),
+    });
+    let screen = format!("{}", render(&app).backend());
+    assert!(screen.contains("quieting down"), "{screen}");
+    insta::assert_snapshot!(screen);
+}
+
+#[test]
+fn start_run_prompt_and_notice() {
+    let mut app = app_with_pipelines(Tab::Pipelines);
+    apply(&mut app, &[Action::SelectNext, Action::RequestStartRun]); // shop
+    let prompt = format!("{}", render(&app).backend());
+    assert!(prompt.contains("shop  (shop/build)"), "{prompt}");
+    insta::assert_snapshot!(prompt);
+
+    apply(
+        &mut app,
+        &[
+            Action::ConfirmStartRun,
+            Action::BuildTriggered {
+                name: "shop".into(),
+                result: Ok(()),
+            },
+        ],
+    );
+    let screen = format!("{}", render(&app).backend());
+    assert!(screen.contains("Started a run of shop"), "{screen}");
+    // Gone after a few seconds.
+    let later = app.now + std::time::Duration::from_secs(6);
+    let wall = app.wall_now;
+    apply(&mut app, &[Action::Tick(later, wall)]);
+    let screen = format!("{}", render(&app).backend());
+    assert!(!screen.contains("Started a run"), "{screen}");
+}
+
+#[test]
+fn promotions_overlay() {
+    let mut app = app_with_pipelines(Tab::Pipelines);
+    // libs/core's run: every manual step after a successful build was taken
+    // (tests/e2e, with deploy/production after it, is still running).
+    apply(&mut app, &[Action::OpenBuild, Action::OpenPromote]);
+    let screen = format!("{}", render(&app).backend());
+    assert!(screen.contains("Nothing to promote"), "{screen}");
+    apply(&mut app, &[Action::Back, Action::Back]);
+
+    // shop #7 → shop/test #3; its manual step to shop/deploy is open.
+    apply(
+        &mut app,
+        &[
+            Action::SelectNext,
+            Action::OpenBuild,
+            Action::BuildStep(BuildStep::Older),
+            Action::OpenPromote,
+            Action::TogglePromotion,
+        ],
+    );
+    let screen = format!("{}", render(&app).backend());
+    assert!(
+        screen.contains("[x] shop/test #3 → shop/deploy"),
+        "{screen}"
+    );
+    insta::assert_snapshot!(screen);
+    let effects = app.update(Action::ConfirmPromote);
+    assert!(matches!(effects.as_slice(), [Effect::Promote { .. }]));
+}
+
+#[test]
 fn help_open() {
     insta::assert_snapshot!(render_after(&[Action::ToggleHelp]).backend());
 }
@@ -349,7 +432,8 @@ fn app_with_jobs() -> App {
 /// Pipelines/Runs data. `libs/core` #12 → backend/api/main #56 →
 /// deploy/staging #54 → tests/e2e #49 (running) + tests/smoke #51
 /// (unstable); tests/e2e → deploy/production statically. `shop/build` #7 →
-/// shop/test #3, and shop/build #8 failed without triggering anything.
+/// shop/test #3 (its manual step to shop/deploy not taken), and shop/build #8
+/// failed without triggering anything.
 const PIPELINES_JSON: &str = r#"{"jobs": [
     {"fullName": "backend/api/main", "color": "blue", "builds": [
         {"number": 56, "result": "SUCCESS", "timestamp": 1700000000000, "duration": 95000,
@@ -368,7 +452,10 @@ const PIPELINES_JSON: &str = r#"{"jobs": [
     {"fullName": "shop/build", "color": "red", "builds": [
         {"number": 8, "result": "FAILURE", "timestamp": 1700000500000, "duration": 20000},
         {"number": 7, "result": "SUCCESS", "timestamp": 1699990000000, "duration": 50000}]},
-    {"fullName": "shop/test", "color": "blue", "builds": [
+    {"fullName": "shop/deploy", "color": "notbuilt",
+     "upstreamProjects": [{"fullName": "shop/test"}], "builds": []},
+    {"fullName": "shop/test", "color": "blue",
+     "downstreamProjects": [{"fullName": "shop/deploy"}], "builds": [
         {"number": 3, "result": "SUCCESS", "timestamp": 1699990060000, "duration": 30000,
          "actions": [{"causes": [{"upstreamProject": "shop/build", "upstreamBuild": 7}]}]}]},
     {"fullName": "tests/e2e", "color": "blue_anime", "builds": [
@@ -459,7 +546,10 @@ fn stepping_to_an_older_run() {
     assert!(latest.contains("shop · #8 · 2 of 2 · failure"), "{latest}");
     apply(&mut app, &[Action::BuildStep(BuildStep::Older)]);
     let older = format!("{}", render(&app).backend());
-    assert!(older.contains("shop · #7 · 1 of 2 · success"), "{older}");
+    assert!(
+        older.contains("shop · #7 · 1 of 2 · partial"),
+        "shop/deploy not reached: {older}"
+    );
 }
 
 #[test]

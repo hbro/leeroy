@@ -3,7 +3,7 @@ source: tests/render.rs
 expression: render(&app).backend()
 ---
 " Leeroy  ● https://ci.example.com · Jenkins 2.504.1 · me       h/?  help   ⟳ 0s "
-" 1 Jobs   2 Builds   3 Pipelines   4 Runs                            0 Settings "
+" 1 Jobs   2 Builds   3 Pipelines   4 Pipeline runs                   0 Settings "
 "Jobs (6) ───────────────────────────────────────────────────────────────────────"
 "▶ ● success     backend/api/main                                                "
 "  ● failed    ⟳ backend/api/release-1.2                                         "
