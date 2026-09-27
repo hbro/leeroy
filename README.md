@@ -225,7 +225,7 @@ build runs.
 
 | Key | Action |
 | --- | --- |
-| `↑/↓` `j/k`, `PgUp/PgDn`, `g/G` | move |
+| `↑/↓` `j/k`, `PgUp/PgDn`, `g/G` | navigation |
 | `Enter` | details of the job's most recent build |
 | `b` | start a build of the job (asks first; default parameter values) |
 | `/` | filter (live, case-insensitive; space-separated words must all match) |
@@ -254,7 +254,7 @@ a running build updates live), and the header's `⟳` age refers to it.
 | `Home` / `End` | first (oldest kept) / latest build |
 | `c` | console output of this build |
 | `b` | start a new build of this job (asks first) |
-| `↑/↓` `PgUp/PgDn` `g/G` | scroll |
+| `↑/↓` `j/k`, `PgUp/PgDn`, `g/G` | navigation |
 | `Esc` | back to the list |
 
 The title shows which build you're on (`#42 · 17 of 20`, counted from the
@@ -270,8 +270,7 @@ and followed at the bottom. Scrolling up pauses following (the title says so);
 
 | Key | Action |
 | --- | --- |
-| `↑/↓` `j/k` | one line |
-| `PgUp/PgDn` | one page |
+| `↑/↓` `j/k`, `PgUp/PgDn` | navigation |
 | `Home` / `End` | top / bottom (`End` = follow again) |
 | `←/→` | scroll long lines sideways |
 | `c` / `Esc` | back to the build (`c` toggles the console) |
@@ -312,7 +311,7 @@ run that's still going.
 
 | Key | Action |
 | --- | --- |
-| `↑/↓` `j/k`, `PgUp/PgDn`, `g/G` | move |
+| `↑/↓` `j/k`, `PgUp/PgDn`, `g/G` | navigation |
 | `Enter` | open the latest run |
 | `b` | start a new run (asks first; default parameter values) |
 | `/` | filter by name |
@@ -345,7 +344,7 @@ run, under the job that triggers them (`○ deploy/production  not reached`, or
 | `←` / `→` | older / newer run of the pipeline |
 | `Home` / `End` | first (oldest loaded) / latest run |
 | `v` | tree ⇄ boxes (view) |
-| `↑/↓` `j/k` | select a build |
+| `↑/↓` `j/k` | navigation |
 | `Enter` | open the selected build (details, console with `c`) |
 | `p` | promote: the run's manual steps, `Space` ticks several, `Enter` takes them |
 | `b` | start a new run of the pipeline (asks first) |
