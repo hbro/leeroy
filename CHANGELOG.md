@@ -10,6 +10,12 @@ A release's section is used as its GitHub release notes.
 
 ## [Unreleased]
 
+### Added
+
+- The run view shows the pipeline's parts a run never reached, dimmed, where
+  they would have run (disabled jobs marked): this explains a partial run whose
+  builds all succeeded.
+
 ## [0.3.0] - 2026-09-27
 
 ### Added

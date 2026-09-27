@@ -21,7 +21,7 @@ use crate::{
     history::HistoryLoad,
     instance::InfoLoad,
     jobs::{JobStatus, JobsLoad},
-    pipelines::{PipelineLoad, RUN_BUILDS, RunStatus, run_span, run_status},
+    pipelines::{PipelineLoad, RUN_BUILDS, RunStatus, TreeItem, run_span, run_status, run_tree},
     proxy::SystemProxy,
     theme::{Appearance, Theme},
 };
@@ -789,43 +789,63 @@ fn render_run(frame: &mut Frame, area: Rect, app: &App) {
     }
     let selected = view.selected.min(run.builds.len() - 1);
     let inner = view_block(t, "").inner(area);
+    // Builds plus the parts the run never reached, where they would have run
+    // (why a run whose builds all succeeded can still be partial).
+    let tree = run_tree(&state.data, pipeline, run);
+    let selected_row = tree
+        .iter()
+        .position(|row| row.item == TreeItem::Build(selected))
+        .unwrap_or(0);
+    let unreached = |disabled: bool| if disabled { "disabled" } else { "not reached" };
 
     if view.tree {
         frame.render_widget(view_block(t, &title), area);
-        let rows = run
-            .builds
-            .iter()
-            .zip(&run.prefixes)
-            .enumerate()
-            .map(|(i, (&b, prefix))| {
-                let build = &state.data.builds[b];
-                let (symbol, mut color) = build_symbol(t, build);
-                let mut dim = t.dim;
-                if i == selected {
-                    color = t.on_selected(color);
-                    dim = t.on_selected(dim);
-                }
-                let age = app
-                    .wall_now
-                    .duration_since(build.started)
-                    .unwrap_or_default();
-                let took = if build.building {
-                    format!("{}…", format_duration(age))
-                } else {
-                    format_duration(build.duration)
-                };
-                Row::new(vec![
+        let rows = tree.iter().enumerate().map(|(i, row)| {
+            let mut dim = t.dim;
+            if i == selected_row {
+                dim = t.on_selected(dim);
+            }
+            let dim = Style::new().fg(dim);
+            let prefix = Span::styled(row.prefix.clone(), dim);
+            match &row.item {
+                TreeItem::Missing { job, disabled } => Row::new(vec![
                     Cell::from(Line::from(vec![
-                        Span::styled(prefix.clone(), Style::new().fg(dim)),
-                        Span::styled(symbol, Style::new().fg(color)),
-                        Span::raw(" "),
-                        Span::raw(build.job.clone()),
-                        Span::styled(format!(" #{}", build.number), Style::new().fg(dim)),
+                        prefix,
+                        Span::styled(format!("○ {job}"), dim),
+                        Span::styled(format!("  {}", unreached(*disabled)), dim.italic()),
                     ])),
-                    Cell::from(Line::from(format!("{} ago", format_age(age))).right_aligned()),
-                    Cell::from(Line::from(took).right_aligned()),
-                ])
-            });
+                    Cell::from(""),
+                    Cell::from(""),
+                ]),
+                TreeItem::Build(b) => {
+                    let build = &state.data.builds[run.builds[*b]];
+                    let (symbol, mut color) = build_symbol(t, build);
+                    if i == selected_row {
+                        color = t.on_selected(color);
+                    }
+                    let age = app
+                        .wall_now
+                        .duration_since(build.started)
+                        .unwrap_or_default();
+                    let took = if build.building {
+                        format!("{}…", format_duration(age))
+                    } else {
+                        format_duration(build.duration)
+                    };
+                    Row::new(vec![
+                        Cell::from(Line::from(vec![
+                            prefix,
+                            Span::styled(symbol, Style::new().fg(color)),
+                            Span::raw(" "),
+                            Span::raw(build.job.clone()),
+                            Span::styled(format!(" #{}", build.number), dim),
+                        ])),
+                        Cell::from(Line::from(format!("{} ago", format_age(age))).right_aligned()),
+                        Cell::from(Line::from(took).right_aligned()),
+                    ])
+                }
+            }
+        });
         let table = Table::new(
             rows,
             [
@@ -838,32 +858,29 @@ fn render_run(frame: &mut Frame, area: Rect, app: &App) {
         .row_highlight_style(Style::new().bg(t.selected_bg).bold())
         .highlight_symbol("▶ ")
         .highlight_spacing(HighlightSpacing::Always);
-        let mut table_state = TableState::default().with_selected(Some(selected));
+        let mut table_state = TableState::default().with_selected(Some(selected_row));
         return frame.render_stateful_widget(table, inner, &mut table_state);
     }
 
-    // Boxes: one per build, stacked like the tree, each under the build that
-    // triggered it.
-    let labels: Vec<String> = run
-        .builds
+    // Boxes: stacked like the tree, each under the build that triggered it;
+    // unreached parts as dim boxes.
+    let boxes: Vec<(String, &'static str, Color)> = tree
         .iter()
-        .map(|&b| {
-            let build = &state.data.builds[b];
-            format!("{} #{}", build.job, build.number)
+        .map(|row| match &row.item {
+            TreeItem::Build(b) => {
+                let build = &state.data.builds[run.builds[*b]];
+                let (symbol, color) = build_symbol(t, build);
+                (format!("{} #{}", build.job, build.number), symbol, color)
+            }
+            TreeItem::Missing { job, disabled } => {
+                (format!("{job} ({})", unreached(*disabled)), "○", t.dim)
+            }
         })
         .collect();
-    let widths: Vec<usize> = labels.iter().map(|l| l.chars().count() + 2).collect();
-    let layout = graph::tree_layout(&widths, &run.parents);
-    let boxes: Vec<(String, &'static str, Color)> = run
-        .builds
-        .iter()
-        .zip(labels)
-        .map(|(&b, label)| {
-            let (symbol, color) = build_symbol(t, &state.data.builds[b]);
-            (label, symbol, color)
-        })
-        .collect();
-    let more = paint_boxes(frame, inner, t, &layout, &boxes, selected, &view.scroll);
+    let widths: Vec<usize> = boxes.iter().map(|b| b.0.chars().count() + 2).collect();
+    let parents: Vec<Option<usize>> = tree.iter().map(|row| row.parent).collect();
+    let layout = graph::tree_layout(&widths, &parents);
+    let more = paint_boxes(frame, inner, t, &layout, &boxes, selected_row, &view.scroll);
     if !more.is_empty() {
         title.push_str(&format!(" · more {more}"));
     }

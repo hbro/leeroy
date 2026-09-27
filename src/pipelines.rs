@@ -447,6 +447,137 @@ pub fn pipelines(data: &PipelineData) -> Vec<Pipeline> {
     result
 }
 
+/// Parts of the pipeline without any build in the run (why a run whose
+/// builds all succeeded is still partial), with whether each is disabled.
+pub fn missing_parts(data: &PipelineData, pipeline: &Pipeline, run: &Run) -> Vec<(String, bool)> {
+    let present: BTreeSet<&str> = run
+        .builds
+        .iter()
+        .map(|&b| data.builds[b].job.as_str())
+        .collect();
+    pipeline
+        .parts
+        .iter()
+        .filter(|part| !present.contains(part.as_str()))
+        .map(|part| {
+            let disabled = data
+                .jobs
+                .iter()
+                .any(|j| j.name == *part && j.status == JobStatus::Disabled);
+            (part.clone(), disabled)
+        })
+        .collect()
+}
+
+/// One row of a run's tree: a build, or a part of the pipeline the run
+/// never reached (shown where it would have run).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TreeItem {
+    /// Index into [`Run::builds`].
+    Build(usize),
+    Missing {
+        job: String,
+        disabled: bool,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TreeRow {
+    pub item: TreeItem,
+    /// Tree branches before it (`""`, `"├─ "`, `"│  └─ "`).
+    pub prefix: String,
+    /// The row it hangs under.
+    pub parent: Option<usize>,
+}
+
+/// A run as tree rows: its builds, plus the parts it never reached, each
+/// under a build (or missing part) whose job triggers it — failing that,
+/// under the first build.
+pub fn run_tree(data: &PipelineData, pipeline: &Pipeline, run: &Run) -> Vec<TreeRow> {
+    let n = run.builds.len();
+    let missing = missing_parts(data, pipeline, run);
+    let job_of = |node: usize| -> &str {
+        if node < n {
+            &data.builds[run.builds[node]].job
+        } else {
+            &missing[node - n].0
+        }
+    };
+    let triggers = |from: &str, to: &str| data.edges.iter().any(|(a, b)| a == from && b == to);
+    let mut children: Vec<Vec<usize>> = vec![Vec::new(); n + missing.len()];
+    for (i, parent) in run.parents.iter().enumerate() {
+        if let Some(p) = parent {
+            children[*p].push(i);
+        }
+    }
+    // Place missing parts; one under another may need a few rounds.
+    let mut placed = vec![false; missing.len()];
+    loop {
+        let mut progress = false;
+        for m in 0..missing.len() {
+            if placed[m] {
+                continue;
+            }
+            let job = missing[m].0.as_str();
+            let parent = (0..n).find(|&b| triggers(job_of(b), job)).or_else(|| {
+                (0..missing.len())
+                    .find(|&o| placed[o] && triggers(&missing[o].0, job))
+                    .map(|o| n + o)
+            });
+            if let Some(parent) = parent {
+                children[parent].push(n + m);
+                placed[m] = true;
+                progress = true;
+            }
+        }
+        if !progress {
+            break;
+        }
+    }
+    for (m, _) in placed.iter().enumerate().filter(|(_, placed)| !**placed) {
+        if n > 0 {
+            children[0].push(n + m);
+        }
+    }
+
+    let mut rows = Vec::new();
+    fn walk(
+        node: usize,
+        prefix: String,
+        indent: &str,
+        parent: Option<usize>,
+        children: &[Vec<usize>],
+        item: &dyn Fn(usize) -> TreeItem,
+        rows: &mut Vec<TreeRow>,
+    ) {
+        rows.push(TreeRow {
+            item: item(node),
+            prefix,
+            parent,
+        });
+        let row = rows.len() - 1;
+        let kids = &children[node];
+        for (i, &child) in kids.iter().enumerate() {
+            let last = i + 1 == kids.len();
+            let branch = format!("{indent}{}", if last { "└─ " } else { "├─ " });
+            let deeper = format!("{indent}{}", if last { "   " } else { "│  " });
+            walk(child, branch, &deeper, Some(row), children, item, rows);
+        }
+    }
+    let item = |node: usize| {
+        if node < n {
+            TreeItem::Build(node)
+        } else {
+            let (job, disabled) = missing[node - n].clone();
+            TreeItem::Missing { job, disabled }
+        }
+    };
+    if n > 0 {
+        walk(0, String::new(), "", None, &children, &item, &mut rows);
+    }
+    rows
+}
+
 /// A run's status, and whether a build of it is still running.
 pub fn run_status(data: &PipelineData, pipeline: &Pipeline, run: &Run) -> (RunStatus, bool) {
     let builds: Vec<&RunBuild> = run.builds.iter().map(|&i| &data.builds[i]).collect();
@@ -886,6 +1017,64 @@ mod tests {
         assert!(promotions(&data, &pipeline.runs[1]).is_empty());
         // #10 → deploy #39 → smoke #5: both steps taken.
         assert!(promotions(&data, &pipeline.runs[2]).is_empty());
+    }
+
+    #[test]
+    fn missing_parts_explain_partial_runs() {
+        let mut data = data();
+        let pipeline = pipelines(&data)[0].clone();
+        // #10 → deploy #39 → smoke #5: app/e2e never ran in it.
+        assert_eq!(
+            missing_parts(&data, &pipeline, &pipeline.runs[2]),
+            [("app/e2e".to_owned(), false)]
+        );
+        data.jobs
+            .iter_mut()
+            .filter(|j| j.name == "app/e2e")
+            .for_each(|j| j.status = JobStatus::Disabled);
+        assert_eq!(
+            missing_parts(&data, &pipeline, &pipeline.runs[2]),
+            [("app/e2e".to_owned(), true)],
+            "marked when it can't run"
+        );
+    }
+
+    #[test]
+    fn unreached_parts_sit_where_they_would_have_run() {
+        let data = data();
+        let pipeline = &pipelines(&data)[0];
+        let text = |run: &Run| -> Vec<String> {
+            run_tree(&data, pipeline, run)
+                .iter()
+                .map(|row| match &row.item {
+                    TreeItem::Build(b) => {
+                        let b = &data.builds[run.builds[*b]];
+                        format!("{}{} #{}", row.prefix, b.job, b.number)
+                    }
+                    TreeItem::Missing { job, .. } => format!("{}{job} (not reached)", row.prefix),
+                })
+                .collect()
+        };
+        // #12: app/deploy statically triggers app/smoke, which didn't run.
+        assert_eq!(
+            text(&pipeline.runs[0]),
+            [
+                "app/build #12",
+                "└─ app/deploy #40",
+                "   ├─ app/e2e #7",
+                "   └─ app/smoke (not reached)",
+            ]
+        );
+        // #11 failed: everything after it is missing, chained.
+        assert_eq!(
+            text(&pipeline.runs[1]),
+            [
+                "app/build #11",
+                "└─ app/deploy (not reached)",
+                "   ├─ app/e2e (not reached)",
+                "   └─ app/smoke (not reached)",
+            ]
+        );
     }
 
     #[test]

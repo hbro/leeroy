@@ -7,7 +7,7 @@ expression: screen
 "shop · #7 · 1 of 2 · partial ───────────────────────────────────────────────────"
 "▶ ● shop/build #7                                               3h ago       50s"
 "  └─ ● shop/test #3                                             3h ago       30s"
-"                                                                                "
+"     └─ ○ shop/deploy  not reached                                              "
 "                                                                                "
 "                                                                                "
 "                                                                                "

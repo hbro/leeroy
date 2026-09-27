@@ -335,7 +335,10 @@ One run as a tree: every build under the build that triggered it, with when it
 started and how long it took. `v` switches to boxes, stacked the same way (each
 indented under its trigger, with arrows into it, borders in the build's status
 colour) and back. When the boxes don't fit, the view scrolls to keep the
-selected one in sight and the title says where there's more (`more ↓`).
+selected one in sight and the title says where there's more (`more ↓`). Parts
+of the pipeline the run never reached are shown dimmed where they would have
+run, under the job that triggers them (`○ deploy/production  not reached`, or
+`disabled`): that's why a run whose builds all succeeded can still be partial.
 
 | Key | Action |
 | --- | --- |

@@ -10,7 +10,7 @@ expression: tree
 "     └─ ● deploy/staging #54                                   14m ago    1m 01s"
 "        ├─ ● tests/smoke #51                                   11m ago       30s"
 "        └─ ⟳ tests/e2e #49                                     10m ago  10m 00s…"
-"                                                                                "
+"           └─ ○ deploy/production  not reached                                  "
 "                                                                                "
 "                                                                                "
 "                                                                                "
