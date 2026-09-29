@@ -10,6 +10,8 @@ A release's section is used as its GitHub release notes.
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-09-29
+
 ### Changed
 
 - Promotions: Enter only takes the steps selected with Space; the highlighted
@@ -130,7 +132,8 @@ A release's section is used as its GitHub release notes.
 - Prebuilt binaries for Linux (x86_64, ARM64), macOS (Apple Silicon, Intel)
   and Windows (x86_64).
 
-[Unreleased]: https://github.com/hbro/leeroy/compare/v0.3.2...HEAD
+[Unreleased]: https://github.com/hbro/leeroy/compare/v0.3.3...HEAD
+[0.3.3]: https://github.com/hbro/leeroy/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/hbro/leeroy/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/hbro/leeroy/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/hbro/leeroy/compare/v0.2.0...v0.3.0
