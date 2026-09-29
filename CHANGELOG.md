@@ -10,6 +10,8 @@ A release's section is used as its GitHub release notes.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-29
+
 ### Added
 
 - Absolute timestamps: `t` switches when builds started between "17m ago"
@@ -148,7 +150,8 @@ A release's section is used as its GitHub release notes.
 - Prebuilt binaries for Linux (x86_64, ARM64), macOS (Apple Silicon, Intel)
   and Windows (x86_64).
 
-[Unreleased]: https://github.com/hbro/leeroy/compare/v0.3.3...HEAD
+[Unreleased]: https://github.com/hbro/leeroy/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/hbro/leeroy/compare/v0.3.3...v0.4.0
 [0.3.3]: https://github.com/hbro/leeroy/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/hbro/leeroy/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/hbro/leeroy/compare/v0.3.0...v0.3.1
