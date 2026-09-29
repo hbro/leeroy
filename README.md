@@ -4,6 +4,8 @@
 >
 > — Leeroy Jenkins
 
+## Overview
+
 The jobs of an instance, with their last result and running builds:
 
 ![Jobs tab: every job with its last result](docs/screenshots/jobs.png)
