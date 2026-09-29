@@ -183,6 +183,21 @@ fn help_open() {
     insta::assert_snapshot!(render_after(&[Action::ToggleHelp]).backend());
 }
 
+/// Version and build time in the bottom border (fixed here: `main.rs` sets
+/// the real ones).
+#[test]
+fn help_shows_version_and_build_time() {
+    let mut app = test_app();
+    app.about = "Leeroy 9.9.9 · built 2026-09-29 13:40 UTC";
+    apply(&mut app, &[Action::ToggleHelp]);
+    let screen = format!("{}", render(&app).backend());
+    assert!(
+        screen.contains("═ Leeroy 9.9.9 · built 2026-09-29 13:40 UTC ═"),
+        "{screen}"
+    );
+    insta::assert_snapshot!(screen);
+}
+
 #[test]
 fn help_closed_again() {
     // Must match the initial screen exactly: the popup leaves no residue.

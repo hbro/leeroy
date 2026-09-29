@@ -1981,10 +1981,14 @@ fn render_help(frame: &mut Frame, area: Rect, app: &App) {
     }
 
     let popup = centered(area, 54, lines.len() as u16 + 2);
-    let block = Block::bordered()
+    let mut block = Block::bordered()
         .title(" Help ")
         .border_type(BorderType::Double)
         .border_style(Style::new().fg(t.highlight));
+    // Version and build time in the bottom border: no extra row needed.
+    if !app.about.is_empty() {
+        block = block.title_bottom(Line::styled(format!(" {} ", app.about), t.dim()).centered());
+    }
     frame.render_widget(Clear, popup);
     frame.render_widget(Paragraph::new(lines).block(block), popup);
 }

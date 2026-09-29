@@ -10,6 +10,10 @@ A release's section is used as its GitHub release notes.
 
 ## [Unreleased]
 
+### Added
+
+- The help popup shows Leeroy's version and build time.
+
 ## [0.4.0] - 2026-09-29
 
 ### Added

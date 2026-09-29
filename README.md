@@ -219,7 +219,7 @@ is in the help popup, `h` or `?`, hinted at the right of the header):
 | --- | --- |
 | `q` | quit (asks first: `y`/`Enter`/`q` quits, `n`/`Esc` stays; setting `ui.confirm_quit`) |
 | `Ctrl-C` | quit immediately, from anywhere |
-| `h` / `?` | help |
+| `h` / `?` | help (with Leeroy's version and build time at the bottom) |
 | `o` | open what's on screen (job, build, console, pipeline, run) in Jenkins' web UI |
 | `i` | about the Jenkins instance: version, user, nodes, executors, queue, and how Leeroy connects (TLS, proxy, header names) |
 | `r` | refresh now (reconnects if the connection failed) |

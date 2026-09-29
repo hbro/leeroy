@@ -1,0 +1,28 @@
+---
+source: tests/render.rs
+expression: screen
+---
+" Leeroy  ○ not connected                                              h/?  help "
+" 1 Jobs   2 Builds   3 Pipelines   4 Pipeline runs                   0 Settings "
+"Jobs ───────────────────────────────────────────────────────────────────────────"
+"                                                                                "
+"             ╔ Help ══════════════════════════════════════════════╗             "
+"             ║ Global                                             ║             "
+"             ║       q  quit            h/?  help                 ║             "
+"             ║       i  instance info     o  open in browser      ║             "
+"             ║       r  refresh           R  toggle auto-refresh  ║             "
+"             ║       t  relative/absolute times                   ║             "
+"             ║                                                    ║             "
+"             ║ Tabs                                               ║             "
+"             ║       1  Jobs              2  Builds               ║             "
+"             ║       3  Pipelines         4  Pipeline runs        ║             "
+"             ║       0  Settings                                  ║             "
+"             ║                                                    ║             "
+"             ║ Navigation                                         ║             "
+"             ║     ↑/↓  select                                    ║             "
+"             ║   Enter  last build                                ║             "
+"             ║       b  build                                     ║             "
+"             ║       /  filter                                    ║             "
+"             ╚════ Leeroy 9.9.9 · built 2026-09-29 13:40 UTC ═════╝             "
+"────────────────────────────────────────────────────────────────────────────────"
+" Esc  close                                                                     "

@@ -87,6 +87,12 @@ async fn main() -> Result<()> {
     app.terminal_appearance = detect_appearance();
     // Absolute build times are shown in local time (falls back to UTC).
     app.time_zone = jiff::tz::TimeZone::system();
+    app.about = concat!(
+        "Leeroy ",
+        env!("CARGO_PKG_VERSION"),
+        " · built ",
+        env!("LEEROY_BUILT")
+    );
 
     // ratatui::init enters raw mode + alternate screen and installs a panic
     // hook that restores the terminal before the panic message is printed.

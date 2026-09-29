@@ -91,7 +91,11 @@ Rules:
   build times; saved as `ui.timestamps` via `commit`, session-only when the
   env var is set; `ui::started_text` renders them in `App::time_zone`,
   detected in `main.rs` with jiff, UTC in tests). The help popup's section for the view below is
-  titled "Navigation". The refresh status is a compact `⟳ 4s` at the right end of the
+  titled "Navigation"; its bottom border shows `App::about` (`Leeroy 0.4.0 ·
+  built <UTC time>`, set in `main.rs` from `CARGO_PKG_VERSION` and
+  `LEEROY_BUILT`, which `build.rs` makes from `SOURCE_DATE_EPOCH` unless it's
+  Nix's 1980 placeholder, else the build time; empty in tests so snapshots
+  don't change per build or release). The refresh status is a compact `⟳ 4s` at the right end of the
   header (icon green = auto-refresh on, gray = off; `…` fetching, `✕` failed).
 - Build view (`View::Build`, part of the Jobs tab): `Enter` on a job opens it
   and fetches unconditionally. `BuildRef::Latest` fetches the job's build numbers

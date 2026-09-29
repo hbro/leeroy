@@ -651,6 +651,10 @@ pub struct App {
     /// For absolute times: the local time zone, detected at startup (UTC
     /// until then, and in tests).
     pub time_zone: jiff::tz::TimeZone,
+    /// Version and build time for the help popup (`Leeroy 0.4.0 · built …`),
+    /// set in `main.rs`; empty in tests, so snapshots don't change with every
+    /// build or release.
+    pub about: &'static str,
     /// Terminal background as reported at startup (`None`: unknown); picks
     /// the theme when `ui.theme` is `auto`.
     pub terminal_appearance: Option<Appearance>,
@@ -684,6 +688,7 @@ impl App {
             auto_refresh: settings.effective().is_on(SettingKey::RefreshAuto),
             absolute_times: settings.effective().absolute_times(),
             time_zone: jiff::tz::TimeZone::UTC,
+            about: "",
             settings,
             jobs: JobsState::default(),
             history: HistoryState::default(),
