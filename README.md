@@ -298,8 +298,11 @@ selected build's job (asks first). `/` filters like on the Jobs tab.
 Jenkins has no "newest builds overall" API, so Leeroy asks every job for its
 newest *N* builds in **one** request (`tree=jobs[…,builds[…]{0,N}]`), where *N* is
 the number of rows that fit on your screen, and merges them. That's exact for the
-*N* rows shown. Moving down past the last row loads the next screenful (again one
-request). Filtering by job name or `#number` is complete without extra requests;
+*N* rows shown. Moving down to within a screenful of the last row loads the next
+three screenfuls in the background (again one request), so paging down rarely
+waits; if you get to the end first, the selection moves on once they arrive.
+Refreshes only reload down to just below the selection, so after scrolling back
+up they're one screenful again. Filtering by job name or `#number` is complete without extra requests;
 filtering by result (e.g. "failed") only searches what's loaded.
 
 ### Pipelines

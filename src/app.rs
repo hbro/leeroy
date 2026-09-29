@@ -294,6 +294,10 @@ pub const CONSOLE_POLL: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Builds per page before the renderer has measured the screen.
 pub const DEFAULT_HISTORY_PAGE: usize = 30;
+/// Builds tab: pages loaded beyond the selection when moving down, so paging
+/// through the history rarely waits for Jenkins. Still one request per fetch
+/// (every job's newest N builds), just a bigger N.
+pub const HISTORY_LOOKAHEAD_PAGES: usize = 3;
 
 /// Rows moved by PgUp/PgDn.
 pub const PAGE: isize = 10;
@@ -1128,11 +1132,28 @@ impl App {
                     Action::SelectFirst => isize::MIN / 2,
                     _ => isize::MAX / 2,
                 };
-                let was_at_end = self.history.at_end();
+                let page = page as usize;
+                let before = self.history.selected;
                 self.history.move_selection(delta);
-                // Moving down at the last row loads the next page.
-                if delta > 0 && was_at_end && self.history.has_more() {
-                    return self.fetch_history(self.history.limit + self.history_page());
+                if delta <= 0 {
+                    self.history.pending_rows = 0;
+                    return Vec::new();
+                }
+                let more = self.history.has_more();
+                // Down past the last loaded row (Down, PgDn): moved on once the
+                // next pages arrive, instead of pressing again.
+                if more && matches!(action, Action::SelectNext | Action::SelectPageDown) {
+                    let wanted = before + delta as usize;
+                    let short = wanted.saturating_sub(self.history.selected);
+                    self.history.pending_rows =
+                        (self.history.pending_rows + short).min(HISTORY_LOOKAHEAD_PAGES * page);
+                }
+                // Within a page of the end: load the next pages in the
+                // background, before the selection gets there.
+                let len = self.history.visible().len();
+                if more && self.history.selected + page >= len {
+                    let limit = self.history.selected + 1 + HISTORY_LOOKAHEAD_PAGES * page;
+                    return self.fetch_history(limit.max(self.history.limit + page));
                 }
             }
             Action::SelectNext | Action::SelectPrev if self.promote.is_some() => {
@@ -1526,9 +1547,14 @@ impl App {
                         }) {
                             history.selected = i;
                         }
+                        // Where Down/PgDn wanted to go while this loaded.
+                        history.selected += std::mem::take(&mut history.pending_rows);
                         history.clamp_selection();
                     }
-                    Err(error) => history.load = HistoryLoad::Failed(error),
+                    Err(error) => {
+                        history.pending_rows = 0;
+                        history.load = HistoryLoad::Failed(error);
+                    }
                 }
             }
             Action::PipelinesFetched { generation, result } => {
@@ -1715,7 +1741,7 @@ impl App {
             (View::Console, _) => Vec::new(),
             (View::Builds, _) => {
                 if !self.history.fetch_in_flight() && due(self.history.attempted_at) {
-                    return self.fetch_history(self.history.limit.max(self.history_page()));
+                    return self.fetch_history(self.history_refresh_limit());
                 }
                 Vec::new()
             }
@@ -1742,6 +1768,14 @@ impl App {
             0 => DEFAULT_HISTORY_PAGE,
             rows => usize::from(rows),
         }
+    }
+
+    /// Builds per job for a refresh: up to a page below the selection, not
+    /// everything paged through so far (every refresh is that request again).
+    /// Back at the top, refreshes are one page.
+    fn history_refresh_limit(&self) -> usize {
+        let page = self.history_page();
+        (self.history.selected + page).min(self.history.limit.max(page))
     }
 
     /// Fetch the build history with `limit` builds per job, unless a fetch is
@@ -1947,7 +1981,7 @@ impl App {
             }
             ConnectionStatus::Connected { .. } if self.view == View::Build => self.fetch_build(),
             ConnectionStatus::Connected { .. } if self.view == View::Builds => {
-                self.fetch_history(self.history.limit.max(self.history_page()))
+                self.fetch_history(self.history_refresh_limit())
             }
             ConnectionStatus::Connected { .. }
                 if matches!(self.view, View::Pipelines | View::Runs | View::Run) =>
@@ -3665,19 +3699,64 @@ mod tests {
         );
     }
 
+    fn twenty_builds() -> Vec<HistoryEntry> {
+        (0..20u64)
+            .map(|i| entry(if i % 2 == 0 { "a" } else { "b" }, 100 - i, i * 10))
+            .collect()
+    }
+
     #[test]
-    fn moving_past_the_end_loads_the_next_page() {
+    fn next_pages_load_before_the_end() {
         let mut app = builds_tab(five_builds());
-        app.update(Action::SelectNext);
-        app.update(Action::SelectNext);
-        assert!(app.history.at_end());
+        // A page (3 rows) from the end: three pages beyond the selection,
+        // in one request, while the loaded rows stay visible.
         let effects = app.update(Action::SelectNext);
-        assert_eq!(history_fetch(&effects), Some(6), "one more page");
-        assert!(app.history.refreshing, "the loaded rows stay visible");
+        assert_eq!(history_fetch(&effects), Some(1 + 1 + 3 * 3));
+        assert!(app.history.refreshing);
         assert_eq!(
             app.update(Action::SelectNext),
             Vec::new(),
             "one fetch at a time"
+        );
+        assert!(app.history.at_end());
+
+        // Down and PgDn at the last loaded row: done when the rows arrive.
+        app.update(Action::SelectNext);
+        app.update(Action::SelectPageDown);
+        assert_eq!(app.history.selected, 2, "not loaded yet");
+        let generation = app.connection_generation;
+        app.update(Action::HistoryFetched {
+            generation,
+            limit: 11,
+            result: Ok(twenty_builds()),
+        });
+        // b #9 was at row 2 in the old answer; the new one has other builds,
+        // so the selection restarts from row 2: + 1 + 3.
+        assert_eq!(app.history.selected, 6);
+        assert_eq!(app.history.pending_rows, 0);
+    }
+
+    #[test]
+    fn refreshes_load_only_up_to_the_selection() {
+        let mut app = builds_tab(twenty_builds());
+        let generation = app.connection_generation;
+        app.update(Action::HistoryFetched {
+            generation,
+            limit: 15,
+            result: Ok(twenty_builds()),
+        });
+        app.history.selected = 6;
+        assert_eq!(history_fetch(&app.update(Action::Refresh)), Some(6 + 3));
+        app.update(Action::HistoryFetched {
+            generation,
+            limit: 9,
+            result: Ok(twenty_builds()),
+        });
+        app.update(Action::SelectFirst);
+        assert_eq!(
+            history_fetch(&app.update(Action::Refresh)),
+            Some(3),
+            "back at the top: one page"
         );
     }
 

@@ -28,8 +28,12 @@ Elm-style: pure core, thin IO shell.
 - `src/history.rs` — Builds tab: one request asks every job for its newest N
   builds (`builds[…]{0,N}` in the jobs tree), merged by start time; only the first
   N are shown (exact). N = visible rows (`App::list_rows`, recorded by the
-  renderer); moving past the end fetches N + one page. Job-name/`#number` filters
-  are complete client-side.
+  renderer). Moving down within a page of the end prefetches up to
+  `HISTORY_LOOKAHEAD_PAGES` (3) pages beyond the selection (still one
+  request); Down/PgDn that hit the end meanwhile are kept in
+  `HistoryState::pending_rows` and applied when the answer arrives. Refreshes
+  (`App::history_refresh_limit`) load up to a page below the selection, never
+  more than loaded. Job-name/`#number` filters are complete client-side.
 - `src/pipelines.rs` — Pipelines/Runs tabs and run view. One request
   (`pipelines::tree_query`, `RUN_BUILDS` = 20 builds per job) gets every job's
   static `upstreamProjects`/`downstreamProjects` plus builds with their

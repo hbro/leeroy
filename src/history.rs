@@ -155,6 +155,9 @@ pub struct HistoryState {
     pub refreshing: bool,
     pub fetched_at: Option<std::time::Instant>,
     pub attempted_at: Option<std::time::Instant>,
+    /// Rows Down/PgDn couldn't move because they weren't loaded yet: the
+    /// selection moves on by this much when the fetch under way arrives.
+    pub pending_rows: usize,
 }
 
 impl HistoryState {

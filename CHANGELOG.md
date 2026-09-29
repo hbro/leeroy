@@ -18,6 +18,14 @@ A release's section is used as its GitHub release notes.
   `ui.timestamps` setting (also in the settings view, or
   `LEEROY_UI_TIMESTAMPS`).
 
+### Changed
+
+- Builds tab: paging down no longer waits at the end of what's loaded. The
+  next three screenfuls load in the background (still one request) when you
+  get within a screenful of the end, and a Down/PgDn at the end is carried
+  out once they arrive. Refreshes reload only down to just below the
+  selection, so they stay small after you scroll back up.
+
 ## [0.3.3] - 2026-09-29
 
 ### Changed
