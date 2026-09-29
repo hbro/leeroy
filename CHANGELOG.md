@@ -10,6 +10,8 @@ A release's section is used as its GitHub release notes.
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-09-29
+
 ### Fixed
 
 - Promotions through the Build Pipeline plugin failed on current Jenkins,
@@ -116,7 +118,8 @@ A release's section is used as its GitHub release notes.
 - Prebuilt binaries for Linux (x86_64, ARM64), macOS (Apple Silicon, Intel)
   and Windows (x86_64).
 
-[Unreleased]: https://github.com/hbro/leeroy/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/hbro/leeroy/compare/v0.3.2...HEAD
+[0.3.2]: https://github.com/hbro/leeroy/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/hbro/leeroy/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/hbro/leeroy/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/hbro/leeroy/compare/v0.1.1...v0.2.0
