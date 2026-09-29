@@ -316,7 +316,7 @@ pub async fn promote(config: &ConnectionConfig, promotion: &Promotion) -> Result
         &client,
         config,
         get.clone(),
-        promote::VIEWS_PATH,
+        &promote::views_query(),
         true,
         &[],
         None,
@@ -326,10 +326,20 @@ pub async fn promote(config: &ConnectionConfig, promotion: &Promotion) -> Result
         Some(response) => promote::pipeline_views(&response.body)?,
         None => Vec::new(),
     };
-    for view in views {
-        let path = promote::view_path(&view);
-        let page = send(&client, config, get.clone(), &path, true, &[], None).await?;
-        let Some((proxy, page_crumb)) = page.and_then(|p| promote::trigger_proxy(&p.body)) else {
+    for path in views {
+        let Some(page) = send(&client, config, get.clone(), &path, true, &[], None).await? else {
+            continue;
+        };
+        // In the page (older Jenkins), or in the script it loads (newer).
+        let mut proxy = promote::trigger_proxy(&page.body);
+        if proxy.is_none()
+            && let Some(script) = promote::proxy_script(&page.body)
+            && let Some(js) = send(&client, config, get.clone(), &script, true, &[], None).await?
+        {
+            proxy = promote::trigger_proxy(&js.body);
+        }
+        let Some((proxy, page_crumb)) = proxy else {
+            tracing::debug!(path, "no Build Pipeline trigger found in the view");
             continue;
         };
         let mut headers = crumb.clone();

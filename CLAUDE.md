@@ -35,7 +35,8 @@ Elm-style: pure core, thin IO shell.
   static `upstreamProjects`/`downstreamProjects` plus builds with their
   `UpstreamCause`s; edges = union (a Pipeline `build job:` only shows as a
   cause). Pipeline = job with an untriggered build (no upstream cause at all)
-  that triggered something; its runs = all its untriggered builds (a failed
+  that triggered something, and no configured upstream (a `static_edges`
+  target is always a step, even when started by hand); its runs = all its untriggered builds (a failed
   one triggers nothing), trees via causes. Name = common prefix of its parts
   (reachable jobs) at a word boundary, unique, else the first job. Run status:
   worst of failure/unstable/aborted, else success iff every part has a
@@ -126,8 +127,11 @@ Rules:
 - Promotions (`p`, run view → `Context::Promote`, `App::promote`): targets =
   `pipelines::promotions` (static downstream jobs of a successful build it
   didn't trigger; manual steps are in Jenkins' dependency graph). Executed by
-  `jenkins::promote`: via a Build Pipeline view's page proxy
-  (`makeStaplerProxy`, `triggerManualBuild`, see `src/promote.rs`), else a
+  `jenkins::promote`: via a Build Pipeline view (top level or in folders,
+  `promote::views_query`) and its proxy: `makeStaplerProxy(...)` inline in
+  the page (older Jenkins) or in the `$stapler/bound/script/…` the page loads
+  (current Jenkins, CSP), then `triggerManualBuild` with absolute job names
+  (`/a/b`, see `src/promote.rs`); else a
   plain build with the upstream build's parameters (`Ok(false)`: not linked).
   Taken promotions stay in `App::pending_promotions` (not offered again) until
   the job has a build newer than it had when promoted.

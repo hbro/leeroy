@@ -395,9 +395,19 @@ pub fn pipelines(data: &PipelineData) -> Vec<Pipeline> {
     // build whose trigger is just too old to be loaded is still triggered).
     // A job is a pipeline when such a build of it triggered something; then
     // all its untriggered builds are runs (a failed one triggers nothing).
+    // Except a job the configuration says another job triggers: that's a
+    // step of that pipeline even when someone starts it by hand.
+    let configured_step: BTreeSet<&str> = data
+        .static_edges
+        .iter()
+        .map(|(_, to)| to.as_str())
+        .collect();
     let mut starts: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
     for (i, build) in data.builds.iter().enumerate() {
-        if build.parent.is_none() && !links.children[i].is_empty() {
+        if build.parent.is_none()
+            && !links.children[i].is_empty()
+            && !configured_step.contains(build.job.as_str())
+        {
             starts.entry(build.job.as_str()).or_default();
         }
     }
@@ -984,6 +994,36 @@ mod tests {
             .retain(|b| !(b.job == "app/build" && b.number == 12));
         let pipelines = pipelines(&data);
         let names: Vec<&str> = pipelines.iter().map(|p| p.first_job.as_str()).collect();
+        assert_eq!(names, ["app/build"]);
+    }
+
+    #[test]
+    fn a_configured_step_started_by_hand_is_no_pipeline() {
+        // app/deploy (configured downstream of app/build) started directly,
+        // and it triggered app/smoke: still a step of app, not a new pipeline.
+        let mut data = data();
+        data.builds.push(RunBuild {
+            job: "app/deploy".into(),
+            number: 41,
+            result: Some(JobStatus::Success),
+            building: false,
+            started: SystemTime::UNIX_EPOCH + Duration::from_millis(5000),
+            duration: Duration::ZERO,
+            parent: None,
+        });
+        data.builds.push(RunBuild {
+            job: "app/smoke".into(),
+            number: 6,
+            result: Some(JobStatus::Success),
+            building: false,
+            started: SystemTime::UNIX_EPOCH + Duration::from_millis(6000),
+            duration: Duration::ZERO,
+            parent: Some(("app/deploy".into(), 41)),
+        });
+        let names: Vec<String> = pipelines(&data)
+            .iter()
+            .map(|p| p.first_job.clone())
+            .collect();
         assert_eq!(names, ["app/build"]);
     }
 

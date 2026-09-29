@@ -300,7 +300,9 @@ filtering by result (e.g. "failed") only searches what's loaded.
 
 A pipeline is a job whose own builds (not triggered by another job) trigger
 other jobs, e.g. an SCM-triggered `app/build` that starts `app/deploy`, which
-starts `app/e2e`. The tab lists every pipeline with the status of its latest
+starts `app/e2e`. A job the configuration says another job triggers (a
+downstream or manual step) stays a step of that pipeline, even when it's started
+by hand. The tab lists every pipeline with the status of its latest
 run, when that started and how long it took (`…` while running). It's named
 after the common prefix of its jobs (`app` for `app/build`, `app/deploy`, …, cut
 at `/`, `-`, `_` or `.`), or after its first job when there's none or two
@@ -364,7 +366,8 @@ that can be taken now are offered (after dev → acc → prod's dev, only acc), 
 step just taken isn't offered again until its build shows up.
 
 Leeroy takes a step the way the Build Pipeline plugin's own page does, through a
-Build Pipeline view: the new build then has the upstream build as its cause
+Build Pipeline view (at the top level or in a folder): the new build then has
+the upstream build as its cause
 (it joins the run) and gets its parameters. Without such a view, the job is
 started directly with the upstream build's parameters; it runs, but isn't linked
 to the run (the notice says so).

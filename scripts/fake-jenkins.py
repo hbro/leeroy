@@ -6,8 +6,9 @@
 
 Serves (under any path prefix, with an X-Jenkins header):
   GET /whoAmI/api/json   the current user
-  GET /api/json?tree=views[..], /view/Shop delivery/: a Build Pipeline view whose
-      page embeds the plugin's proxy; POST /$stapler/bound/<id>/triggerManualBuild
+  GET /api/json?tree=views[..], /job/shop/view/Shop delivery/: a Build Pipeline
+      view (in a folder) whose page loads the plugin's proxy from
+      /$stapler/bound/script/...; POST /$stapler/bound/<id>/triggerManualBuild
       promotes (shop/test → shop/deploy is a manual step); logged to stdout
   GET /crumbIssuer/api/json, POST /job/../build or buildWithParameters: start a
       build (201; 403 without the crumb); logged to stdout
@@ -487,6 +488,9 @@ def main() -> None:
             if path == f"/$stapler/bound/{PROXY_ID}/triggerManualBuild":
                 length = int(self.headers.get("Content-Length", "0"))
                 upstream_number, job, upstream = json.loads(self.rfile.read(length))
+                # The plugin resolves names from the view's folder; absolute
+                # ones (leading /) work from anywhere.
+                job, upstream = job.lstrip("/"), upstream.lstrip("/")
                 print(f"promoted {job} from {upstream} #{upstream_number}", flush=True)
                 return self.reply_json(47)
             if path.endswith(("/build", "/buildWithParameters")):
@@ -529,13 +533,23 @@ def main() -> None:
             if path.endswith("/view/Shop%20delivery/") or path.endswith(
                 "/view/Shop delivery/"
             ):
-                # A Build Pipeline view's page embeds its JavaScript proxy.
+                # A Build Pipeline view's page loads its JavaScript proxy from
+                # a script, like current Jenkins (older ones wrote it inline).
                 return self.reply_bytes(
                     (
-                        "<html><script>var buildPipelineView = makeStaplerProxy("
+                        '<html><script src="/$stapler/bound/script/$stapler/bound/'
+                        f"{PROXY_ID}?var=buildPipelineView&amp;methods="
+                        'getProjectBuildPipelineTree,triggerManualBuild,rerunBuild" '
+                        'type="text/javascript"></script></html>'
+                    ).encode(),
+                    {},
+                )
+            if path == f"/$stapler/bound/script/$stapler/bound/{PROXY_ID}":
+                return self.reply_bytes(
+                    (
+                        "buildPipelineView = makeStaplerProxy("
                         f"'/$stapler/bound/{PROXY_ID}','{CRUMB}',"
-                        "['getProjectBuildPipelineTree','triggerManualBuild','rerunBuild']);"
-                        "</script></html>"
+                        "['getProjectBuildPipelineTree','rerunBuild','triggerManualBuild']);"
                     ).encode(),
                     {},
                 )
@@ -573,14 +587,20 @@ def main() -> None:
                 return self.reply(
                     200,
                     {
-                        "views": [
-                            {"_class": "hudson.model.AllView", "name": "all"},
+                        "views": [{"_class": "hudson.model.AllView", "name": "all"}],
+                        # The Build Pipeline view lives in the shop folder.
+                        "jobs": [
                             {
-                                "_class": "au.com.centrumsystems.hudson.plugin."
-                                "buildpipeline.BuildPipelineView",
-                                "name": "Shop delivery",
-                            },
-                        ]
+                                "name": "shop",
+                                "views": [
+                                    {
+                                        "_class": "au.com.centrumsystems.hudson.plugin."
+                                        "buildpipeline.BuildPipelineView",
+                                        "name": "Shop delivery",
+                                    }
+                                ],
+                            }
+                        ],
                     },
                 )
             if path.endswith("/api/json") and "/job/" not in path and "mode" in query:

@@ -10,6 +10,17 @@ A release's section is used as its GitHub release notes.
 
 ## [Unreleased]
 
+### Fixed
+
+- Promotions through the Build Pipeline plugin failed on current Jenkins,
+  which loads the plugin's trigger from a script instead of writing it into the
+  view page; Leeroy then fell back to starting the job directly, so the build
+  wasn't part of the run. Build Pipeline views inside folders are found too, and
+  a promotion that does fall back is shown as a warning.
+- A step of a pipeline started by hand (or by such a fallback) showed up as a
+  pipeline of its own when it triggered further jobs. Jobs the configuration
+  says another job triggers are now always steps.
+
 ## [0.3.1] - 2026-09-27
 
 ### Added

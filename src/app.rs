@@ -903,9 +903,12 @@ impl App {
                     };
                     let mut text = format!("Promoted {what}");
                     if unlinked {
+                        // It ran, but outside the run: worth a warning colour.
                         text.push_str(" (no Build Pipeline view: started directly, not linked)");
+                        Notice::error(text, self.now)
+                    } else {
+                        Notice::info(text, self.now)
                     }
-                    Notice::info(text, self.now)
                 });
                 if !done.is_empty() {
                     return self.fetch_pipelines();
