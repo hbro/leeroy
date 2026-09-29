@@ -45,7 +45,7 @@ pub enum Action {
     OpenPromote,
     /// Space in that list: tick/untick the highlighted promotion.
     TogglePromotion,
-    /// Enter: take the ticked promotions (or the highlighted one).
+    /// Enter: take the ticked promotions (none ticked: nothing happens).
     ConfirmPromote,
     /// Outcome of [`Effect::Promote`]: per promotion, whether the plugin did
     /// it (`true`: linked to the run) or it was started directly.
@@ -845,27 +845,32 @@ impl App {
                 }
             }
             Action::ConfirmPromote => {
+                // Only what was ticked: highlighting a row isn't choosing it.
+                let ticked = self.promote.as_ref().is_some_and(|l| !l.ticked.is_empty());
+                if !ticked {
+                    if self
+                        .promote
+                        .as_ref()
+                        .is_some_and(|l| !l.promotions.is_empty())
+                    {
+                        self.notice = Some(Notice::error(
+                            "Select promotion targets with <Space>".into(),
+                            self.now,
+                        ));
+                    }
+                    return Vec::new();
+                }
                 let Some(list) = self.promote.take() else {
                     return Vec::new();
                 };
-                let chosen: Vec<Promotion> = if list.ticked.is_empty() {
-                    list.promotions
-                        .get(list.selected)
-                        .cloned()
-                        .into_iter()
-                        .collect()
-                } else {
-                    list.ticked
-                        .iter()
-                        .filter_map(|&i| list.promotions.get(i).cloned())
-                        .collect()
-                };
+                let chosen: Vec<Promotion> = list
+                    .ticked
+                    .iter()
+                    .filter_map(|&i| list.promotions.get(i).cloned())
+                    .collect();
                 let Some(config) = self.settings.connection_config() else {
                     return Vec::new();
                 };
-                if chosen.is_empty() {
-                    return Vec::new();
-                }
                 return vec![Effect::Promote {
                     promotions: chosen,
                     config,
@@ -4084,7 +4089,7 @@ mod tests {
     }
 
     #[test]
-    fn nothing_ticked_promotes_the_highlighted_step() {
+    fn nothing_ticked_promotes_nothing() {
         let mut app = on_pipelines();
         app.promote = Some(PromoteList {
             promotions: vec![Promotion {
@@ -4095,6 +4100,16 @@ mod tests {
             selected: 0,
             ticked: Default::default(),
         });
+        assert!(
+            app.update(Action::ConfirmPromote).is_empty(),
+            "highlighted isn't chosen"
+        );
+        assert!(app.promote.is_some(), "the list stays open");
+        assert_eq!(
+            app.notice.as_ref().unwrap().text,
+            "Select promotion targets with <Space>"
+        );
+        app.update(Action::TogglePromotion);
         assert!(matches!(
             app.update(Action::ConfirmPromote).as_slice(),
             [Effect::Promote { promotions, .. }] if promotions[0].job == "qa"

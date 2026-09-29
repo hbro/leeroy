@@ -51,6 +51,7 @@ pub fn context_bindings(context: Context) -> &'static [Binding] {
         bind("Enter", "last build"),
         bind("b", "build"),
         bind("/", "filter"),
+        bind("o", "open in browser"),
     ];
     const JOBS_FILTERED: &[Binding] = &[
         nav("↑/↓", "select"),
@@ -58,6 +59,7 @@ pub fn context_bindings(context: Context) -> &'static [Binding] {
         bind("b", "build"),
         bind("/", "filter"),
         bind("Esc", "clear filter"),
+        bind("o", "open in browser"),
     ];
     // Ordered by importance: at 80 columns the last one may be cut off.
     const BUILD: &[Binding] = &[
@@ -67,6 +69,7 @@ pub fn context_bindings(context: Context) -> &'static [Binding] {
         bind("b", "build again"),
         bind("Esc", "back"),
         nav("↑/↓", "scroll"),
+        bind("o", "open in browser"),
     ];
     const CONSOLE: &[Binding] = &[
         nav("↑/↓", "line"),
@@ -75,12 +78,14 @@ pub fn context_bindings(context: Context) -> &'static [Binding] {
         bind("c/Esc", "back"),
         bind("b", "build again"),
         bind("←/→", "sideways"),
+        bind("o", "open in browser"),
     ];
     const BUILDS: &[Binding] = &[
         nav("↑/↓", "select"),
         bind("Enter", "open build"),
         bind("b", "build again"),
         bind("/", "filter"),
+        bind("o", "open in browser"),
     ];
     const BUILDS_FILTERED: &[Binding] = &[
         nav("↑/↓", "select"),
@@ -88,12 +93,14 @@ pub fn context_bindings(context: Context) -> &'static [Binding] {
         bind("b", "build again"),
         bind("/", "filter"),
         bind("Esc", "clear filter"),
+        bind("o", "open in browser"),
     ];
     const PIPELINES: &[Binding] = &[
         nav("↑/↓", "select"),
         bind("Enter", "latest run"),
         bind("b", "start run"),
         bind("/", "filter"),
+        bind("o", "open in browser"),
     ];
     const PIPELINES_FILTERED: &[Binding] = &[
         nav("↑/↓", "select"),
@@ -101,17 +108,20 @@ pub fn context_bindings(context: Context) -> &'static [Binding] {
         bind("b", "start run"),
         bind("/", "filter"),
         bind("Esc", "clear filter"),
+        bind("o", "open in browser"),
     ];
     const RUNS: &[Binding] = &[
         nav("↑/↓", "select"),
         bind("Enter", "open run"),
         bind("/", "filter"),
+        bind("o", "open in browser"),
     ];
     const RUNS_FILTERED: &[Binding] = &[
         nav("↑/↓", "select"),
         bind("Enter", "open run"),
         bind("/", "filter"),
         bind("Esc", "clear filter"),
+        bind("o", "open in browser"),
     ];
     // Ordered by importance: at 80 columns the last one may be cut off.
     const RUN: &[Binding] = &[
@@ -125,6 +135,7 @@ pub fn context_bindings(context: Context) -> &'static [Binding] {
         nav("Esc", "back"),
         nav("↑/↓", "select"),
         nav("Home/End", "first/last"),
+        bind("o", "open in browser"),
     ];
     const JOBS_FILTER: &[Binding] = &[
         bind("Enter", "apply"),
@@ -145,7 +156,7 @@ pub fn context_bindings(context: Context) -> &'static [Binding] {
     const CONFIRM_QUIT: &[Binding] = &[bind("y/Enter", "quit"), bind("n/Esc", "stay")];
     const CONFIRM_START: &[Binding] = &[bind("y/Enter", "start"), bind("n/Esc", "cancel")];
     const PROMOTE: &[Binding] = &[
-        bind("Space", "tick"),
+        bind("Space", "select"),
         bind("Enter", "promote"),
         bind("Esc", "cancel"),
         nav("↑/↓", "select"),

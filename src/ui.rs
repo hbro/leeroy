@@ -1538,11 +1538,21 @@ fn binding_spans(bindings: &[Binding], key_style: Style) -> Vec<Span<'static>> {
 fn render_context_bar(frame: &mut Frame, area: Rect, app: &App) {
     // The selection gray as background, hotkeys in the active tab's colour.
     let t = app.theme();
-    // Navigation keys are left to the help popup.
+    // Navigation keys are left to the help popup. Hints are kept while they
+    // fit whole (they're ordered by importance): a hint cut off mid-word
+    // reads as garbage.
+    let mut used = 0;
     let bindings: Vec<Binding> = context_bindings(app.context())
         .iter()
         .copied()
         .filter(|b| b.in_bar)
+        .take_while(|b| {
+            // " key " + " desc" (+ two spaces before the next one).
+            let width = b.key.chars().count() + 2 + b.desc.chars().count() + 1;
+            let fits = used + width <= usize::from(area.width);
+            used += width + 2;
+            fits
+        })
         .collect();
     let spans = binding_spans(&bindings, t.on_accent);
     frame.render_widget(Paragraph::new(Line::from(spans)).style(t.context_bar), area);
@@ -1917,11 +1927,16 @@ fn render_help(frame: &mut Frame, area: Rect, app: &App) {
             .map(|t| (t.key_label(), t.title()))
             .collect(),
     ));
-    let view_bindings = context_bindings(view_context);
+    // The view's own keys; global ones (listed above) aren't repeated.
+    let view_bindings: Vec<Binding> = context_bindings(view_context)
+        .iter()
+        .copied()
+        .filter(|b| !GLOBAL_BINDINGS.iter().any(|g| g.key == b.key))
+        .collect();
     if !view_bindings.is_empty() {
         lines.push(Line::raw(""));
         lines.push(section("Navigation"));
-        lines.extend(rows(view_bindings));
+        lines.extend(rows(&view_bindings));
     }
 
     let popup = centered(area, 54, lines.len() as u16 + 2);

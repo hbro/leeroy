@@ -351,7 +351,7 @@ run, under the job that triggers them (`○ deploy/production  not reached`, or
 | `v` | tree ⇄ boxes (view) |
 | `↑/↓` `j/k` | navigation |
 | `Enter` | open the selected build (details, console with `c`) |
-| `p` | promote: the run's manual steps, `Space` ticks several, `Enter` takes them |
+| `p` | promote: the run's manual steps, `Space` selects several, `Enter` takes them |
 | `b` | start a new run of the pipeline (asks first) |
 | `Esc` | back to the list |
 
@@ -360,8 +360,8 @@ run, under the job that triggers them (`○ deploy/production  not reached`, or
 `p` in the run view lists the run's manual steps: every job downstream (in the
 job configuration) of a successfully finished build of the run that it hasn't
 triggered, e.g. `shop/test #49 → shop/deploy` for a Build Pipeline plugin
-"Manually Execute Downstream Project" step. `Space` ticks one or more, `Enter`
-takes the ticked ones (or the highlighted one when none is ticked). Only steps
+"Manually Execute Downstream Project" step. `Space` selects one or more, `Enter`
+takes the selected ones; nothing happens until at least one is selected. Only steps
 that can be taken now are offered (after dev → acc → prod's dev, only acc), and a
 step just taken isn't offered again until its build shows up.
 

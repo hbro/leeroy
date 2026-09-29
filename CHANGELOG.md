@@ -10,6 +10,13 @@ A release's section is used as its GitHub release notes.
 
 ## [Unreleased]
 
+### Changed
+
+- Promotions: Enter only takes the steps selected with Space; the highlighted
+  one is no longer taken when none is selected.
+- The bottom bar shows `o` (open in browser) wherever it works, and drops
+  hints that don't fit whole instead of cutting them off mid-word.
+
 ## [0.3.2] - 2026-09-29
 
 ### Fixed
