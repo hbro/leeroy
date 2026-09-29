@@ -17,6 +17,11 @@ A release's section is used as its GitHub release notes.
 - The bottom bar shows `o` (open in browser) wherever it works, and drops
   hints that don't fit whole instead of cutting them off mid-word.
 
+### Fixed
+
+- The Jobs and Builds tabs were sluggish on big instances, most of all the
+  Builds tab while filtering (66 ms per keypress with 100k builds, now 0.2 ms).
+
 ## [0.3.2] - 2026-09-29
 
 ### Fixed

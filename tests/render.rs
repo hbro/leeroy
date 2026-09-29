@@ -1273,3 +1273,152 @@ fn pipeline_runs_speed() {
     let per_build = start.elapsed() / rounds;
     println!("keypress + frame: {per_key:?}; one pipelines() rebuild: {per_build:?}");
 }
+
+#[test]
+fn long_job_list_scrolls_with_the_selection() {
+    let mut app = app_with_jobs();
+    let generation = app.connection_generation;
+    app.update(Action::JobsFetched {
+        generation,
+        result: Ok((0..200)
+            .map(|i| job(&format!("job-{i:03}"), JobStatus::Success, false))
+            .collect()),
+    });
+    // The selected row is always on screen, and it's the selected job.
+    let check = |app: &App, what: &str| {
+        let screen = format!("{}", render(app).backend());
+        let line = screen
+            .lines()
+            .find(|l| l.starts_with("\"▶"))
+            .expect("selection on screen");
+        let name = &app.jobs.visible()[app.jobs.selected].full_name;
+        assert!(line.contains(name.as_str()), "{what}: {line}");
+    };
+    apply(&mut app, &[Action::SelectLast]);
+    check(&app, "last row");
+    for _ in 0..30 {
+        apply(&mut app, &[Action::SelectPrev]);
+    }
+    check(&app, "scrolled back up");
+    apply(&mut app, &[Action::SelectFirst]);
+    let screen = format!("{}", render(&app).backend());
+    let first_row = screen.lines().nth(3).unwrap();
+    assert!(first_row.starts_with("\"▶"), "top of the list: {first_row}");
+}
+
+/// How long a keypress plus a frame takes on the other tabs of a big
+/// instance: `cargo test --release --test render -- --ignored --nocapture
+/// list_speed`
+#[test]
+#[ignore]
+fn list_speed() {
+    use std::time::{Duration, SystemTime};
+    fn time(label: &str, app: &mut App, action: Action) {
+        let rounds = 20;
+        let start = std::time::Instant::now();
+        for _ in 0..rounds {
+            app.update(action.clone());
+            render(app);
+        }
+        println!("{label}: {:?}", start.elapsed() / rounds);
+    }
+    let mut app = app_with_jobs();
+    let generation = app.connection_generation;
+    let names: Vec<String> = (0..5000)
+        .map(|i| format!("team{:03}/service-{i}/main", i % 300))
+        .collect();
+    app.update(Action::JobsFetched {
+        generation,
+        result: Ok(names
+            .iter()
+            .map(|n| job(n, JobStatus::Success, false))
+            .collect()),
+    });
+    time("jobs", &mut app, Action::SelectNext);
+    apply(&mut app, &[Action::StartFilter]);
+    apply(&mut app, &type_str("team1 main"));
+    time("jobs filtered", &mut app, Action::SelectNext);
+    apply(&mut app, &[Action::Back, Action::StartFilter]);
+    apply(&mut app, &type_str("service-4999"));
+    time("jobs filtered, one match", &mut app, Action::SelectNext);
+
+    app.update(Action::SwitchTab(Tab::Builds));
+    let mut entries = Vec::new();
+    for (i, name) in names.iter().enumerate() {
+        for n in 1..=20u64 {
+            entries.push(HistoryEntry {
+                job: name.clone(),
+                number: n,
+                result: Some(JobStatus::Success),
+                building: false,
+                started: SystemTime::UNIX_EPOCH + Duration::from_secs(n * 100_000 + i as u64),
+                duration: Duration::from_secs(50),
+            });
+        }
+    }
+    entries.sort_by_key(|e| std::cmp::Reverse(e.started));
+    let generation = app.connection_generation;
+    app.update(Action::HistoryFetched {
+        generation,
+        limit: 20,
+        result: Ok(entries),
+    });
+    time("builds", &mut app, Action::SelectNext);
+    apply(&mut app, &[Action::StartFilter]);
+    apply(&mut app, &type_str("team1 main"));
+    time("builds filtered", &mut app, Action::SelectNext);
+    apply(&mut app, &[Action::Back, Action::StartFilter]);
+    apply(&mut app, &type_str("service-4999"));
+    time("builds filtered, one match", &mut app, Action::SelectNext);
+
+    // One wide run (a job fanning out to 200 steps, half never reached) in
+    // an instance with many other edges.
+    let mut data = big_pipeline_data();
+    let root = "wide/root".to_owned();
+    let steps: Vec<String> = (0..200).map(|i| format!("wide/step{i:03}")).collect();
+    for name in std::iter::once(&root).chain(&steps) {
+        data.jobs.push(pipelines::PipelineJob {
+            name: name.clone(),
+            status: JobStatus::Success,
+            building: false,
+        });
+    }
+    for (i, step) in steps.iter().enumerate() {
+        data.edges.push((root.clone(), step.clone()));
+        data.static_edges.push((root.clone(), step.clone()));
+        if i % 2 == 0 {
+            data.builds.push(pipelines::RunBuild {
+                job: step.clone(),
+                number: 1,
+                result: Some(JobStatus::Success),
+                building: false,
+                started: SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_060),
+                duration: Duration::from_secs(50),
+                parent: Some((root.clone(), 1)),
+            });
+        }
+    }
+    data.builds.push(pipelines::RunBuild {
+        job: root.clone(),
+        number: 1,
+        result: Some(JobStatus::Success),
+        building: false,
+        started: SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000),
+        duration: Duration::from_secs(50),
+        parent: None,
+    });
+    data.jobs.sort_by(|a, b| a.name.cmp(&b.name));
+    data.edges.sort();
+    data.static_edges.sort();
+    app.update(Action::SwitchTab(Tab::Runs));
+    let generation = app.connection_generation;
+    app.update(Action::PipelinesFetched {
+        generation,
+        result: Ok(data),
+    });
+    app.update(Action::OpenBuild);
+    assert_eq!(app.view, View::Run, "the newest run: the wide one");
+    time("run view (tree)", &mut app, Action::SelectNext);
+    app.update(Action::ToggleRunView);
+    time("run view (boxes)", &mut app, Action::SelectNext);
+}

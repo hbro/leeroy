@@ -123,12 +123,21 @@ fn flatten(items: Vec<Item>, prefix: &str, out: &mut Vec<Job>) {
     }
 }
 
-/// Case-insensitive; every whitespace-separated term must occur in the name.
-pub fn matches(job: &Job, filter: &str) -> bool {
-    let name = job.full_name.to_lowercase();
-    filter
-        .split_whitespace()
-        .all(|term| name.contains(&term.to_lowercase()))
+/// A list filter: case-insensitive, every whitespace-separated term must
+/// occur in the text. Terms are lowercased once, and texts are matched in
+/// lowercase (lists keep them lowercased, so a keypress doesn't lowercase
+/// every row again).
+pub struct Terms(Vec<String>);
+
+impl Terms {
+    pub fn new(filter: &str) -> Self {
+        Terms(filter.split_whitespace().map(str::to_lowercase).collect())
+    }
+
+    /// `lowered`: the text, already lowercased.
+    pub fn matches(&self, lowered: &str) -> bool {
+        self.0.iter().all(|term| lowered.contains(term.as_str()))
+    }
 }
 
 /// Loading state of the job list.
@@ -144,13 +153,19 @@ pub enum JobsLoad {
 /// The Jobs tab: loaded jobs, filter and selection.
 #[derive(Debug, Default)]
 pub struct JobsState {
-    pub load: JobsLoad,
+    /// Private so that [`Self::keys`] always belongs to it: see
+    /// [`Self::set_load`].
+    load: JobsLoad,
+    /// Lowercased full names of the loaded jobs, for filtering.
+    keys: Vec<String>,
     /// Applied filter text (may be empty).
     pub filter: String,
     /// Filter input while `/` is active; its text is applied live.
     pub filter_input: Option<TextInput>,
     /// Index into [`Self::visible`].
     pub selected: usize,
+    /// First row on screen (recorded by the renderer).
+    pub offset: std::cell::Cell<usize>,
     /// A reload is running while the current list stays visible.
     pub refreshing: bool,
     /// When the list was last loaded successfully.
@@ -161,6 +176,18 @@ pub struct JobsState {
 }
 
 impl JobsState {
+    pub fn load(&self) -> &JobsLoad {
+        &self.load
+    }
+
+    pub fn set_load(&mut self, load: JobsLoad) {
+        self.keys = match &load {
+            JobsLoad::Loaded(jobs) => jobs.iter().map(|j| j.full_name.to_lowercase()).collect(),
+            _ => Vec::new(),
+        };
+        self.load = load;
+    }
+
     /// The filter currently in effect: the live input while typing.
     pub fn active_filter(&self) -> &str {
         self.filter_input
@@ -172,8 +199,12 @@ impl JobsState {
     pub fn visible(&self) -> Vec<&Job> {
         match &self.load {
             JobsLoad::Loaded(jobs) => {
-                let filter = self.active_filter();
-                jobs.iter().filter(|job| matches(job, filter)).collect()
+                let terms = Terms::new(self.active_filter());
+                jobs.iter()
+                    .zip(&self.keys)
+                    .filter(|(_, key)| terms.matches(key))
+                    .map(|(job, _)| job)
+                    .collect()
             }
             _ => Vec::new(),
         }
@@ -277,17 +308,19 @@ mod tests {
     #[test]
     fn filter_terms() {
         let j = job("Team/Service-API/main");
+        let matches =
+            |job: &Job, filter: &str| Terms::new(filter).matches(&job.full_name.to_lowercase());
         assert!(matches(&j, ""));
         assert!(matches(&j, "api"));
         assert!(matches(&j, "team main"));
         assert!(!matches(&j, "team release"));
+        assert!(matches(&j, "TEAM Main"), "case-insensitive");
     }
 
     fn loaded(names: &[&str]) -> JobsState {
-        JobsState {
-            load: JobsLoad::Loaded(names.iter().map(|n| job(n)).collect()),
-            ..Default::default()
-        }
+        let mut state = JobsState::default();
+        state.set_load(JobsLoad::Loaded(names.iter().map(|n| job(n)).collect()));
+        state
     }
 
     #[test]

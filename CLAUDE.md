@@ -105,6 +105,12 @@ Rules:
   instances). The list tabs only build the rows on screen
   (`ui::visible_window`, offset recorded in `ListState::offset`); benchmark:
   `cargo test --release --test render -- --ignored --nocapture pipeline_runs_speed`.
+  Same idea for Jobs/Builds: `JobsState::set_load` / `HistoryState::set_entries`
+  store lowercased filter keys once (`jobs::Terms` matches against them; `load`
+  and `entries` stay private so the keys can't go stale), the Builds tab
+  memoizes its matches per filter text, and the job list builds only the rows
+  on screen. Benchmark: `… --ignored --nocapture list_speed` (the run view,
+  ~0.5 ms, needed nothing).
 - Pipelines (`3`) and Pipeline runs (`4`, `Tab::Runs`) share one fetch (`Effect::FetchPipelines`,
   one in flight, auto-refresh/`r` like the other tabs, reset on reconnect).
   Enter opens `View::Run` (`App::run: RunView`, `RunRef::Latest` from

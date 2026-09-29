@@ -702,7 +702,7 @@ impl App {
     fn connect(&mut self) -> Option<Effect> {
         self.connection_generation += 1;
         // Jobs of the previous connection may belong to another instance.
-        self.jobs.load = JobsLoad::NotLoaded;
+        self.jobs.set_load(JobsLoad::NotLoaded);
         self.jobs.refreshing = false;
         self.history.load = HistoryLoad::NotLoaded;
         self.history.refreshing = false;
@@ -1567,10 +1567,10 @@ impl App {
                 if result.is_ok() {
                     self.jobs.fetched_at = Some(self.now);
                 }
-                self.jobs.load = match result {
+                self.jobs.set_load(match result {
                     Ok(jobs) => JobsLoad::Loaded(jobs),
                     Err(error) => JobsLoad::Failed(error),
-                };
+                });
                 let visible = self.jobs.visible();
                 self.jobs.selected = previous
                     .and_then(|name| visible.iter().position(|job| job.full_name == name))
@@ -1581,7 +1581,6 @@ impl App {
         Vec::new()
     }
 
-    /// Load the job list for the current connection.
     /// Load the job list for the current connection, unless a fetch is
     /// already in flight: then this is a no-op and the running one is left to
     /// finish, so slow fetches never pile up or get restarted forever. (A new
@@ -1595,10 +1594,10 @@ impl App {
         };
         // Keep showing the current list while it reloads (no flicker, and the
         // selection can be restored afterwards).
-        if matches!(self.jobs.load, JobsLoad::Loaded(_)) {
+        if matches!(self.jobs.load(), JobsLoad::Loaded(_)) {
             self.jobs.refreshing = true;
         } else {
-            self.jobs.load = JobsLoad::Loading;
+            self.jobs.set_load(JobsLoad::Loading);
         }
         vec![Effect::FetchJobs {
             generation: self.connection_generation,
@@ -2671,7 +2670,7 @@ mod tests {
             result: Ok(info("me")),
         });
         assert!(matches!(effects.as_slice(), [Effect::FetchJobs { .. }]));
-        assert_eq!(app.jobs.load, JobsLoad::Loading);
+        assert_eq!(*app.jobs.load(), JobsLoad::Loading);
         app.update(Action::JobsFetched {
             generation,
             result: Ok(names.iter().map(|n| job(n)).collect()),
@@ -2699,12 +2698,16 @@ mod tests {
         let old = app.connection_generation;
         app.update(Action::SwitchTab(Tab::Settings));
         set_url(&mut app, "https://other");
-        assert_eq!(app.jobs.load, JobsLoad::NotLoaded, "cleared on reconnect");
+        assert_eq!(
+            *app.jobs.load(),
+            JobsLoad::NotLoaded,
+            "cleared on reconnect"
+        );
         app.update(Action::JobsFetched {
             generation: old,
             result: Ok(vec![job("stale")]),
         });
-        assert_eq!(app.jobs.load, JobsLoad::NotLoaded);
+        assert_eq!(*app.jobs.load(), JobsLoad::NotLoaded);
     }
 
     #[test]
@@ -2750,7 +2753,7 @@ mod tests {
             generation: app.connection_generation,
             result: Err("HTTP 500".into()),
         });
-        assert_eq!(app.jobs.load, JobsLoad::Failed("HTTP 500".into()));
+        assert_eq!(*app.jobs.load(), JobsLoad::Failed("HTTP 500".into()));
     }
 
     #[test]

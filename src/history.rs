@@ -7,11 +7,18 @@
 //! holds for any filter on the job name: the newest `N` matching builds are
 //! among the matching jobs' newest `N`.
 
-use std::time::{Duration, SystemTime};
+use std::{
+    cell::RefCell,
+    rc::Rc,
+    time::{Duration, SystemTime},
+};
 
 use serde::Deserialize;
 
-use crate::{input::TextInput, jobs::JobStatus};
+use crate::{
+    input::TextInput,
+    jobs::{JobStatus, Terms},
+};
 
 /// Folder depth followed (as for the job list).
 const FOLDER_DEPTH: usize = crate::jobs::FOLDER_DEPTH;
@@ -111,14 +118,11 @@ fn collect(items: Vec<Item>, out: &mut Vec<HistoryEntry>) {
     }
 }
 
-/// Filter terms match the job name or `#number` (all terms must match).
-/// Complete for these, since the fetch strategy guarantees every matching
-/// job's newest builds are loaded.
-pub fn matches(entry: &HistoryEntry, filter: &str) -> bool {
-    let text = format!("{} #{}", entry.job, entry.number).to_lowercase();
-    filter
-        .split_whitespace()
-        .all(|term| text.contains(&term.to_lowercase()))
+/// What the filter matches: the job name or `#number` (all terms must
+/// match), lowercased. Complete for these, since the fetch strategy
+/// guarantees every matching job's newest builds are loaded.
+fn filter_key(entry: &HistoryEntry) -> String {
+    format!("{} #{}", entry.job, entry.number).to_lowercase()
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -136,6 +140,12 @@ pub struct HistoryState {
     pub load: HistoryLoad,
     /// Every build in the last answer, newest first.
     entries: Vec<HistoryEntry>,
+    /// Per entry, its [`filter_key`]: made once per answer, not per keypress
+    /// (a big instance has 100k entries).
+    keys: Vec<String>,
+    /// Indices of the entries matching a filter, with that filter: a
+    /// keypress asks several times for the same answer.
+    matched: RefCell<Option<(String, Rc<[usize]>)>>,
     /// Builds per job asked for in the last successful fetch (and so the
     /// number of rows that are guaranteed correct).
     pub limit: usize,
@@ -150,6 +160,8 @@ pub struct HistoryState {
 impl HistoryState {
     /// Store a fetched answer (made with `limit` builds per job).
     pub fn set_entries(&mut self, entries: Vec<HistoryEntry>, limit: usize) {
+        self.keys = entries.iter().map(filter_key).collect();
+        self.matched.take();
         self.entries = entries;
         self.limit = limit;
     }
@@ -160,21 +172,37 @@ impl HistoryState {
             .map_or(self.filter.as_str(), |input| input.value())
     }
 
-    fn matching(&self) -> impl Iterator<Item = &HistoryEntry> {
+    /// Indices of the entries matching the active filter, newest first.
+    fn matching(&self) -> Rc<[usize]> {
         let filter = self.active_filter();
-        self.entries.iter().filter(move |e| matches(e, filter))
+        let mut matched = self.matched.borrow_mut();
+        if let Some((cached, indices)) = &*matched
+            && cached == filter
+        {
+            return indices.clone();
+        }
+        let terms = Terms::new(filter);
+        let indices: Rc<[usize]> = (0..self.keys.len())
+            .filter(|&i| terms.matches(&self.keys[i]))
+            .collect();
+        *matched = Some((filter.to_owned(), indices.clone()));
+        indices
     }
 
     /// Rows to show: the newest `limit` matching builds (beyond that the
     /// merged order could have gaps).
     pub fn visible(&self) -> Vec<&HistoryEntry> {
-        self.matching().take(self.limit).collect()
+        self.matching()
+            .iter()
+            .take(self.limit)
+            .map(|&i| &self.entries[i])
+            .collect()
     }
 
     /// More matching builds exist than are shown: loading more (a larger
     /// `limit`) would show them.
     pub fn has_more(&self) -> bool {
-        self.matching().nth(self.limit).is_some()
+        self.matching().len() > self.limit
     }
 
     pub fn fetch_in_flight(&self) -> bool {
@@ -262,6 +290,13 @@ mod tests {
         assert_eq!(state.visible()[0].number, 2);
         state.filter_input = Some(TextInput::new("#9"));
         assert_eq!(state.visible()[0].job, "folder/b", "live input wins");
+        // Matches are remembered per filter, but not across answers.
+        let mut newer = parse_history(json()).unwrap();
+        newer.retain(|e| e.job != "folder/b");
+        state.set_entries(newer, 10);
+        assert!(state.visible().is_empty(), "a new answer, matched again");
+        state.filter_input = Some(TextInput::new("A"));
+        assert_eq!(state.visible().len(), 2, "case-insensitive");
     }
 
     #[test]

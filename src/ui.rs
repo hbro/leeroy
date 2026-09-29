@@ -189,7 +189,7 @@ fn render_jobs(frame: &mut Frame, area: Rect, app: &App) {
             Line::styled(error.clone(), Style::new().fg(t.error)),
             Line::styled("Check the settings (0), or press r to retry", hint),
         ],
-        ConnectionStatus::Connected { .. } => match &app.jobs.load {
+        ConnectionStatus::Connected { .. } => match app.jobs.load() {
             JobsLoad::NotLoaded | JobsLoad::Loading => vec![
                 Line::raw(""),
                 Line::styled("Loading jobs…", Style::new().italic()),
@@ -257,10 +257,13 @@ fn render_job_list(frame: &mut Frame, area: Rect, app: &App) {
         return;
     }
 
-    let rows = visible.iter().enumerate().map(|(i, job)| {
+    // Only the rows on screen are built (big instances have thousands).
+    let selected = jobs.selected.min(visible.len() - 1);
+    let window = visible_window(visible.len(), selected, list_area.height, &jobs.offset);
+    let rows = visible[window.clone()].iter().enumerate().map(|(i, job)| {
         let (symbol, mut color) = status_symbol(t, job.status);
         // Text in the highlight colour would vanish on the selected row.
-        if i == jobs.selected {
+        if window.start + i == selected {
             color = t.on_selected(color);
         }
         Row::new(vec![
@@ -287,7 +290,7 @@ fn render_job_list(frame: &mut Frame, area: Rect, app: &App) {
     .row_highlight_style(Style::new().bg(t.selected_bg).bold())
     .highlight_symbol("▶ ")
     .highlight_spacing(HighlightSpacing::Always);
-    let mut state = TableState::default().with_selected(Some(jobs.selected));
+    let mut state = TableState::default().with_selected(Some(selected - window.start));
     frame.render_stateful_widget(table, list_area, &mut state);
     app.list_rows.set(list_area.height);
 }
@@ -1617,7 +1620,7 @@ fn refresh_status(app: &App) -> Line<'static> {
         _ => (
             app.jobs.fetch_in_flight(),
             app.jobs.fetched_at,
-            matches!(app.jobs.load, JobsLoad::Failed(_)),
+            matches!(app.jobs.load(), JobsLoad::Failed(_)),
         ),
     };
     let mut text = String::from(" ⟳");
