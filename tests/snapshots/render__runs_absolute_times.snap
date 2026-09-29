@@ -1,0 +1,28 @@
+---
+source: tests/render.rs
+expression: runs
+---
+" Leeroy  ● https://ci.example.com · Jenkins 2.504.1 · me       h/?  help   ⟳ 0s "
+" 1 Jobs   2 Builds   3 Pipelines   4 Pipeline runs                   0 Settings "
+"Pipeline runs (3) ──────────────────────────────────────────────────────────────"
+"▶ ● failure  shop #8                                  2023-11-14 22:21       20s"
+"  ⟳ unstable libs/core #12                            2023-11-14 22:09  22m 00s…"
+"  ● partial  shop #7                                  2023-11-14 19:26    1m 30s"
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"────────────────────────────────────────────────────────────────────────────────"
+" Enter  open run   /  filter   o  open in browser           Absolute timestamps "

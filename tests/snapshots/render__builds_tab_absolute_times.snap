@@ -1,0 +1,28 @@
+---
+source: tests/render.rs
+expression: screen
+---
+" Leeroy  ● https://ci.example.com · Jenkins 2.504.1 · me       h/?  help   ⟳ 0s "
+" 1 Jobs   2 Builds   3 Pipelines   4 Pipeline runs                   0 Settings "
+"Builds (5 newest) · ↓ at the end loads more ────────────────────────────────────"
+"▶ ⟳ running   backend/api/release-1.2 #46             2023-11-15 00:10   2m 30s…"
+"  ● success   backend/api/main #56                    2023-11-15 00:03    1m 35s"
+"  ● failed    frontend/web/main #12                   2023-11-14 23:11    5m 12s"
+"  ● aborted   docs #7                                 2023-11-13 23:13       12s"
+"  ● unstable  backend/worker #88                      2023-11-13 21:50    1m 01s"
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"────────────────────────────────────────────────────────────────────────────────"
+" Enter  open build   b  build again   /  filter             Absolute timestamps "

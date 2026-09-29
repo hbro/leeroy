@@ -416,7 +416,7 @@ fn render_history_list(frame: &mut Frame, area: Rect, app: &App) {
                 Span::raw(entry.job.clone()),
                 Span::styled(format!(" #{}", entry.number), dim),
             ])),
-            Cell::from(Line::from(format!("{} ago", format_age(age))).right_aligned()),
+            Cell::from(Line::from(started_text(app, entry.started)).right_aligned()),
             Cell::from(Line::from(took).right_aligned()),
         ])
     });
@@ -426,7 +426,7 @@ fn render_history_list(frame: &mut Frame, area: Rect, app: &App) {
             Constraint::Length(1),
             Constraint::Length(9),
             Constraint::Min(0),
-            Constraint::Length(8),
+            Constraint::Length(started_width(app)),
             Constraint::Length(9),
         ],
     )
@@ -570,7 +570,6 @@ fn run_table<'a>(app: &App, rows: Vec<RunRow<'a>>, selected: usize) -> Table<'a>
                 }
             }
         }
-        let age = app.wall_now.duration_since(start).unwrap_or_default();
         Row::new(vec![
             Cell::from(Line::from(vec![
                 Span::styled(symbol, Style::new().fg(color)),
@@ -578,7 +577,7 @@ fn run_table<'a>(app: &App, rows: Vec<RunRow<'a>>, selected: usize) -> Table<'a>
                 Span::styled(status.label(), Style::new().fg(color)),
             ])),
             Cell::from(Line::from(name)),
-            Cell::from(Line::from(format!("{} ago", format_age(age))).right_aligned()),
+            Cell::from(Line::from(started_text(app, start)).right_aligned()),
             Cell::from(Line::from(span_text(app, start, end)).right_aligned()),
         ])
     });
@@ -587,7 +586,7 @@ fn run_table<'a>(app: &App, rows: Vec<RunRow<'a>>, selected: usize) -> Table<'a>
         [
             Constraint::Length(10),
             Constraint::Min(0),
-            Constraint::Length(8),
+            Constraint::Length(started_width(app)),
             Constraint::Length(9),
         ],
     )
@@ -871,7 +870,7 @@ fn render_run(frame: &mut Frame, area: Rect, app: &App) {
                             Span::raw(build.job.clone()),
                             Span::styled(format!(" #{}", build.number), dim),
                         ])),
-                        Cell::from(Line::from(format!("{} ago", format_age(age))).right_aligned()),
+                        Cell::from(Line::from(started_text(app, build.started)).right_aligned()),
                         Cell::from(Line::from(took).right_aligned()),
                     ])
                 }
@@ -881,7 +880,7 @@ fn render_run(frame: &mut Frame, area: Rect, app: &App) {
             rows,
             [
                 Constraint::Min(0),
-                Constraint::Length(8),
+                Constraint::Length(started_width(app)),
                 Constraint::Length(9),
             ],
         )
@@ -1105,10 +1104,12 @@ fn render_build(frame: &mut Frame, area: Rect, app: &App) {
         .wall_now
         .duration_since(build.started)
         .unwrap_or_default();
-    lines.push(Line::from(vec![
-        label("Started"),
-        Span::raw(format!("{} ago", format_age(age))),
-    ]));
+    let started = if app.absolute_times {
+        local_time(app, build.started, "%Y-%m-%d %H:%M:%S")
+    } else {
+        format!("{} ago", format_age(age))
+    };
+    lines.push(Line::from(vec![label("Started"), Span::raw(started)]));
     if build.building {
         let estimate = build
             .estimated
@@ -1429,6 +1430,10 @@ fn render_settings(frame: &mut Frame, area: Rect, app: &App) {
                     None if key == SettingKey::Theme => {
                         Span::styled(auto_theme_note(app.terminal_appearance), dim)
                     }
+                    None if key.choices().is_some() => Span::styled(
+                        format!("{} (default)", key.choices().unwrap_or_default()[0]),
+                        dim,
+                    ),
                     None if key == SettingKey::RefreshInterval => {
                         Span::styled(format!("{} s (default)", DEFAULT_REFRESH_SECS), dim)
                     }
@@ -1461,9 +1466,12 @@ fn render_settings(frame: &mut Frame, area: Rect, app: &App) {
     let block = view_block(t, "Settings");
     let inner = block.inner(area);
     frame.render_widget(block, area);
+    // A blank line before the docs, unless it would push the status message
+    // ("Saved to …") off a small screen.
+    let spacer = u16::from(usize::from(inner.height) > lines.len() + 1);
     let [top, _, docs] = Layout::vertical([
         Constraint::Length(lines.len() as u16),
-        Constraint::Length(1),
+        Constraint::Length(spacer),
         Constraint::Min(0),
     ])
     .areas(inner);
@@ -1541,9 +1549,19 @@ fn binding_spans(bindings: &[Binding], key_style: Style) -> Vec<Span<'static>> {
 fn render_context_bar(frame: &mut Frame, area: Rect, app: &App) {
     // The selection gray as background, hotkeys in the active tab's colour.
     let t = app.theme();
+    // The outcome of the last action, for a few seconds, at the right end.
+    let notice = app
+        .notice
+        .as_ref()
+        .filter(|n| app.now.saturating_duration_since(n.at) < NOTICE_FOR)
+        .map(|n| (format!(" {} ", n.text), n.error));
+    let notice_width = notice
+        .as_ref()
+        .map_or(0, |(text, _)| (text.chars().count() as u16).min(area.width));
     // Navigation keys are left to the help popup. Hints are kept while they
-    // fit whole (they're ordered by importance): a hint cut off mid-word
-    // reads as garbage.
+    // fit whole next to the notice (they're ordered by importance): a hint
+    // cut off mid-word reads as garbage.
+    let room = usize::from(area.width - notice_width);
     let mut used = 0;
     let bindings: Vec<Binding> = context_bindings(app.context())
         .iter()
@@ -1552,24 +1570,17 @@ fn render_context_bar(frame: &mut Frame, area: Rect, app: &App) {
         .take_while(|b| {
             // " key " + " desc" (+ two spaces before the next one).
             let width = b.key.chars().count() + 2 + b.desc.chars().count() + 1;
-            let fits = used + width <= usize::from(area.width);
+            let fits = used + width <= room;
             used += width + 2;
             fits
         })
         .collect();
     let spans = binding_spans(&bindings, t.on_accent);
     frame.render_widget(Paragraph::new(Line::from(spans)).style(t.context_bar), area);
-    // The outcome of the last action, for a few seconds, at the right end.
-    if let Some(notice) = app
-        .notice
-        .as_ref()
-        .filter(|n| app.now.saturating_duration_since(n.at) < NOTICE_FOR)
-    {
-        let color = if notice.error { t.error } else { t.success };
-        let text = format!(" {} ", notice.text);
-        let width = (text.chars().count() as u16).min(area.width);
+    if let Some((text, error)) = notice {
+        let color = if error { t.error } else { t.success };
         let [_, right] =
-            Layout::horizontal([Constraint::Min(0), Constraint::Length(width)]).areas(area);
+            Layout::horizontal([Constraint::Min(0), Constraint::Length(notice_width)]).areas(area);
         frame.render_widget(
             Paragraph::new(Span::styled(text, t.context_bar.fg(color).bold())),
             right,
@@ -1637,6 +1648,33 @@ fn refresh_status(app: &App) -> Line<'static> {
     // Leading space outside the block: a gap even when the connection text
     // is cut off.
     Line::from(vec![Span::raw(" "), Span::styled(text, block)])
+}
+
+/// When a build started: `17m ago`, or with `t` the local date and time
+/// (`2026-09-29 14:03`).
+fn started_text(app: &App, started: SystemTime) -> String {
+    if app.absolute_times {
+        local_time(app, started, "%Y-%m-%d %H:%M")
+    } else {
+        let age = app.wall_now.duration_since(started).unwrap_or_default();
+        format!("{} ago", format_age(age))
+    }
+}
+
+/// Width of the [`started_text`] column.
+fn started_width(app: &App) -> u16 {
+    if app.absolute_times { 16 } else { 8 }
+}
+
+/// `at` in the local time zone ([`App::time_zone`]), `strftime`-formatted.
+fn local_time(app: &App, at: SystemTime, format: &str) -> String {
+    match jiff::Timestamp::try_from(at) {
+        Ok(ts) => ts
+            .to_zoned(app.time_zone.clone())
+            .strftime(format)
+            .to_string(),
+        Err(_) => "?".into(),
+    }
 }
 
 /// `0s`, `12s`, `4m`, `2h`, `3d`.

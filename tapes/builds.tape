@@ -12,5 +12,11 @@ Show
 Screenshot target/screenshots/builds.png
 Sleep 500ms
 Hide
+Type "t"
+Sleep 300ms
+Show
+Screenshot target/screenshots/builds-absolute.png
+Sleep 500ms
+Hide
 Type "q"
 Type "q"

@@ -84,6 +84,8 @@ pub enum Action {
     Refresh,
     /// `R`: turn auto-refresh on/off for this session.
     ToggleAutoRefresh,
+    /// `t`: relative ⇄ absolute build times, saved as `ui.timestamps`.
+    ToggleTimestamps,
     /// Start editing the selected setting.
     StartEdit,
     /// Insert a char at the cursor. Never logged: may be part of a secret.
@@ -638,6 +640,13 @@ pub struct App {
     pub wall_now: SystemTime,
     /// Auto-refresh for this session; starts from the `refresh.auto` setting.
     pub auto_refresh: bool,
+    /// Build times as dates (`ui.timestamps = "absolute"`), not "17m ago".
+    /// Follows the setting; `t` also flips it when an env var fixes the
+    /// setting (then for this session only).
+    pub absolute_times: bool,
+    /// For absolute times: the local time zone, detected at startup (UTC
+    /// until then, and in tests).
+    pub time_zone: jiff::tz::TimeZone,
     /// Terminal background as reported at startup (`None`: unknown); picks
     /// the theme when `ui.theme` is `auto`.
     pub terminal_appearance: Option<Appearance>,
@@ -669,6 +678,8 @@ impl App {
             connection: ConnectionStatus::NotConfigured,
             connection_generation: 0,
             auto_refresh: settings.effective().is_on(SettingKey::RefreshAuto),
+            absolute_times: settings.effective().absolute_times(),
+            time_zone: jiff::tz::TimeZone::UTC,
             settings,
             jobs: JobsState::default(),
             history: HistoryState::default(),
@@ -952,6 +963,26 @@ impl App {
                 let mut effects = self.auto_refresh_if_due();
                 effects.extend(self.console_poll_if_due());
                 return effects;
+            }
+            Action::ToggleTimestamps => {
+                self.absolute_times = !self.absolute_times;
+                let text = if self.absolute_times {
+                    "Absolute timestamps"
+                } else {
+                    "Relative timestamps"
+                };
+                if self.settings.is_overridden(SettingKey::Timestamps) {
+                    let var = SettingKey::Timestamps.env_var();
+                    self.notice = Some(Notice::info(
+                        format!("{text} (this session: ${var} is set)"),
+                        self.now,
+                    ));
+                    return Vec::new();
+                }
+                self.notice = Some(Notice::info(text.into(), self.now));
+                // Sticky: saved like a change in the settings view.
+                let value = self.absolute_times.then(|| "absolute".to_owned());
+                return self.commit(|file| file.set(SettingKey::Timestamps, value));
             }
             Action::ToggleAutoRefresh => {
                 self.auto_refresh = !self.auto_refresh;
@@ -2015,6 +2046,7 @@ impl App {
         if auto_after != auto_before {
             self.auto_refresh = auto_after;
         }
+        self.absolute_times = self.settings.effective().absolute_times();
         let s = &mut self.settings;
         s.message = Some(StatusMessage::Info("Saving…".into()));
         let mut effects = vec![Effect::SaveSettings {
@@ -2222,12 +2254,61 @@ mod tests {
     }
 
     #[test]
+    fn t_switches_timestamps_and_saves_it() {
+        let mut app = App::default();
+        assert!(!app.absolute_times, "relative by default");
+        let effects = app.update(Action::ToggleTimestamps);
+        assert!(app.absolute_times);
+        assert_eq!(app.notice.as_ref().unwrap().text, "Absolute timestamps");
+        assert!(
+            matches!(effects.as_slice(), [Effect::SaveSettings { settings, .. }]
+                if settings.get(SettingKey::Timestamps) == Some("absolute")),
+            "sticky: saved"
+        );
+        app.update(Action::ToggleTimestamps);
+        assert!(!app.absolute_times);
+        assert_eq!(
+            app.settings.file.get(SettingKey::Timestamps),
+            None,
+            "default = unset"
+        );
+
+        // Changed in the settings view: follows right away.
+        app.update(Action::SwitchTab(Tab::Settings));
+        app.settings
+            .select(&SettingsRow::Setting(SettingKey::Timestamps));
+        app.update(Action::StartEdit);
+        assert!(app.absolute_times);
+    }
+
+    #[test]
+    fn t_with_the_env_var_set_switches_for_the_session() {
+        let mut env = Settings::default();
+        env.set(SettingKey::Timestamps, Some("absolute".into()));
+        let mut app = App::new(SettingsState::new(
+            PathBuf::from(crate::config::FILE_NAME),
+            Settings::default(),
+            env,
+        ));
+        assert!(app.absolute_times, "from the env var");
+        assert!(app.update(Action::ToggleTimestamps).is_empty(), "not saved");
+        assert!(!app.absolute_times);
+        assert!(
+            app.notice
+                .as_ref()
+                .unwrap()
+                .text
+                .contains("$LEEROY_UI_TIMESTAMPS"),
+        );
+    }
+
+    #[test]
     fn selection_wraps() {
         let mut app = settings_app();
         app.update(Action::SelectPrev);
         assert_eq!(
             app.settings.selected_row(),
-            SettingsRow::Setting(SettingKey::Theme),
+            SettingsRow::Setting(SettingKey::Timestamps),
             "last row: the Application section follows the headers"
         );
         app.update(Action::SelectNext);

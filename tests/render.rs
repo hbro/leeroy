@@ -218,10 +218,14 @@ fn settings_empty() {
 fn settings_theme_selected() {
     let mut app = test_app();
     app.terminal_appearance = Some(Appearance::Light);
-    // The last row: Theme, with its docs below.
+    // Next to last: Theme, with its docs below.
     apply(
         &mut app,
-        &[Action::SwitchTab(Tab::Settings), Action::SelectPrev],
+        &[
+            Action::SwitchTab(Tab::Settings),
+            Action::SelectPrev,
+            Action::SelectPrev,
+        ],
     );
     let screen = format!("{}", render(&app).backend());
     assert!(
@@ -238,7 +242,11 @@ fn switching_theme_recolours_right_away() {
     app.terminal_appearance = Some(Appearance::Dark);
     apply(
         &mut app,
-        &[Action::SwitchTab(Tab::Settings), Action::SelectPrev],
+        &[
+            Action::SwitchTab(Tab::Settings),
+            Action::SelectPrev,
+            Action::SelectPrev,
+        ],
     );
     assert_eq!(bar_bg(&app), Color::White, "auto on a dark terminal");
     apply(&mut app, &[Action::StartEdit, Action::StartEdit]); // auto → dark → light
@@ -1147,6 +1155,38 @@ fn builds_tab_list() {
     let screen = format!("{}", render(&app).backend());
     assert!(!screen.contains("#55"), "only the guaranteed 5 rows");
     insta::assert_snapshot!(screen);
+}
+
+/// `t`: when builds started as local dates and times, in every list and
+/// the build view.
+#[test]
+fn absolute_timestamps() {
+    let mut app = app_on_builds_tab();
+    app.time_zone = jiff::tz::TimeZone::fixed(jiff::tz::offset(2));
+    apply(&mut app, &[Action::ToggleTimestamps]);
+    let screen = format!("{}", render(&app).backend());
+    assert!(!screen.contains(" ago"), "{screen}");
+    insta::assert_snapshot!("builds_tab_absolute_times", screen);
+
+    let mut app = app_with_pipelines(Tab::Runs);
+    apply(&mut app, &[Action::ToggleTimestamps]);
+    let runs = format!("{}", render(&app).backend());
+    assert!(runs.contains("2023-11-14 22:"), "UTC here:\n{runs}");
+    insta::assert_snapshot!("runs_absolute_times", runs);
+    apply(&mut app, &[Action::OpenBuild]);
+    insta::assert_snapshot!(
+        "run_tree_absolute_times",
+        format!("{}", render(&app).backend())
+    );
+
+    let mut app = app_with_build(Some(finished_build()));
+    apply(&mut app, &[Action::ToggleTimestamps]);
+    let build = format!("{}", render(&app).backend());
+    assert!(
+        build.contains("Started     2023-11-14 22:08:20"),
+        "with seconds:\n{build}"
+    );
+    insta::assert_snapshot!("build_absolute_times", build);
 }
 
 /// The selected build row keeps its dim `#number` readable (dark gray on the

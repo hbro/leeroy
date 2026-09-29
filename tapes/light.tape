@@ -32,7 +32,7 @@ Sleep 500ms
 Hide
 Escape
 Type "0"
-Up
+Up 2
 Sleep 300ms
 Show
 Screenshot target/screenshots/light-settings.png

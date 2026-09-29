@@ -22,7 +22,7 @@ expression: screen
 "   Refresh every     10 s (default)                                             "
 "   Confirm quit      on                                                         "
 "   Theme             auto (default; terminal didn't say: dark)                  "
-"                                                                                "
+"   Timestamps        relative (default)                                         "
 "   Saved to /home/user/.config/leeroy/config.toml                               "
 "────────────────────────────────────────────────────────────────────────────────"
 " Enter  edit/toggle                                                             "

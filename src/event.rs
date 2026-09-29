@@ -42,6 +42,7 @@ pub const GLOBAL_BINDINGS: &[Binding] = &[
     bind("o", "open in browser"),
     bind("r", "refresh"),
     bind("R", "toggle auto-refresh"),
+    bind("t", "relative/absolute times"),
 ];
 
 /// Bindings that only apply in the given context (context bar).
@@ -262,6 +263,7 @@ pub fn map_key(app: &App, key: KeyEvent) -> Option<Action> {
         KeyCode::Char('?') | KeyCode::Char('h') => return Some(Action::ToggleHelp),
         KeyCode::Char('i') => return Some(Action::ToggleInfo),
         KeyCode::Char('o') => return Some(Action::OpenInBrowser),
+        KeyCode::Char('t') => return Some(Action::ToggleTimestamps),
         // Some terminals report Shift+r as 'r' with SHIFT instead of 'R'.
         KeyCode::Char('R') => return Some(Action::ToggleAutoRefresh),
         KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::SHIFT) => {

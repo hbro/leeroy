@@ -57,10 +57,11 @@ pub enum SettingKey {
     RefreshInterval,
     ConfirmQuit,
     Theme,
+    Timestamps,
 }
 
 impl SettingKey {
-    pub const ALL: [SettingKey; 7] = [
+    pub const ALL: [SettingKey; 8] = [
         SettingKey::JenkinsUrl,
         SettingKey::JenkinsSkipTlsVerify,
         SettingKey::ProxyUrl,
@@ -68,6 +69,7 @@ impl SettingKey {
         SettingKey::RefreshInterval,
         SettingKey::ConfirmQuit,
         SettingKey::Theme,
+        SettingKey::Timestamps,
     ];
 
     pub fn label(self) -> &'static str {
@@ -79,6 +81,7 @@ impl SettingKey {
             SettingKey::RefreshInterval => "Refresh every",
             SettingKey::ConfirmQuit => "Confirm quit",
             SettingKey::Theme => "Theme",
+            SettingKey::Timestamps => "Timestamps",
         }
     }
 
@@ -92,6 +95,7 @@ impl SettingKey {
             SettingKey::RefreshInterval => ("refresh", "interval"),
             SettingKey::ConfirmQuit => ("ui", "confirm_quit"),
             SettingKey::Theme => ("ui", "theme"),
+            SettingKey::Timestamps => ("ui", "timestamps"),
         }
     }
 
@@ -105,6 +109,7 @@ impl SettingKey {
             SettingKey::RefreshInterval => "LEEROY_REFRESH_INTERVAL",
             SettingKey::ConfirmQuit => "LEEROY_UI_CONFIRM_QUIT",
             SettingKey::Theme => "LEEROY_UI_THEME",
+            SettingKey::Timestamps => "LEEROY_UI_TIMESTAMPS",
         }
     }
 
@@ -117,7 +122,8 @@ impl SettingKey {
             SettingKey::RefreshAuto
             | SettingKey::RefreshInterval
             | SettingKey::ConfirmQuit
-            | SettingKey::Theme => Section::Application,
+            | SettingKey::Theme
+            | SettingKey::Timestamps => Section::Application,
         }
     }
 
@@ -140,6 +146,7 @@ impl SettingKey {
     pub fn choices(self) -> Option<&'static [&'static str]> {
         match self {
             SettingKey::Theme => Some(&crate::theme::ThemeChoice::VALUES),
+            SettingKey::Timestamps => Some(&TIMESTAMP_VALUES),
             _ => None,
         }
     }
@@ -186,6 +193,10 @@ impl SettingKey {
                 "background; dark suits dark terminals, light suits light ones. auto picks one\n",
                 "from the background colour the terminal reports (dark if it doesn't answer).",
             ),
+            SettingKey::Timestamps => concat!(
+                "When builds started: relative (the default, \"17m ago\") or absolute\n",
+                "(\"2026-09-29 14:03\", local time). Press t anywhere to switch; that saves it here.",
+            ),
         }
     }
 
@@ -230,6 +241,17 @@ impl SettingKey {
                         crate::theme::ThemeChoice::VALUES.join(", ")
                     )
                 }),
+            SettingKey::Timestamps => {
+                let lower = value.to_ascii_lowercase();
+                if TIMESTAMP_VALUES.contains(&lower.as_str()) {
+                    Ok(lower)
+                } else {
+                    Err(format!(
+                        "expected one of {}, got {value:?}",
+                        TIMESTAMP_VALUES.join(", ")
+                    ))
+                }
+            }
             SettingKey::JenkinsSkipTlsVerify
             | SettingKey::RefreshAuto
             | SettingKey::ConfirmQuit => parse_bool(value)
@@ -413,7 +435,11 @@ pub struct Settings {
 pub struct UiSettings {
     pub confirm_quit: Option<bool>,
     pub theme: Option<String>,
+    pub timestamps: Option<String>,
 }
+
+/// `ui.timestamps` values, in the order Enter cycles through them.
+pub const TIMESTAMP_VALUES: [&str; 2] = ["relative", "absolute"];
 
 pub const DEFAULT_REFRESH_SECS: u64 = 10;
 pub const MIN_REFRESH_SECS: u64 = 1;
@@ -486,7 +512,13 @@ impl Settings {
                 .confirm_quit
                 .map(|b| if b { "true" } else { "false" }),
             SettingKey::Theme => self.ui.theme.as_deref(),
+            SettingKey::Timestamps => self.ui.timestamps.as_deref(),
         }
+    }
+
+    /// `ui.timestamps` is `absolute` (relative when unset).
+    pub fn absolute_times(&self) -> bool {
+        self.get(SettingKey::Timestamps) == Some("absolute")
     }
 
     /// The `ui.theme` setting (`auto` when unset or, defensively, invalid).
@@ -526,6 +558,7 @@ impl Settings {
                 return;
             }
             SettingKey::Theme => &mut self.ui.theme,
+            SettingKey::Timestamps => &mut self.ui.timestamps,
         };
         *slot = value;
     }
@@ -1102,6 +1135,16 @@ mod tests {
         let err = Settings::from_env(vars(&[("LEEROY_UI_THEME", "solarized")])).unwrap_err();
         assert!(err.to_string().contains("LEEROY_UI_THEME"), "{err}");
         assert_eq!(Settings::default().theme(), crate::theme::ThemeChoice::Auto);
+    }
+
+    #[test]
+    fn timestamps_setting() {
+        let settings = Settings::from_env(vars(&[("LEEROY_UI_TIMESTAMPS", " Absolute ")])).unwrap();
+        assert_eq!(settings.get(SettingKey::Timestamps), Some("absolute"));
+        assert!(settings.absolute_times());
+        assert!(!Settings::default().absolute_times(), "relative by default");
+        let err = Settings::from_env(vars(&[("LEEROY_UI_TIMESTAMPS", "iso")])).unwrap_err();
+        assert!(err.to_string().contains("LEEROY_UI_TIMESTAMPS"), "{err}");
     }
 
     #[test]

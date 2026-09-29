@@ -83,7 +83,10 @@ Rules:
 - Global keys (`GLOBAL_BINDINGS`; no bottom bar, listed in the help popup, the
   header shows an `h/?` hint): q, h/?, i (instance overlay: `src/instance.rs`,
   three requests fetched fresh on every open, header names only), r (refresh),
-  R (toggle auto-refresh). The help popup's section for the view below is
+  R (toggle auto-refresh), t (`App::absolute_times`: relative ⇄ absolute
+  build times; saved as `ui.timestamps` via `commit`, session-only when the
+  env var is set; `ui::started_text` renders them in `App::time_zone`,
+  detected in `main.rs` with jiff, UTC in tests). The help popup's section for the view below is
   titled "Navigation". The refresh status is a compact `⟳ 4s` at the right end of the
   header (icon green = auto-refresh on, gray = off; `…` fetching, `✕` failed).
 - Build view (`View::Build`, part of the Jobs tab): `Enter` on a job opens it

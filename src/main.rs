@@ -85,6 +85,8 @@ async fn main() -> Result<()> {
     settings.proxy_env = ProxyEnv::from_env(|name| std::env::var_os(name));
     let mut app = App::new(settings);
     app.terminal_appearance = detect_appearance();
+    // Absolute build times are shown in local time (falls back to UTC).
+    app.time_zone = jiff::tz::TimeZone::system();
 
     // ratatui::init enters raw mode + alternate screen and installs a panic
     // hook that restores the terminal before the panic message is printed.

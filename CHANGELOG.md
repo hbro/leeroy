@@ -10,6 +10,14 @@ A release's section is used as its GitHub release notes.
 
 ## [Unreleased]
 
+### Added
+
+- Absolute timestamps: `t` switches when builds started between "17m ago"
+  and the local date and time, in the Builds, Pipelines and Pipeline runs
+  tabs, the run view and the build view. The choice is saved as the new
+  `ui.timestamps` setting (also in the settings view, or
+  `LEEROY_UI_TIMESTAMPS`).
+
 ## [0.3.3] - 2026-09-29
 
 ### Changed

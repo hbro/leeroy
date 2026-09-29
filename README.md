@@ -85,6 +85,7 @@ interval = 10  # default; seconds between automatic refreshes, minimum 1
 [ui]
 confirm_quit = true  # default: ask before quitting with q
 theme = "auto"       # default; or "dark" / "light", see "Colours" below
+timestamps = "relative"  # default ("17m ago"); or "absolute" (local time), t switches
 ```
 
 Every setting can be overridden by an env var, which wins over the file (and
@@ -99,6 +100,8 @@ can't be edited in the TUI while set):
 | Auto-refresh | `LEEROY_REFRESH_AUTO` |
 | Refresh interval | `LEEROY_REFRESH_INTERVAL` (seconds, ≥ 1) |
 | Confirm quit | `LEEROY_UI_CONFIRM_QUIT` |
+| Theme | `LEEROY_UI_THEME` (`auto`/`dark`/`light`) |
+| Timestamps | `LEEROY_UI_TIMESTAMPS` (`relative`/`absolute`) |
 
 Saving from the TUI keeps comments and unknown keys in the file.
 
@@ -221,6 +224,7 @@ is in the help popup, `h` or `?`, hinted at the right of the header):
 | `i` | about the Jenkins instance: version, user, nodes, executors, queue, and how Leeroy connects (TLS, proxy, header names) |
 | `r` | refresh now (reconnects if the connection failed) |
 | `R` | toggle auto-refresh for this session |
+| `t` | when builds started: relative (`17m ago`) ⇄ absolute (`2026-09-29 14:03`, local time). Remembered: saved as `ui.timestamps` (only for the session while `LEEROY_UI_TIMESTAMPS` is set) |
 
 ### Jobs
 
