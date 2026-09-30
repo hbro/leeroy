@@ -246,6 +246,26 @@ impl Executor {
                     let _ = tx.send(Action::BuildTriggered { name, result });
                 });
             }
+            Effect::Rerun {
+                job,
+                number,
+                in_run,
+                config,
+            } => {
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    let result = jenkins::rerun(&config, &job, number, in_run).await;
+                    match &result {
+                        Ok(done) => tracing::info!(job, ?done, "re-ran a build"),
+                        Err(err) => tracing::warn!(job, %err, "re-running a build failed"),
+                    }
+                    let _ = tx.send(Action::Reran {
+                        job,
+                        in_run,
+                        result,
+                    });
+                });
+            }
             Effect::Promote { promotions, config } => {
                 let tx = tx.clone();
                 tokio::spawn(async move {

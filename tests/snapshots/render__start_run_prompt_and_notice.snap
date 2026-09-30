@@ -11,7 +11,7 @@ expression: prompt
 "                                                                                "
 "                                                                                "
 "                                                                                "
-"                    ╔ Start a run? ════════════════════════╗                    "
+"                    ╔ Start a new pipeline run? ═══════════╗                    "
 "                    ║                                      ║                    "
 "                    ║  shop  (shop/build)                  ║                    "
 "                    ║  with its default parameters         ║                    "

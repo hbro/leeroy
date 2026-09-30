@@ -31,15 +31,25 @@ pub enum Action {
     ToggleHelp,
     /// `i`: open/close the overlay about the connected Jenkins instance.
     ToggleInfo,
-    /// `b` (Pipelines tab, run view): ask whether to start a run of the
-    /// pipeline.
-    RequestStartRun,
+    /// `b` (`rerun`: run a build again with its parameters) or `B` (a new
+    /// build or pipeline run): ask first. What they apply to depends on the
+    /// screen; see [`App::start_target`].
+    RequestStart {
+        rerun: bool,
+    },
     /// Confirmed: start it.
-    ConfirmStartRun,
-    /// Outcome of [`Effect::TriggerBuild`] for pipeline `name`.
+    ConfirmStart,
+    /// Outcome of [`Effect::TriggerBuild`] (`name`: what was started).
     BuildTriggered {
         name: String,
         result: Result<(), String>,
+    },
+    /// Outcome of [`Effect::Rerun`] of `job` (a pipeline run's step when
+    /// `in_run`).
+    Reran {
+        job: String,
+        in_run: bool,
+        result: Result<crate::jenkins::Rerun, String>,
     },
     /// `p` (run view): list the run's promotions (manual steps).
     OpenPromote,
@@ -196,6 +206,15 @@ pub enum Effect {
     TriggerBuild {
         job: String,
         name: String,
+        config: ConnectionConfig,
+    },
+    /// Run build `number` of `job` again (`None`: its latest) with the same
+    /// parameters; answer with [`Action::Reran`]. `in_run`: a pipeline run's
+    /// step, kept in that run when the Build Pipeline plugin can.
+    Rerun {
+        job: String,
+        number: Option<u64>,
+        in_run: bool,
         config: ConnectionConfig,
     },
     /// Take `promotions` one after the other; answer with [`Action::Promoted`].
@@ -400,7 +419,7 @@ impl Context {
             Context::Runs | Context::RunsFiltered => "Pipeline runs",
             Context::Run => "Run",
             Context::ConfirmQuit => "Quit?",
-            Context::ConfirmStart => "Start run?",
+            Context::ConfirmStart => "Start?",
             Context::Promote => "Promote",
             Context::Build => "Build",
             Context::Console => "Console",
@@ -809,22 +828,57 @@ impl App {
                     return self.fetch_info();
                 }
             }
-            Action::RequestStartRun => {
-                self.confirm_start = self.start_target();
-            }
-            Action::ConfirmStartRun => {
+            Action::RequestStart { rerun } => match self.start_target(rerun) {
+                Ok(start) => self.confirm_start = start,
+                Err(why) => self.notice = Some(Notice::error(why, self.now)),
+            },
+            Action::ConfirmStart => {
                 let Some(start) = self.confirm_start.take() else {
                     return Vec::new();
                 };
                 let Some(config) = self.settings.connection_config() else {
                     return Vec::new();
                 };
+                if let Some(rerun) = start.rerun {
+                    return vec![Effect::Rerun {
+                        job: start.job,
+                        number: rerun.number,
+                        in_run: rerun.in_run,
+                        config,
+                    }];
+                }
                 let what = if start.pipeline { "run" } else { "build" };
                 return vec![Effect::TriggerBuild {
                     name: format!("a {what} of {}", start.name),
                     job: start.job,
                     config,
                 }];
+            }
+            Action::Reran {
+                job,
+                in_run,
+                result,
+            } => {
+                let ok = result.is_ok();
+                self.notice = Some(match result {
+                    Ok(done) if done.linked || !in_run => {
+                        Notice::info(format!("Re-running {job} #{}", done.number), self.now)
+                    }
+                    // Like a promotion without the plugin: it runs, but on
+                    // its own.
+                    Ok(done) => Notice::error(
+                        format!(
+                            "Re-running {job} #{} (no Build Pipeline view: not linked to the run)",
+                            done.number
+                        ),
+                        self.now,
+                    ),
+                    Err(err) => Notice::error(format!("Could not re-run {job}: {err}"), self.now),
+                });
+                if ok {
+                    // The new build appears once Jenkins starts it; look now.
+                    return self.refresh();
+                }
             }
             Action::BuildTriggered { name, result } => {
                 let ok = result.is_ok();
@@ -1857,36 +1911,117 @@ impl App {
         (pipeline, run)
     }
 
-    /// What `b` would start: the selected job (Jobs, Builds tabs) or the
-    /// shown build's job (build view, console) — or a pipeline: selected in
-    /// the Pipelines tab, or the one the run view shows.
-    fn start_target(&self) -> Option<StartRun> {
-        let job = |name: &str| {
-            Some(StartRun {
-                job: name.to_owned(),
-                name: name.to_owned(),
-                pipeline: false,
-            })
+    /// What `b` (`rerun`) or `B` would start, by screen:
+    /// - Jobs tab: `b` re-runs the job's latest build, `B` builds it anew.
+    /// - Builds tab, build view, console: `b` re-runs that build, `B` builds
+    ///   its job anew (in a run's build view, `b` keeps it in the run).
+    /// - Pipelines and Pipeline runs tabs: `B` starts a new pipeline run.
+    /// - Run view: `b` re-runs the selected step within the run, `B` starts
+    ///   a new run of the pipeline.
+    ///
+    /// `Ok(None)`: nothing to start here; `Err`: why not (for a notice).
+    fn start_target(&self, rerun: bool) -> Result<Option<StartRun>, String> {
+        let new_build = |job: &str| StartRun {
+            job: job.to_owned(),
+            name: job.to_owned(),
+            pipeline: false,
+            rerun: None,
         };
-        let pipelines = match self.view {
-            View::Jobs => return job(&self.jobs.visible().get(self.jobs.selected)?.full_name),
-            View::Builds => return job(&self.history.visible().get(self.history.selected)?.job),
-            View::Build | View::Console => return job(&self.build.as_ref()?.job),
-            View::Pipelines => self.pipelines.visible_pipelines(),
-            View::Run => self.pipelines.pipelines().iter().collect(),
-            View::Runs | View::Settings => return None,
+        let rerun_of = |job: &str, number: Option<u64>, in_run: bool| StartRun {
+            job: job.to_owned(),
+            name: match number {
+                Some(n) => format!("{job} #{n}"),
+                None => format!("{job}, latest build"),
+            },
+            pipeline: false,
+            rerun: Some(RerunOf { number, in_run }),
         };
-        let pipeline = match self.view {
-            View::Pipelines => pipelines.get(self.pipelines.list.selected)?,
-            _ => {
-                let view = self.run.as_ref()?;
-                pipelines.iter().find(|p| p.first_job == view.first_job)?
-            }
-        };
-        Some(StartRun {
+        let new_run = |pipeline: &crate::pipelines::Pipeline| StartRun {
             job: pipeline.first_job.clone(),
             name: pipeline.name.clone(),
             pipeline: true,
+            rerun: None,
+        };
+        Ok(match self.view {
+            View::Jobs => {
+                let Some(job) = self.jobs.visible().get(self.jobs.selected).copied() else {
+                    return Ok(None);
+                };
+                if !rerun {
+                    Some(new_build(&job.full_name))
+                } else if job.status == crate::jobs::JobStatus::NotBuilt {
+                    return Err(format!(
+                        "{} has never been built: B starts a build",
+                        job.full_name
+                    ));
+                } else {
+                    Some(rerun_of(&job.full_name, None, false))
+                }
+            }
+            View::Builds => {
+                let visible = self.history.visible();
+                let Some(entry) = visible.get(self.history.selected) else {
+                    return Ok(None);
+                };
+                Some(match rerun {
+                    true => rerun_of(&entry.job, Some(entry.number), false),
+                    false => new_build(&entry.job),
+                })
+            }
+            View::Build | View::Console => {
+                let Some(build) = self.build.as_ref() else {
+                    return Ok(None);
+                };
+                if !rerun {
+                    return Ok(Some(new_build(&build.job)));
+                }
+                let number = match &build.load {
+                    BuildLoad::Loaded(Some(shown)) => Some(shown.number),
+                    BuildLoad::Loaded(None) => {
+                        return Err(format!(
+                            "{} has never been built: B starts a build",
+                            build.job
+                        ));
+                    }
+                    // Not loaded yet: what's being shown.
+                    _ => match build.target {
+                        BuildRef::Number(n) => Some(n),
+                        BuildRef::Latest => None,
+                    },
+                };
+                Some(rerun_of(&build.job, number, build.origin == View::Run))
+            }
+            View::Pipelines if !rerun => {
+                let pipelines = self.pipelines.visible_pipelines();
+                pipelines
+                    .get(self.pipelines.list.selected)
+                    .map(|p| new_run(p))
+            }
+            View::Runs if !rerun => {
+                let runs = self.pipelines.visible_runs();
+                runs.get(self.pipelines.runs.selected)
+                    .map(|&(p, _)| new_run(&self.pipelines.pipelines()[p]))
+            }
+            View::Run => {
+                let Some(view) = self.run.as_ref() else {
+                    return Ok(None);
+                };
+                let Some((pipeline, r)) = self.pipelines.find_run(view) else {
+                    return Ok(None);
+                };
+                if !rerun {
+                    return Ok(Some(new_run(pipeline)));
+                }
+                let run = &pipeline.runs[r];
+                let step = run
+                    .builds
+                    .get(view.selected.min(run.builds.len().saturating_sub(1)));
+                step.map(|&b| {
+                    let build = &self.pipelines.data().builds[b];
+                    rerun_of(&build.job, Some(build.number), true)
+                })
+            }
+            View::Pipelines | View::Runs | View::Settings => None,
         })
     }
 
@@ -2162,14 +2297,28 @@ pub struct PromoteList {
     pub ticked: std::collections::BTreeSet<usize>,
 }
 
-/// A job or pipeline to start (the "Start a build/run?" prompt).
+/// A job or pipeline to start, or a build to re-run (the confirmation
+/// prompt of `b` / `B`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StartRun {
     /// The job that gets built (a pipeline's first job).
     pub job: String,
+    /// What to call it: the job, the pipeline, or `job #42` for a re-run.
     pub name: String,
     /// A pipeline run rather than a single job's build.
     pub pipeline: bool,
+    /// Re-run a build with its parameters instead of starting with the
+    /// defaults.
+    pub rerun: Option<RerunOf>,
+}
+
+/// Which build [`StartRun`] re-runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RerunOf {
+    /// `None`: the job's latest build.
+    pub number: Option<u64>,
+    /// A step of a pipeline run: kept in that run when possible.
+    pub in_run: bool,
 }
 
 /// How long a [`Notice`] stays on screen.
@@ -4053,12 +4202,44 @@ mod tests {
         app
     }
 
+    const NEW: Action = Action::RequestStart { rerun: false };
+    const RERUN: Action = Action::RequestStart { rerun: true };
+
+    /// `b` / `B` then confirm: what gets started.
+    fn start(app: &mut App, request: Action) -> Effect {
+        assert!(app.update(request).is_empty(), "only asks");
+        assert_eq!(app.context(), Context::ConfirmStart);
+        match app.update(Action::ConfirmStart).as_slice() {
+            [effect] => effect.clone(),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    fn rerun_of(effect: &Effect) -> (&str, Option<u64>, bool) {
+        match effect {
+            Effect::Rerun {
+                job,
+                number,
+                in_run,
+                ..
+            } => (job.as_str(), *number, *in_run),
+            other => panic!("not a re-run: {other:?}"),
+        }
+    }
+
+    fn new_build_of(effect: &Effect) -> &str {
+        match effect {
+            Effect::TriggerBuild { job, .. } => job,
+            other => panic!("not a new build: {other:?}"),
+        }
+    }
+
     #[test]
     fn starting_a_run_asks_first() {
         let mut app = on_pipelines();
-        assert!(app.update(Action::RequestStartRun).is_empty(), "only asks");
+        assert!(app.update(NEW).is_empty(), "only asks");
         assert_eq!(app.context(), Context::ConfirmStart);
-        let effects = app.update(Action::ConfirmStartRun);
+        let effects = app.update(Action::ConfirmStart);
         assert!(matches!(
             effects.as_slice(),
             [Effect::TriggerBuild { job, .. }] if job == "app"
@@ -4082,13 +4263,64 @@ mod tests {
     #[test]
     fn cancelling_or_elsewhere_starts_nothing() {
         let mut app = on_pipelines();
-        app.update(Action::RequestStartRun);
+        app.update(NEW);
         app.update(Action::Back);
         assert_eq!(app.confirm_start, None);
-        assert!(app.update(Action::ConfirmStartRun).is_empty());
+        assert!(app.update(Action::ConfirmStart).is_empty());
+        app.update(RERUN);
+        assert_eq!(app.confirm_start, None, "a pipeline has no build to re-run");
         app.update(Action::SwitchTab(Tab::Settings));
-        app.update(Action::RequestStartRun);
+        app.update(NEW);
         assert_eq!(app.confirm_start, None, "nothing to start here");
+    }
+
+    #[test]
+    fn pipeline_runs_tab_starts_new_runs() {
+        let mut app = on_pipelines();
+        app.update(Action::SwitchTab(Tab::Runs));
+        assert_eq!(new_build_of(&start(&mut app, NEW)), "app");
+        assert!(app.confirm_start.is_none());
+        app.update(RERUN);
+        assert_eq!(app.confirm_start, None);
+    }
+
+    #[test]
+    fn run_view_reruns_the_step_in_the_run_or_starts_a_new_run() {
+        let mut app = on_pipelines();
+        app.update(Action::OpenBuild);
+        assert_eq!(app.view, View::Run);
+        app.update(Action::SelectNext); // deploy #9
+        assert_eq!(rerun_of(&start(&mut app, RERUN)), ("deploy", Some(9), true));
+        assert_eq!(
+            app.update(Action::Reran {
+                job: "deploy".into(),
+                in_run: true,
+                result: Ok(crate::jenkins::Rerun {
+                    number: 9,
+                    linked: true
+                }),
+            })
+            .len(),
+            1,
+            "refreshes"
+        );
+        assert_eq!(app.notice.as_ref().unwrap().text, "Re-running deploy #9");
+        // Without the plugin: it runs, but outside the run.
+        app.update(Action::Reran {
+            job: "deploy".into(),
+            in_run: true,
+            result: Ok(crate::jenkins::Rerun {
+                number: 9,
+                linked: false,
+            }),
+        });
+        let notice = app.notice.clone().unwrap();
+        assert!(
+            notice.error && notice.text.contains("not linked"),
+            "{notice:?}"
+        );
+
+        assert_eq!(new_build_of(&start(&mut app, NEW)), "app", "a new run");
     }
 
     #[test]
@@ -4285,21 +4517,15 @@ mod tests {
     }
 
     #[test]
-    fn b_builds_the_selected_or_shown_job() {
-        let trigger = |app: &mut App| -> (String, String) {
-            app.update(Action::RequestStartRun);
-            let start = app.confirm_start.clone().expect("prompt open");
-            assert!(!start.pipeline);
-            match app.update(Action::ConfirmStartRun).as_slice() {
-                [Effect::TriggerBuild { job, name, .. }] => (job.clone(), name.clone()),
-                other => panic!("{other:?}"),
-            }
-        };
+    fn b_reruns_and_shift_b_builds_the_job_anew() {
         let mut app = connected_with_jobs(&["a", "b"]);
         app.update(Action::SelectNext);
-        assert_eq!(trigger(&mut app), ("b".into(), "a build of b".into()));
+        // Jobs tab: the job's latest build, or a new build.
+        assert_eq!(rerun_of(&start(&mut app, RERUN)), ("b", None, false));
+        assert_eq!(app.confirm_start, None);
+        assert_eq!(new_build_of(&start(&mut app, NEW)), "b");
 
-        // The build view builds its job again.
+        // The build view: the build shown.
         app.update(Action::OpenBuild);
         let generation = app.connection_generation;
         app.update(Action::BuildFetched {
@@ -4311,10 +4537,14 @@ mod tests {
                 numbers: Some(vec![4]),
             }),
         });
-        assert_eq!(trigger(&mut app).0, "b");
-        let effects = app.update(Action::BuildTriggered {
-            name: "a build of b".into(),
-            result: Ok(()),
+        assert_eq!(rerun_of(&start(&mut app, RERUN)), ("b", Some(4), false));
+        let effects = app.update(Action::Reran {
+            job: "b".into(),
+            in_run: false,
+            result: Ok(crate::jenkins::Rerun {
+                number: 4,
+                linked: false,
+            }),
         });
         assert!(
             effects
@@ -4322,15 +4552,47 @@ mod tests {
                 .any(|e| matches!(e, Effect::FetchBuild { .. })),
             "refreshes what's on screen: {effects:?}"
         );
-        assert_eq!(app.notice.as_ref().unwrap().text, "Started a build of b");
+        let notice = app.notice.clone().unwrap();
+        assert_eq!(
+            (notice.text.as_str(), notice.error),
+            ("Re-running b #4", false)
+        );
+        assert_eq!(new_build_of(&start(&mut app, NEW)), "b");
+        app.update(Action::Reran {
+            job: "b".into(),
+            in_run: false,
+            result: Err("b #4 no longer exists".into()),
+        });
+        assert!(app.notice.as_ref().unwrap().error);
     }
 
     #[test]
-    fn b_on_the_builds_tab_builds_that_job() {
+    fn a_job_never_built_has_nothing_to_rerun() {
+        let mut app = connected_with_jobs(&[]);
+        let generation = app.connection_generation;
+        let mut fresh = job("fresh");
+        fresh.status = crate::jobs::JobStatus::NotBuilt;
+        app.update(Action::JobsFetched {
+            generation,
+            result: Ok(vec![fresh]),
+        });
+        app.update(RERUN);
+        assert_eq!(app.confirm_start, None);
+        assert!(
+            app.notice
+                .as_ref()
+                .unwrap()
+                .text
+                .contains("B starts a build")
+        );
+        assert_eq!(new_build_of(&start(&mut app, NEW)), "fresh");
+    }
+
+    #[test]
+    fn b_on_the_builds_tab_reruns_that_build() {
         let mut app = builds_tab(five_builds());
-        app.update(Action::RequestStartRun);
-        let start = app.confirm_start.clone().expect("prompt open");
-        let selected = app.history.visible()[app.history.selected].job.clone();
-        assert_eq!(start.job, selected);
+        app.update(Action::SelectNext); // b #9
+        assert_eq!(rerun_of(&start(&mut app, RERUN)), ("b", Some(9), false));
+        assert_eq!(new_build_of(&start(&mut app, NEW)), "b");
     }
 }

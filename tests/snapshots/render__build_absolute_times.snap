@@ -25,4 +25,4 @@ expression: build
 "                                                                                "
 "                                                                                "
 "────────────────────────────────────────────────────────────────────────────────"
-" ←/→  older/newer   c  console   b  build again   Esc  back Absolute timestamps "
+" ←/→  older/newer   c  console   b/B  re-run/new build      Absolute timestamps "

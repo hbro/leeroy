@@ -131,10 +131,15 @@ Rules:
   `origin: View::Run` (Esc → run view → list). List rows are
   `ui::run_table`; the boxes are painted by `ui::paint_boxes` (scrolls to the
   selection, records the scroll in a `Cell`, returns the `more ←→↑↓` hint).
-- Writing to Jenkins: `b` (Jobs/Builds tabs, build view, console: the job;
-  Pipelines tab, run view: the pipeline's first job; `App::start_target`) →
-  `Context::ConfirmStart`
-  prompt (takes every key, like the quit prompt) → `Effect::TriggerBuild`.
+- Writing to Jenkins: `b` = re-run a build with its parameters, `B` = new
+  build/pipeline run with defaults (`Action::RequestStart { rerun }`; targets
+  per screen in `App::start_target`: Jobs → latest build / the job; Builds,
+  build view, console → that build / its job; Pipelines, Runs → `B` only, new
+  run; run view → selected step in the run / new run) → `Context::ConfirmStart`
+  prompt (takes every key, like the quit prompt) → `Effect::TriggerBuild` or
+  `Effect::Rerun` (`jenkins::rerun`: the build's parameters, then the Build
+  Pipeline plugin's `rerunBuild` for a run's step, else a plain start with
+  them; `linked: false` in a run = red notice).
   `jenkins::trigger_build` uses ONE client (cookies on): parameter check
   (`buildWithParameters` vs `build`), crumb from `crumbIssuer/api/json` (404 =
   CSRF off; crumbs are tied to the session cookie), POST. Outcomes show as an

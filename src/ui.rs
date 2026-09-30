@@ -1561,7 +1561,8 @@ fn render_context_bar(frame: &mut Frame, area: Rect, app: &App) {
     // Navigation keys are left to the help popup. Hints are kept while they
     // fit whole next to the notice (they're ordered by importance): a hint
     // cut off mid-word reads as garbage.
-    let room = usize::from(area.width - notice_width);
+    let gap = u16::from(notice_width > 0);
+    let room = usize::from(area.width.saturating_sub(notice_width + gap));
     let mut used = 0;
     let bindings: Vec<Binding> = context_bindings(app.context())
         .iter()
@@ -1877,13 +1878,18 @@ fn render_confirm_start(frame: &mut Frame, area: Rect, app: &App) {
     let t = app.theme();
     let key = Style::new().bold();
     let mut name = vec![Span::raw("  "), Span::styled(start.name.clone(), key)];
-    if start.name != start.job {
+    if start.pipeline && start.name != start.job {
         name.push(Span::styled(format!("  ({})", start.job), t.dim()));
     }
+    let how = match start.rerun {
+        Some(rerun) if rerun.in_run => "  with the same parameters, in the same run",
+        Some(_) => "  with the same parameters",
+        None => "  with its default parameters",
+    };
     let lines = vec![
         Line::raw(""),
         Line::from(name),
-        Line::styled("  with its default parameters", t.dim()),
+        Line::styled(how, t.dim()),
         Line::raw(""),
         Line::from(vec![
             Span::raw("  "),
@@ -1904,10 +1910,10 @@ fn render_confirm_start(frame: &mut Frame, area: Rect, app: &App) {
         .unwrap_or(40)
         .clamp(40, area.width.saturating_sub(4));
     let popup = centered(area, width, lines.len() as u16 + 2);
-    let title = if start.pipeline {
-        " Start a run? "
-    } else {
-        " Start a build? "
+    let title = match (start.rerun.is_some(), start.pipeline) {
+        (true, _) => " Re-run a build? ",
+        (false, true) => " Start a new pipeline run? ",
+        (false, false) => " Start a new build? ",
     };
     let block = Block::bordered()
         .title(title)

@@ -139,6 +139,34 @@ pub fn trigger_arguments(promotion: &Promotion) -> String {
     .to_string()
 }
 
+/// Body of the plugin's `rerunBuild` call: the build's externalizable id
+/// (`full/name#number`).
+pub fn rerun_arguments(job: &str, number: u64) -> String {
+    serde_json::json!([format!("{job}#{number}")]).to_string()
+}
+
+/// Request path for the build to re-run (`None`: the latest): its number
+/// and parameters.
+pub fn rerun_source_path(job: &str, number: Option<u64>) -> String {
+    let build = number.map_or("lastBuild".to_owned(), |n| n.to_string());
+    format!(
+        "{}{build}/api/json?tree=number,actions[parameters[name,value]]",
+        crate::builds::job_path(job)
+    )
+}
+
+#[derive(Deserialize)]
+struct RawRerunSource {
+    number: u64,
+}
+
+/// The build to re-run: its number and parameters (see [`parameters`]).
+pub fn rerun_source(json: &str) -> Result<(u64, Vec<(String, String)>), String> {
+    let raw: RawRerunSource =
+        serde_json::from_str(json).map_err(|err| format!("unexpected build data: {err}"))?;
+    Ok((raw.number, parameters(json)?))
+}
+
 /// Request path for a build's parameters.
 pub fn parameters_path(job: &str, number: u64) -> String {
     format!(
@@ -249,6 +277,26 @@ mod tests {
             trigger_proxy(script),
             Some(("/jenkins/$stapler/bound/0f3e-42".into(), "crumb-9".into()))
         );
+    }
+
+    #[test]
+    fn rerun_requests() {
+        assert_eq!(rerun_arguments("shop/test", 49), r#"["shop/test#49"]"#);
+        assert!(
+            rerun_source_path("shop/test", Some(49)).starts_with("job/shop/job/test/49/api/json")
+        );
+        assert!(
+            rerun_source_path("app", None).starts_with("job/app/lastBuild/api/json?tree=number,")
+        );
+        let (number, params) = rerun_source(
+            r#"{"number": 12, "actions": [{"parameters": [{"name": "ENV", "value": "prod"}]}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            (number, params),
+            (12, vec![("ENV".to_owned(), "prod".to_owned())])
+        );
+        assert!(rerun_source("{}").is_err(), "no number");
     }
 
     #[test]

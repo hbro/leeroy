@@ -25,4 +25,4 @@ expression: render(&app_with_build(Some(finished_build()))).backend()
 "                                                                                "
 "                                                                                "
 "────────────────────────────────────────────────────────────────────────────────"
-" ←/→  older/newer   c  console   b  build again   Esc  back   o  open in browser"
+" ←/→  older/newer   c  console   b/B  re-run/new build   Esc  back              "

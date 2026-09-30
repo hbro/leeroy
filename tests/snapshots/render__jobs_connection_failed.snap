@@ -25,4 +25,4 @@ expression: render(&app).backend()
 "                                                                                "
 "                                                                                "
 "────────────────────────────────────────────────────────────────────────────────"
-" Enter  last build   b  build   /  filter   o  open in browser                  "
+" Enter  last build   b/B  re-run/new build   /  filter   o  open in browser     "

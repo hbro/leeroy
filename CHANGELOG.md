@@ -10,6 +10,17 @@ A release's section is used as its GitHub release notes.
 
 ## [Unreleased]
 
+### Changed
+
+- `b` now re-runs a build with the same parameters, and `B` starts a new
+  build or pipeline run with the default parameters; both ask first.
+  - Jobs tab: `b` re-runs the job's latest build, `B` builds it anew.
+  - Builds tab, build view, console: `b` re-runs that build, `B` builds its
+    job anew.
+  - Pipelines and Pipeline runs tabs: `B` starts a new pipeline run.
+  - Run view: `b` re-runs the selected step in the same run (through the
+    Build Pipeline plugin when a view exists), `B` starts a new pipeline run.
+
 ## [0.4.1] - 2026-09-29
 
 ### Added

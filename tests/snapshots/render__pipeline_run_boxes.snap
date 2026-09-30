@@ -25,4 +25,4 @@ expression: boxes
 "                └───────────────────────────────────┘                           "
 "                                                                                "
 "────────────────────────────────────────────────────────────────────────────────"
-" ←/→  older/newer   v  view   Enter  open build   p  promote   b  new run       "
+" ←/→  older/newer   Enter  open build   b/B  re-run/new run   p  promote        "

@@ -50,14 +50,14 @@ pub fn context_bindings(context: Context) -> &'static [Binding] {
     const JOBS: &[Binding] = &[
         nav("↑/↓", "select"),
         bind("Enter", "last build"),
-        bind("b", "build"),
+        bind("b/B", "re-run/new build"),
         bind("/", "filter"),
         bind("o", "open in browser"),
     ];
     const JOBS_FILTERED: &[Binding] = &[
         nav("↑/↓", "select"),
         bind("Enter", "last build"),
-        bind("b", "build"),
+        bind("b/B", "re-run/new build"),
         bind("/", "filter"),
         bind("Esc", "clear filter"),
         bind("o", "open in browser"),
@@ -67,7 +67,7 @@ pub fn context_bindings(context: Context) -> &'static [Binding] {
         bind("←/→", "older/newer"),
         nav("Home/End", "first/last"),
         bind("c", "console"),
-        bind("b", "build again"),
+        bind("b/B", "re-run/new build"),
         bind("Esc", "back"),
         nav("↑/↓", "scroll"),
         bind("o", "open in browser"),
@@ -77,21 +77,21 @@ pub fn context_bindings(context: Context) -> &'static [Binding] {
         nav("PgUp/PgDn", "page"),
         nav("Home/End", "top/bottom"),
         bind("c/Esc", "back"),
-        bind("b", "build again"),
+        bind("b/B", "re-run/new build"),
         bind("←/→", "sideways"),
         bind("o", "open in browser"),
     ];
     const BUILDS: &[Binding] = &[
         nav("↑/↓", "select"),
         bind("Enter", "open build"),
-        bind("b", "build again"),
+        bind("b/B", "re-run/new build"),
         bind("/", "filter"),
         bind("o", "open in browser"),
     ];
     const BUILDS_FILTERED: &[Binding] = &[
         nav("↑/↓", "select"),
         bind("Enter", "open build"),
-        bind("b", "build again"),
+        bind("b/B", "re-run/new build"),
         bind("/", "filter"),
         bind("Esc", "clear filter"),
         bind("o", "open in browser"),
@@ -99,14 +99,14 @@ pub fn context_bindings(context: Context) -> &'static [Binding] {
     const PIPELINES: &[Binding] = &[
         nav("↑/↓", "select"),
         bind("Enter", "latest run"),
-        bind("b", "start run"),
+        bind("B", "new pipeline run"),
         bind("/", "filter"),
         bind("o", "open in browser"),
     ];
     const PIPELINES_FILTERED: &[Binding] = &[
         nav("↑/↓", "select"),
         bind("Enter", "latest run"),
-        bind("b", "start run"),
+        bind("B", "new pipeline run"),
         bind("/", "filter"),
         bind("Esc", "clear filter"),
         bind("o", "open in browser"),
@@ -114,12 +114,14 @@ pub fn context_bindings(context: Context) -> &'static [Binding] {
     const RUNS: &[Binding] = &[
         nav("↑/↓", "select"),
         bind("Enter", "open run"),
+        bind("B", "new pipeline run"),
         bind("/", "filter"),
         bind("o", "open in browser"),
     ];
     const RUNS_FILTERED: &[Binding] = &[
         nav("↑/↓", "select"),
         bind("Enter", "open run"),
+        bind("B", "new pipeline run"),
         bind("/", "filter"),
         bind("Esc", "clear filter"),
         bind("o", "open in browser"),
@@ -127,11 +129,11 @@ pub fn context_bindings(context: Context) -> &'static [Binding] {
     // Ordered by importance: at 80 columns the last one may be cut off.
     const RUN: &[Binding] = &[
         bind("←/→", "older/newer"),
-        bind("v", "view"),
         bind("Enter", "open build"),
+        // b: the selected step, in this run; B: another run.
+        bind("b/B", "re-run/new run"),
         bind("p", "promote"),
-        // Already looking at a run: this starts another one.
-        bind("b", "new run"),
+        bind("v", "view"),
         // Esc is "back" everywhere; no room for it here at 80 columns.
         nav("Esc", "back"),
         nav("↑/↓", "select"),
@@ -223,9 +225,7 @@ pub fn map_key(app: &App, key: KeyEvent) -> Option<Action> {
     // Same for "Start a run?": nothing else happens by accident.
     if context == Context::ConfirmStart {
         return match key.code {
-            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
-                Some(Action::ConfirmStartRun)
-            }
+            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => Some(Action::ConfirmStart),
             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => Some(Action::Back),
             _ => None,
         };
@@ -257,22 +257,33 @@ pub fn map_key(app: &App, key: KeyEvent) -> Option<Action> {
         };
     }
 
-    match key.code {
+    // Some terminals report Shift+b as 'b' with SHIFT instead of 'B'.
+    let code = match key.code {
+        KeyCode::Char(c)
+            if c.is_ascii_lowercase() && key.modifiers.contains(KeyModifiers::SHIFT) =>
+        {
+            KeyCode::Char(c.to_ascii_uppercase())
+        }
+        code => code,
+    };
+    // b re-runs the build on screen, B starts a new one (both ask first).
+    let start = match code {
+        KeyCode::Char('b') => Some(Action::RequestStart { rerun: true }),
+        KeyCode::Char('B') => Some(Action::RequestStart { rerun: false }),
+        _ => None,
+    };
+    match code {
         KeyCode::Char(c @ '0'..='9') => return Tab::from_key(c).map(Action::SwitchTab),
         KeyCode::Char('q') => return Some(Action::RequestQuit),
         KeyCode::Char('?') | KeyCode::Char('h') => return Some(Action::ToggleHelp),
         KeyCode::Char('i') => return Some(Action::ToggleInfo),
         KeyCode::Char('o') => return Some(Action::OpenInBrowser),
         KeyCode::Char('t') => return Some(Action::ToggleTimestamps),
-        // Some terminals report Shift+r as 'r' with SHIFT instead of 'R'.
         KeyCode::Char('R') => return Some(Action::ToggleAutoRefresh),
-        KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::SHIFT) => {
-            return Some(Action::ToggleAutoRefresh);
-        }
         KeyCode::Char('r') => return Some(Action::Refresh),
         _ => {}
     }
-    match (context, key.code) {
+    match (context, code) {
         // Esc only ever closes the current context, never the app.
         (_, KeyCode::Esc) if context.closable() => Some(Action::Back),
         (Context::Settings, KeyCode::Down | KeyCode::Char('j')) => Some(Action::SelectNext),
@@ -290,20 +301,20 @@ pub fn map_key(app: &App, key: KeyEvent) -> Option<Action> {
             KeyCode::Char('g') => Some(Action::SelectFirst),
             KeyCode::Char('G') => Some(Action::SelectLast),
             KeyCode::Char('v') => Some(Action::ToggleRunView),
-            KeyCode::Char('b') => Some(Action::RequestStartRun),
+            KeyCode::Char('b' | 'B') => start,
             KeyCode::Char('p') => Some(Action::OpenPromote),
             KeyCode::Enter => Some(Action::OpenBuild),
             _ => None,
         },
         (
-            Context::Jobs
-            | Context::JobsFiltered
-            | Context::Builds
-            | Context::BuildsFiltered
-            | Context::Pipelines
-            | Context::PipelinesFiltered,
-            KeyCode::Char('b'),
-        ) => Some(Action::RequestStartRun),
+            Context::Jobs | Context::JobsFiltered | Context::Builds | Context::BuildsFiltered,
+            KeyCode::Char('b' | 'B'),
+        ) => start,
+        // A pipeline or a run of one: only new runs (b would be ambiguous).
+        (
+            Context::Pipelines | Context::PipelinesFiltered | Context::Runs | Context::RunsFiltered,
+            KeyCode::Char('B'),
+        ) => start,
         (
             Context::Jobs
             | Context::JobsFiltered
@@ -338,7 +349,7 @@ pub fn map_key(app: &App, key: KeyEvent) -> Option<Action> {
             KeyCode::Char('g') => Some(Action::SelectFirst),
             KeyCode::Char('G') => Some(Action::SelectLast),
             KeyCode::Char('c') => Some(Action::OpenConsole),
-            KeyCode::Char('b') => Some(Action::RequestStartRun),
+            KeyCode::Char('b' | 'B') => start,
             _ => None,
         },
         (Context::Console, code) => match code {
@@ -352,7 +363,7 @@ pub fn map_key(app: &App, key: KeyEvent) -> Option<Action> {
             KeyCode::Right => Some(Action::ScrollRight),
             // c toggles: it opened the console from the build view.
             KeyCode::Char('c') => Some(Action::Back),
-            KeyCode::Char('b') => Some(Action::RequestStartRun),
+            KeyCode::Char('b' | 'B') => start,
             _ => None,
         },
         _ => None,
@@ -414,6 +425,7 @@ mod tests {
                     job: "a".into(),
                     name: "a".into(),
                     pipeline: true,
+                    rerun: None,
                 })
             }
             Context::JobsFiltered => app.jobs.filter = "api".into(),

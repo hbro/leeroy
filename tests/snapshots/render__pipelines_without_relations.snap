@@ -25,4 +25,4 @@ expression: render(&app).backend()
 "                                                                                "
 "                                                                                "
 "────────────────────────────────────────────────────────────────────────────────"
-" Enter  latest run   b  start run   /  filter   o  open in browser              "
+" Enter  latest run   B  new pipeline run   /  filter   o  open in browser       "

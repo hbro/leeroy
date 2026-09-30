@@ -109,7 +109,10 @@ fn instance_info_overlay() {
 #[test]
 fn start_run_prompt_and_notice() {
     let mut app = app_with_pipelines(Tab::Pipelines);
-    apply(&mut app, &[Action::SelectNext, Action::RequestStartRun]); // shop
+    apply(
+        &mut app,
+        &[Action::SelectNext, Action::RequestStart { rerun: false }],
+    ); // shop
     let prompt = format!("{}", render(&app).backend());
     assert!(prompt.contains("shop  (shop/build)"), "{prompt}");
     insta::assert_snapshot!(prompt);
@@ -117,7 +120,7 @@ fn start_run_prompt_and_notice() {
     apply(
         &mut app,
         &[
-            Action::ConfirmStartRun,
+            Action::ConfirmStart,
             Action::BuildTriggered {
                 name: "a run of shop".into(),
                 result: Ok(()),
@@ -168,14 +171,46 @@ fn promotions_overlay() {
 #[test]
 fn start_build_prompt() {
     let mut app = app_with_jobs();
-    apply(&mut app, &[Action::RequestStartRun]);
+    apply(&mut app, &[Action::RequestStart { rerun: false }]);
     let screen = format!("{}", render(&app).backend());
-    assert!(screen.contains("Start a build?"), "{screen}");
+    assert!(screen.contains("Start a new build?"), "{screen}");
     assert!(screen.contains("backend/api/main"), "{screen}");
+    assert!(screen.contains("with its default parameters"), "{screen}");
     assert!(
         !screen.contains("(backend"),
         "no first job for a job: {screen}"
     );
+}
+
+/// `b`: the prompt names the build and says it keeps its parameters (in a
+/// run's step: also its run).
+#[test]
+fn rerun_prompts() {
+    let mut app = app_with_jobs();
+    apply(&mut app, &[Action::RequestStart { rerun: true }]);
+    let screen = format!("{}", render(&app).backend());
+    assert!(screen.contains("Re-run a build?"), "{screen}");
+    assert!(
+        screen.contains("backend/api/main, latest build"),
+        "{screen}"
+    );
+    insta::assert_snapshot!("rerun_prompt_latest_build", screen);
+
+    let mut app = app_with_pipelines(Tab::Pipelines);
+    apply(
+        &mut app,
+        &[
+            Action::OpenBuild,
+            Action::SelectNext,
+            Action::RequestStart { rerun: true },
+        ],
+    );
+    let screen = format!("{}", render(&app).backend());
+    assert!(
+        screen.contains("with the same parameters, in the same run"),
+        "{screen}"
+    );
+    insta::assert_snapshot!("rerun_prompt_run_step", screen);
 }
 
 #[test]

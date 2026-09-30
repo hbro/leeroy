@@ -9,7 +9,8 @@ Serves (under any path prefix, with an X-Jenkins header):
   GET /api/json?tree=views[..], /job/shop/view/Shop delivery/: a Build Pipeline
       view (in a folder) whose page loads the plugin's proxy from
       /$stapler/bound/script/...; POST /$stapler/bound/<id>/triggerManualBuild
-      promotes (shop/test → shop/deploy is a manual step); logged to stdout
+      promotes (shop/test → shop/deploy is a manual step), .../rerunBuild
+      re-runs a build in its run; logged to stdout
   GET /crumbIssuer/api/json, POST /job/../build or buildWithParameters: start a
       build (201; 403 without the crumb); logged to stdout
   GET /api/json?tree=mode,...  instance details; /computer/api/json nodes;
@@ -493,6 +494,11 @@ def main() -> None:
                 job, upstream = job.lstrip("/"), upstream.lstrip("/")
                 print(f"promoted {job} from {upstream} #{upstream_number}", flush=True)
                 return self.reply_json(47)
+            if path == f"/$stapler/bound/{PROXY_ID}/rerunBuild":
+                length = int(self.headers.get("Content-Length", "0"))
+                (externalizable_id,) = json.loads(self.rfile.read(length))
+                print(f"re-ran {externalizable_id} in its run", flush=True)
+                return self.reply_json(True)
             if path.endswith(("/build", "/buildWithParameters")):
                 names = [
                     unquote(p)

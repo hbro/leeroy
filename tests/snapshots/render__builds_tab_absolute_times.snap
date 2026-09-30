@@ -25,4 +25,4 @@ expression: screen
 "                                                                                "
 "                                                                                "
 "────────────────────────────────────────────────────────────────────────────────"
-" Enter  open build   b  build again   /  filter             Absolute timestamps "
+" Enter  open build   b/B  re-run/new build   /  filter      Absolute timestamps "

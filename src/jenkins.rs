@@ -309,32 +309,107 @@ pub async fn trigger_build(config: &ConnectionConfig, full_name: &str) -> Result
 /// such view, the job was started directly (not linked to the run).
 pub async fn promote(config: &ConnectionConfig, promotion: &Promotion) -> Result<bool, String> {
     let client = client(config)?;
-    let (get, post) = (reqwest::Method::GET, reqwest::Method::POST);
     let crumb = crumb(&client, config).await?;
+    if let Some((proxy, headers)) = pipeline_proxy(&client, config, &crumb).await? {
+        let call = format!("{proxy}/triggerManualBuild");
+        let body = (STAPLER_CALL, promote::trigger_arguments(promotion));
+        let post = reqwest::Method::POST;
+        send(&client, config, post, &call, false, &headers, Some(body)).await?;
+        return Ok(true);
+    }
+    // No Build Pipeline view: start the job with the upstream build's parameters.
+    let path = promote::parameters_path(&promotion.from_job, promotion.from_number);
+    let get = reqwest::Method::GET;
+    let parameters = match send(&client, config, get, &path, true, &[], None).await? {
+        Some(response) => promote::parameters(&response.body)?,
+        None => Vec::new(),
+    };
+    start_with(&client, config, &crumb, &promotion.job, &parameters).await?;
+    Ok(false)
+}
 
-    let views = send(
-        &client,
-        config,
-        get.clone(),
-        &promote::views_query(),
-        true,
-        &[],
-        None,
-    )
-    .await?;
-    let views = match views {
+/// What [`rerun`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Rerun {
+    /// The build that was run again (the latest one's number, when asked
+    /// for the latest).
+    pub number: u64,
+    /// Re-run through the Build Pipeline plugin: the new build joins the
+    /// same pipeline run (same upstream cause).
+    pub linked: bool,
+}
+
+/// Run build `number` of `job` again (`None`: its latest build) with the
+/// same parameters, like the Rebuilder plugin. `in_run`: the build is a step
+/// of a pipeline run; then the Build Pipeline plugin's own re-run is tried
+/// first, which keeps the new build in that run.
+pub async fn rerun(
+    config: &ConnectionConfig,
+    job: &str,
+    number: Option<u64>,
+    in_run: bool,
+) -> Result<Rerun, String> {
+    let client = client(config)?;
+    let get = reqwest::Method::GET;
+    let path = promote::rerun_source_path(job, number);
+    let source = send(&client, config, get, &path, true, &[], None)
+        .await?
+        .ok_or_else(|| match number {
+            Some(n) => format!("{job} #{n} no longer exists"),
+            None => format!("{job} has never been built"),
+        })?;
+    let (number, parameters) = promote::rerun_source(&source.body)?;
+    let crumb = crumb(&client, config).await?;
+    if in_run && let Some((proxy, headers)) = pipeline_proxy(&client, config, &crumb).await? {
+        let call = format!("{proxy}/rerunBuild");
+        let body = (STAPLER_CALL, promote::rerun_arguments(job, number));
+        let post = reqwest::Method::POST;
+        // The plugin only re-runs freestyle-type builds; anything else is
+        // re-run the generic way below.
+        match send(&client, config, post, &call, false, &headers, Some(body)).await {
+            Ok(_) => {
+                return Ok(Rerun {
+                    number,
+                    linked: true,
+                });
+            }
+            Err(err) => tracing::debug!(job, number, err, "plugin re-run failed"),
+        }
+    }
+    start_with(&client, config, &crumb, job, &parameters).await?;
+    Ok(Rerun {
+        number,
+        linked: false,
+    })
+}
+
+/// Content type of a call through a Stapler proxy (what the page's
+/// JavaScript sends).
+const STAPLER_CALL: &str = "application/x-stapler-method-invocation;charset=UTF-8";
+
+/// The Build Pipeline plugin's proxy of the first Build Pipeline view that
+/// has one: `(proxy path, headers for calls through it)`. `None` without
+/// such a view.
+async fn pipeline_proxy(
+    client: &reqwest::Client,
+    config: &ConnectionConfig,
+    crumb: &[(String, String)],
+) -> Result<Option<(String, Vec<(String, String)>)>, String> {
+    let get = reqwest::Method::GET;
+    let query = promote::views_query();
+    let views = match send(client, config, get.clone(), &query, true, &[], None).await? {
         Some(response) => promote::pipeline_views(&response.body)?,
         None => Vec::new(),
     };
     for path in views {
-        let Some(page) = send(&client, config, get.clone(), &path, true, &[], None).await? else {
+        let Some(page) = send(client, config, get.clone(), &path, true, &[], None).await? else {
             continue;
         };
         // In the page (older Jenkins), or in the script it loads (newer).
         let mut proxy = promote::trigger_proxy(&page.body);
         if proxy.is_none()
             && let Some(script) = promote::proxy_script(&page.body)
-            && let Some(js) = send(&client, config, get.clone(), &script, true, &[], None).await?
+            && let Some(js) = send(client, config, get.clone(), &script, true, &[], None).await?
         {
             proxy = promote::trigger_proxy(&js.body);
         }
@@ -342,36 +417,36 @@ pub async fn promote(config: &ConnectionConfig, promotion: &Promotion) -> Result
             tracing::debug!(path, "no Build Pipeline trigger found in the view");
             continue;
         };
-        let mut headers = crumb.clone();
+        let mut headers = crumb.to_vec();
         if !page_crumb.is_empty() {
             // How the page's own calls send it.
             headers.push(("Crumb".to_owned(), page_crumb));
         }
-        let body = (
-            "application/x-stapler-method-invocation;charset=UTF-8",
-            promote::trigger_arguments(promotion),
-        );
-        let call = format!("{proxy}/triggerManualBuild");
-        send(&client, config, post, &call, false, &headers, Some(body)).await?;
-        return Ok(true);
+        return Ok(Some((proxy, headers)));
     }
+    Ok(None)
+}
 
-    // No Build Pipeline view: start the job with the upstream build's parameters.
-    let path = promote::parameters_path(&promotion.from_job, promotion.from_number);
-    let parameters = match send(&client, config, get, &path, true, &[], None).await? {
-        Some(response) => promote::parameters(&response.body)?,
-        None => Vec::new(),
-    };
-    let parameterized = is_parameterized(&client, config, &promotion.job).await?;
+/// Start `job` with these parameters (form values), or plainly when it
+/// takes none.
+async fn start_with(
+    client: &reqwest::Client,
+    config: &ConnectionConfig,
+    crumb: &[(String, String)],
+    job: &str,
+    parameters: &[(String, String)],
+) -> Result<(), String> {
+    let parameterized = is_parameterized(client, config, job).await?;
     let body = parameterized.then(|| {
         let form = url::form_urlencoded::Serializer::new(String::new())
-            .extend_pairs(&parameters)
+            .extend_pairs(parameters)
             .finish();
         ("application/x-www-form-urlencoded", form)
     });
-    let path = builds::trigger_path(&promotion.job, parameterized);
-    send(&client, config, post, &path, false, &crumb, body).await?;
-    Ok(false)
+    let path = builds::trigger_path(job, parameterized);
+    let post = reqwest::Method::POST;
+    send(client, config, post, &path, false, crumb, body).await?;
+    Ok(())
 }
 
 /// Send a request with the configured headers plus `extra` ones (e.g. the

@@ -236,7 +236,8 @@ build runs.
 | --- | --- |
 | `↑/↓` `j/k`, `PgUp/PgDn`, `g/G` | navigation |
 | `Enter` | details of the job's most recent build |
-| `b` | start a build of the job (asks first; default parameter values) |
+| `b` | re-run the job's latest build with the same parameters (asks first) |
+| `B` | start a new build of the job (asks first; default parameter values) |
 | `/` | filter (live, case-insensitive; space-separated words must all match) |
 | `Enter` / `Esc` while filtering | apply / cancel |
 | `Esc` | clear an applied filter |
@@ -262,7 +263,8 @@ a running build updates live), and the header's `⟳` age refers to it.
 | `←` / `→` | older / newer build (deleted builds are skipped) |
 | `Home` / `End` | first (oldest kept) / latest build |
 | `c` | console output of this build |
-| `b` | start a new build of this job (asks first) |
+| `b` | re-run this build with the same parameters (asks first) |
+| `B` | start a new build of this job (asks first; default parameter values) |
 | `↑/↓` `j/k`, `PgUp/PgDn`, `g/G` | navigation |
 | `Esc` | back to the list |
 
@@ -283,7 +285,8 @@ and followed at the bottom. Scrolling up pauses following (the title says so);
 | `Home` / `End` | top / bottom (`End` = follow again) |
 | `←/→` | scroll long lines sideways |
 | `c` / `Esc` | back to the build (`c` toggles the console) |
-| `b` | start a new build of this job (asks first) |
+| `b` | re-run this build with the same parameters (asks first) |
+| `B` | start a new build of this job (asks first; default parameter values) |
 
 Colour codes are removed, `\r` progress bars show their final state, and at
 most the last 100 000 lines are kept.
@@ -292,8 +295,9 @@ most the last 100 000 lines are kept.
 
 The build history of all jobs, newest first: status, job and build number, when
 it started and how long it took (`…` while running). `Enter` opens the build (with
-`←/→`, `c` etc. as usual); `Esc` comes back here. `b` starts a new build of the
-selected build's job (asks first). `/` filters like on the Jobs tab.
+`←/→`, `c` etc. as usual); `Esc` comes back here. `b` re-runs the selected
+build with the same parameters, `B` starts a new build of its job (both ask
+first). `/` filters like on the Jobs tab.
 
 Jenkins has no "newest builds overall" API, so Leeroy asks every job for its
 newest *N* builds in **one** request (`tree=jobs[…,builds[…]{0,N}]`), where *N* is
@@ -327,7 +331,7 @@ run that's still going.
 | --- | --- |
 | `↑/↓` `j/k`, `PgUp/PgDn`, `g/G` | navigation |
 | `Enter` | open the latest run |
-| `b` | start a new run (asks first; default parameter values) |
+| `B` | start a new run (asks first; default parameter values) |
 | `/` | filter by name |
 
 Leeroy finds the relations in two places, because Jenkins records them in two
@@ -340,7 +344,8 @@ both, looking at its last 20 builds, so runs older than that aren't shown.
 
 Every run of every pipeline, newest first, named like its pipeline plus the
 number of the build that started it (`app #12`). `Enter` opens it in the run
-view; `/` filters by pipeline name or any `job #number` in the run.
+view; `B` starts a new run of its pipeline (asks first); `/` filters by pipeline
+name or any `job #number` in the run.
 
 ### Run view
 
@@ -361,7 +366,8 @@ run, under the job that triggers them (`○ deploy/production  not reached`, or
 | `↑/↓` `j/k` | navigation |
 | `Enter` | open the selected build (details, console with `c`) |
 | `p` | promote: the run's manual steps, `Space` selects several, `Enter` takes them |
-| `b` | start a new run of the pipeline (asks first) |
+| `b` | re-run the selected build (step) with the same parameters, in the same run (asks first) |
+| `B` | start a new run of the pipeline (asks first; default parameter values) |
 | `Esc` | back to the list |
 
 ### Promotions
@@ -380,6 +386,16 @@ the upstream build as its cause
 (it joins the run) and gets its parameters. Without such a view, the job is
 started directly with the upstream build's parameters; it runs, but isn't linked
 to the run (the notice says so).
+
+### Re-running
+
+`b` re-runs a build: its job is started again with the same parameter values
+(like the Rebuilder plugin, but needing no plugin). A step re-run from the run
+view (or from a build opened there) goes through the Build Pipeline plugin's own
+re-run when a Build Pipeline view exists, so the new build keeps its upstream
+cause and stays in the same run; otherwise it's re-run the generic way and isn't
+linked to the run (the notice says so). `B` always starts a new build or
+pipeline run with the default parameter values.
 
 ## Development
 
