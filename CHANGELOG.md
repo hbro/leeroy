@@ -10,6 +10,8 @@ A release's section is used as its GitHub release notes.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-30
+
 ### Changed
 
 - `b` now re-runs a build with the same parameters, and `B` starts a new
@@ -167,7 +169,8 @@ A release's section is used as its GitHub release notes.
 - Prebuilt binaries for Linux (x86_64, ARM64), macOS (Apple Silicon, Intel)
   and Windows (x86_64).
 
-[Unreleased]: https://github.com/hbro/leeroy/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/hbro/leeroy/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/hbro/leeroy/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/hbro/leeroy/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/hbro/leeroy/compare/v0.3.3...v0.4.0
 [0.3.3]: https://github.com/hbro/leeroy/compare/v0.3.2...v0.3.3
