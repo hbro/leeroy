@@ -10,6 +10,8 @@ A release's section is used as its GitHub release notes.
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-10-02
+
 ### Changed
 
 - The console of a running build is fetched at the refresh interval and only
@@ -174,7 +176,8 @@ A release's section is used as its GitHub release notes.
 - Prebuilt binaries for Linux (x86_64, ARM64), macOS (Apple Silicon, Intel)
   and Windows (x86_64).
 
-[Unreleased]: https://github.com/hbro/leeroy/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/hbro/leeroy/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/hbro/leeroy/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/hbro/leeroy/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/hbro/leeroy/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/hbro/leeroy/compare/v0.3.3...v0.4.0
