@@ -166,7 +166,9 @@ Rules:
   shown build's *number*. Polled like the other views (auto-refresh on, every
   `refresh.interval`) while shown and the build runs; ↓/PgDn/End while already
   at the bottom fetch right away (implicit, not in the bar), then the schedule
-  resumes; one fetch in flight; chunks are matched
+  resumes; Jenkins sends at most 10 000 lines per request while a build runs
+  (`JENKINS_BATCH_LINES`), so a full batch is followed by the next one right
+  away (catching up isn't a refresh); one fetch in flight; chunks are matched
   on job + number + start offset (duplicates never appended). Only visible lines
   are rendered; the renderer records the viewport height for paging.
 - Jobs: fetched after each successful connect and on `r`, tagged with the
@@ -279,7 +281,8 @@ Run all three layers for UI changes; layer 1 is mandatory for every change.
    Gotcha: `Esc` is NOT a tmux key name (it types E, s, c) — use `Escape`.
    App log for the run: `target/tui.log` (RUST_LOG=debug).
    Fake Jenkins for connection tests: `scripts/fake-jenkins.py [--port 8099]
-   [--auth USER:TOKEN] [--delay SECS] [--status CODE] [--tls] [--jobs N] [--churn]`
+   [--auth USER:TOKEN] [--delay SECS] [--status CODE] [--tls] [--jobs N] [--churn]
+   [--log-lines N]`
    (job tree with folders/multibranch/all statuses, each job's builds when the tree
    asks for `builds[…]{0,N}` (with their upstream causes when it asks for
    `causes[`); job chains `libs/core → backend/api/main → deploy/staging →
@@ -289,7 +292,8 @@ Run all three layers for UI changes; layer 1 is mandatory for every change.
    runs; works as an HTTP proxy for any host; `lastBuild` per job: 404 for
    never built, running builds progress in real time and their console log grows
    a line every 0.3s (ANSI, `\r`, UTF-8, long lines); `--churn` changes a status
-   per request to watch auto-refresh).
+   per request to watch auto-refresh; running logs are served 10 000 lines per
+   request like Jenkins, `--log-lines 35000` makes one that needs several).
    Run it in the background with its own process group; don't `pkill -f` it (the
    pattern can match unrelated shells).
    Isolation: all `LEEROY_*` and `*_proxy` vars from your shell are cleared and the config is a

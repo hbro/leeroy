@@ -22,7 +22,8 @@ Serves (under any path prefix, with an X-Jenkins header):
   GET /job/../lastBuild/api/json   the job's last build (404 if never built)
   GET /job/../<n>/wfapi/describe   stages of a Pipeline run (404 for freestyle)
   GET /job/../<n>/logText/progressiveText?start=B   console output from byte B;
-      a running build's log grows by a line every 0.3s (X-More-Data: true)
+      a running build's log grows by a line every 0.3s (X-More-Data: true);
+      like Jenkins, at most 10000 lines per request while it runs
 --auth      require HTTP basic auth, 401 otherwise; the user is echoed back.
             Without it, any request is allowed and a basic-auth user, if sent,
             is echoed back too (to show a user name in screenshots).
@@ -34,6 +35,8 @@ can be pointed at e.g. http://jenkins.example.com via proxy.url.
 --jobs N    add N generated jobs under generated/ (for long lists)
 --churn     change one job's status on every job-list request (auto-refresh)
 --no-views  no Build Pipeline view (promotions fall back to a plain build)
+--log-lines N  running builds' logs start with N lines (default 20; >10000
+            needs several requests, like a long log on Jenkins)
 """
 
 import argparse
@@ -325,6 +328,10 @@ def stages(full_name: str, color: str, number: int):
     return {"id": str(number), "name": f"#{number}", "stages": out}
 
 
+# Lines per progressiveText request while the log is still written (Jenkins).
+CONSOLE_BATCH = 10000
+
+
 def console_line(i: int) -> str:
     """Line i of a fake log: ANSI colours, \r progress bars, tabs, UTF-8."""
     kind = i % 10
@@ -339,7 +346,7 @@ def console_line(i: int) -> str:
     return f"[step {i:05}] doing work…"
 
 
-def console_text(full_name: str, color: str, number: int):
+def console_text(full_name: str, color: str, number: int, base: int = 20):
     """(log bytes, still running) for a build, or None if it doesn't exist."""
     data = build(full_name, color, number)
     if data is None:
@@ -347,7 +354,7 @@ def console_text(full_name: str, color: str, number: int):
     running = data["building"]
     if running:
         # Grows over time: base lines + one per 0.3 s since the server started.
-        count = 20 + int((time.time() * 1000 - SERVER_START_MS) / 300)
+        count = base + int((time.time() * 1000 - SERVER_START_MS) / 300)
     else:
         count = 150 + number % 50
     lines = ["Started by user Hans", "Running in Durability level: MAX_SURVIVABILITY"]
@@ -474,6 +481,7 @@ def main() -> None:
     parser.add_argument("--jobs", type=int, default=0)
     parser.add_argument("--churn", action="store_true")
     parser.add_argument("--no-views", action="store_true")
+    parser.add_argument("--log-lines", type=int, default=20)
     args = parser.parse_args()
     job_requests = [0]
 
@@ -670,16 +678,27 @@ def main() -> None:
                         "progressiveText",
                     ]
                 ):
-                    log = console_text(full_name, color, int(tail[0]))
+                    log = console_text(full_name, color, int(tail[0]), args.log_lines)
                     if log is None:
                         return self.reply(404, {"error": "no such build"})
                     text, running = log
                     query = self.path.split("?", 1)[1] if "?" in self.path else ""
                     params = dict(p.split("=", 1) for p in query.split("&") if "=" in p)
                     start = min(int(params.get("start", "0")), len(text))
+                    end = len(text)
+                    if running:
+                        # Jenkins reads at most CONSOLE_BATCH lines per request
+                        # from a log that's still being written (stapler LargeText).
+                        end = start
+                        for _ in range(CONSOLE_BATCH):
+                            newline = text.find(b"\n", end)
+                            if newline < 0:
+                                end = len(text)
+                                break
+                            end = newline + 1
                     return self.reply_bytes(
-                        text[start:],
-                        {"X-Text-Size": str(len(text))}
+                        text[start:end],
+                        {"X-Text-Size": str(end)}
                         | ({"X-More-Data": "true"} if running else {}),
                     )
                 if (

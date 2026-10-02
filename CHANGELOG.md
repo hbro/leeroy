@@ -10,6 +10,13 @@ A release's section is used as its GitHub release notes.
 
 ## [Unreleased]
 
+### Fixed
+
+- The console of a running build with a long log opens at the end again,
+  instead of somewhere in the middle: Jenkins sends at most 10 000 lines at a
+  time, and the rest is now fetched right away rather than one batch per
+  refresh interval.
+
 ## [0.5.1] - 2026-10-02
 
 ### Changed

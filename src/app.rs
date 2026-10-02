@@ -1365,10 +1365,16 @@ impl App {
                 console.attempted_at = Some(now);
                 match result {
                     Ok(chunk) => {
+                        // Catch up with output that's already there right
+                        // away, not one batch per refresh interval.
+                        let catch_up = chunk.is_full_batch();
                         console.push(chunk);
                         console.fetched_at = Some(now);
                         console.last_error = None;
                         console.load = ConsoleLoad::Loaded;
+                        if catch_up {
+                            return self.fetch_console();
+                        }
                     }
                     Err(error) if console.load == ConsoleLoad::Loaded => {
                         // Keep what we have; the next poll retries.
@@ -3705,6 +3711,48 @@ mod tests {
     }
 
     const INTERVAL: Duration = Duration::from_secs(crate::config::DEFAULT_REFRESH_SECS);
+
+    #[test]
+    fn full_jenkins_batches_are_followed_right_away() {
+        let mut app = app_on_latest_build();
+        app.auto_refresh = false; // catching up isn't a refresh
+        app.update(Action::OpenConsole);
+        let batch = "x\n".repeat(crate::console::JENKINS_BATCH_LINES);
+        let size = batch.len() as u64;
+        let arrive = |app: &mut App, start: u64, text: &str, more: bool| {
+            app.update(Action::ConsoleFetched {
+                generation: app.connection_generation,
+                job: "a".into(),
+                number: 8,
+                start,
+                result: Ok(ConsoleChunk {
+                    bytes: text.as_bytes().to_vec(),
+                    next: start + text.len() as u64,
+                    more,
+                }),
+            })
+        };
+        let effects = arrive(&mut app, 0, &batch, true);
+        assert_eq!(console_fetch(&effects), Some((8, size)), "more is waiting");
+        let effects = arrive(&mut app, size, &batch, true);
+        assert_eq!(console_fetch(&effects), Some((8, 2 * size)));
+        assert_eq!(
+            arrive(&mut app, 2 * size, "end\n", true),
+            Vec::new(),
+            "caught up"
+        );
+        let console = app.console.as_ref().unwrap();
+        assert_eq!(
+            console.line_count(),
+            2 * crate::console::JENKINS_BATCH_LINES + 1
+        );
+        assert!(console.following);
+        // A complete build's output comes in one answer, whatever its size.
+        let mut app = app_on_latest_build();
+        app.update(Action::OpenConsole);
+        assert_eq!(arrive(&mut app, 0, &batch, false), Vec::new());
+        assert_eq!(app.console.as_ref().unwrap().load, ConsoleLoad::Loaded);
+    }
 
     #[test]
     fn running_build_output_is_tailed_every_refresh_interval() {

@@ -6,6 +6,11 @@ use std::{cell::Cell, collections::VecDeque, time::Instant};
 /// Lines kept in memory; older ones are dropped (and counted).
 pub const MAX_LINES: usize = 100_000;
 
+/// Lines Jenkins returns per `progressiveText` request while the build runs
+/// (stapler's `LargeText`, `MAX_LINES_READ`); a full batch means more is
+/// already there.
+pub const JENKINS_BATCH_LINES: usize = 10_000;
+
 /// Columns moved by one ←/→ step.
 pub const HSCROLL_STEP: usize = 8;
 
@@ -17,6 +22,13 @@ pub struct ConsoleChunk {
     pub next: u64,
     /// The build is still writing (`X-More-Data: true`).
     pub more: bool,
+}
+
+impl ConsoleChunk {
+    /// Jenkins stopped at its batch size: more output is waiting already.
+    pub fn is_full_batch(&self) -> bool {
+        self.more && self.bytes.iter().filter(|&&b| b == b'\n').count() >= JENKINS_BATCH_LINES
+    }
 }
 
 /// Request path for the console log of `number` of a job, from `start`.
