@@ -308,9 +308,6 @@ impl Tab {
     }
 }
 
-/// How often a running build's console output is polled while shown.
-pub const CONSOLE_POLL: std::time::Duration = std::time::Duration::from_secs(1);
-
 /// Builds per page before the renderer has measured the screen.
 pub const DEFAULT_HISTORY_PAGE: usize = 30;
 /// Builds tab: pages loaded beyond the selection when moving down, so paging
@@ -1023,9 +1020,7 @@ impl App {
             Action::Tick(now, wall) => {
                 self.now = now;
                 self.wall_now = wall;
-                let mut effects = self.auto_refresh_if_due();
-                effects.extend(self.console_poll_if_due());
-                return effects;
+                return self.auto_refresh_if_due();
             }
             Action::ToggleTimestamps => {
                 self.absolute_times = !self.absolute_times;
@@ -1297,7 +1292,17 @@ impl App {
             | Action::ScrollRight
                 if self.view == View::Console =>
             {
+                let connected = matches!(self.connection, ConnectionStatus::Connected { .. });
                 if let Some(console) = &mut self.console {
+                    // Going further down at the bottom of a running build's
+                    // output fetches what's new right away.
+                    let fetch_now = connected
+                        && console.more
+                        && console.visible_top() >= console.max_top()
+                        && matches!(
+                            action,
+                            Action::SelectNext | Action::SelectPageDown | Action::SelectLast
+                        );
                     match action {
                         Action::SelectNext => console.scroll_by(1),
                         Action::SelectPrev => console.scroll_by(-1),
@@ -1312,6 +1317,9 @@ impl App {
                             console.left =
                                 console.left.saturating_sub(crate::console::HSCROLL_STEP);
                         }
+                    }
+                    if fetch_now {
+                        return self.fetch_console();
                     }
                 }
             }
@@ -1768,21 +1776,6 @@ impl App {
         self.console_effect().into_iter().collect()
     }
 
-    /// Tail a running build's output: poll every [`CONSOLE_POLL`] while the
-    /// console is on screen, independent of the auto-refresh setting.
-    fn console_poll_if_due(&mut self) -> Vec<Effect> {
-        let connected = matches!(self.connection, ConnectionStatus::Connected { .. });
-        let due = self
-            .console
-            .as_ref()
-            .is_some_and(|c| c.poll_due(self.now, CONSOLE_POLL));
-        if connected && self.view == View::Console && due {
-            self.fetch_console()
-        } else {
-            Vec::new()
-        }
-    }
-
     /// Start a fetch of what's on screen when auto-refresh is on, we're
     /// connected, nothing is in flight and the last attempt is at least one
     /// interval old.
@@ -1796,8 +1789,17 @@ impl App {
             last.is_none_or(|last| self.now.saturating_duration_since(last) >= interval)
         };
         match (&self.view, &self.build) {
-            // Tailed separately (see `console_poll_if_due`).
-            (View::Console, _) => Vec::new(),
+            // Tail a running build's output (polling stops once it's complete).
+            (View::Console, _) => {
+                if self
+                    .console
+                    .as_ref()
+                    .is_some_and(|c| c.poll_due(self.now, interval))
+                {
+                    return self.fetch_console();
+                }
+                Vec::new()
+            }
             (View::Builds, _) => {
                 if !self.history.fetch_in_flight() && due(self.history.attempted_at) {
                     return self.fetch_history(self.history_refresh_limit());
@@ -3702,22 +3704,24 @@ mod tests {
         assert_eq!(app.view, View::Build);
     }
 
+    const INTERVAL: Duration = Duration::from_secs(crate::config::DEFAULT_REFRESH_SECS);
+
     #[test]
-    fn running_build_output_is_tailed_every_second() {
+    fn running_build_output_is_tailed_every_refresh_interval() {
         let mut app = app_on_latest_build();
         app.update(Action::OpenConsole);
         assert_eq!(
-            tick(&mut app, Duration::from_secs(5)),
+            tick(&mut app, INTERVAL * 2),
             Vec::new(),
             "first fetch in flight"
         );
         chunk_arrives(&mut app, 0, "a\n", true);
         assert_eq!(
-            tick(&mut app, Duration::from_millis(500)),
+            tick(&mut app, INTERVAL - Duration::from_secs(1)),
             Vec::new(),
             "not due"
         );
-        let effects = tick(&mut app, Duration::from_millis(500));
+        let effects = tick(&mut app, Duration::from_secs(1));
         assert_eq!(
             console_fetch(&effects),
             Some((8, 2)),
@@ -3734,12 +3738,56 @@ mod tests {
     }
 
     #[test]
-    fn tailing_ignores_auto_refresh_setting() {
+    fn tailing_follows_auto_refresh() {
         let mut app = app_on_latest_build();
         app.auto_refresh = false;
         app.update(Action::OpenConsole);
         chunk_arrives(&mut app, 0, "a\n", true);
+        assert_eq!(
+            tick(&mut app, INTERVAL * 10),
+            Vec::new(),
+            "auto-refresh off"
+        );
+        assert_eq!(
+            console_fetch(&app.update(Action::Refresh)),
+            Some((8, 2)),
+            "r still fetches"
+        );
+    }
+
+    #[test]
+    fn going_down_at_the_bottom_fetches_now() {
+        let mut app = app_on_latest_build();
+        app.update(Action::OpenConsole);
+        let text: String = (0..50).map(|i| format!("{i}\n")).collect();
+        chunk_arrives(&mut app, 0, &text, true);
+        let end = text.len() as u64;
+        app.console.as_ref().unwrap().viewport.set(10);
+        for action in [
+            Action::SelectNext,
+            Action::SelectPageDown,
+            Action::SelectLast,
+        ] {
+            let effects = app.update(action.clone());
+            assert_eq!(console_fetch(&effects), Some((8, end)), "{action:?}");
+            assert_eq!(app.update(action), Vec::new(), "one in flight");
+            chunk_arrives(&mut app, end, "", true);
+        }
+        // Back on the schedule: one interval after the last answer.
+        assert_eq!(
+            tick(&mut app, INTERVAL - Duration::from_secs(1)),
+            Vec::new()
+        );
         assert!(console_fetch(&tick(&mut app, Duration::from_secs(1))).is_some());
+        chunk_arrives(&mut app, end, "", true);
+        // Reaching the bottom from above doesn't fetch.
+        app.update(Action::SelectPageUp);
+        assert_eq!(app.update(Action::SelectPageDown), Vec::new());
+        assert!(app.console.as_ref().unwrap().following);
+        // Nor does a complete build.
+        app.update(Action::Refresh);
+        chunk_arrives(&mut app, end, "", false);
+        assert_eq!(app.update(Action::SelectNext), Vec::new());
     }
 
     #[test]
@@ -3756,7 +3804,7 @@ mod tests {
         let mut app = app_on_latest_build();
         app.update(Action::OpenConsole);
         chunk_arrives(&mut app, 0, "a\n", true);
-        tick(&mut app, Duration::from_secs(1));
+        tick(&mut app, INTERVAL);
         let generation = app.connection_generation;
         app.update(Action::ConsoleFetched {
             generation,

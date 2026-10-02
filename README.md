@@ -275,8 +275,8 @@ older build stays put.
 ### Console output
 
 `c` in the build view opens the build's console output, scrolled to the end.
-While the build runs, new output is fetched every second (only the new part)
-and followed at the bottom. Scrolling up pauses following (the title says so);
+While the build runs, new output is fetched at the refresh interval while
+auto-refresh is on (only the new part) and followed at the bottom. Scrolling up pauses following (the title says so);
 `End` resumes it.
 
 | Key | Action |

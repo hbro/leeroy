@@ -10,6 +10,11 @@ A release's section is used as its GitHub release notes.
 
 ## [Unreleased]
 
+### Changed
+
+- The console of a running build is fetched at the refresh interval and only
+  while auto-refresh is on, like the other views, instead of every second.
+
 ## [0.5.0] - 2026-09-30
 
 ### Changed

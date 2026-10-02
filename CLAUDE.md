@@ -163,8 +163,10 @@ Rules:
   plugin) or any error = no stages section, never a failed build view.
 - Console view (`View::Console`, under the build view): `c` toggles it (opens it
   from the build view, `c`/`Esc` go back) for the
-  shown build's *number*. Polled every `CONSOLE_POLL` (1s) while shown and the
-  build runs, regardless of auto-refresh; one fetch in flight; chunks are matched
+  shown build's *number*. Polled like the other views (auto-refresh on, every
+  `refresh.interval`) while shown and the build runs; ↓/PgDn/End while already
+  at the bottom fetch right away (implicit, not in the bar), then the schedule
+  resumes; one fetch in flight; chunks are matched
   on job + number + start offset (duplicates never appended). Only visible lines
   are rendered; the renderer records the viewport height for paging.
 - Jobs: fetched after each successful connect and on `r`, tagged with the
