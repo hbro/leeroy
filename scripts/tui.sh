@@ -17,7 +17,15 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-while read -r var; do unset "$var"; done < <(compgen -e | grep -Ei '^(LEEROY_|(https?|all|no)_proxy$)' || true)
+# Exported names from `export -p` (Nix's non-interactive bash has no compgen).
+shopt -s nocasematch
+while read -r _ _ decl; do
+    var=${decl%%=*}
+    if [[ $var =~ ^[a-z_][a-z0-9_]*$ && $var =~ ^(leeroy_|(https?|all|no)_proxy$) ]]; then
+        unset "$var"
+    fi
+done < <(export -p)
+shopt -u nocasematch
 SOCKET=leeroy-agent
 SESSION=leeroy
 BIN=target/debug/leeroy

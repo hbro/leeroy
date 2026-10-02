@@ -9,7 +9,15 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 # Isolate from your own setup: no LEEROY_* or *_PROXY env vars; each tape gets a fresh
 # config at target/vhs/config.toml (set in tapes/_settings.tape).
-while read -r var; do unset "$var"; done < <(compgen -e | grep -Ei '^(LEEROY_|(https?|all|no)_proxy$)' || true)
+# Exported names from `export -p` (Nix's non-interactive bash has no compgen).
+shopt -s nocasematch
+while read -r _ _ decl; do
+    var=${decl%%=*}
+    if [[ $var =~ ^[a-z_][a-z0-9_]*$ && $var =~ ^(leeroy_|(https?|all|no)_proxy$) ]]; then
+        unset "$var"
+    fi
+done < <(export -p)
+shopt -u nocasematch
 
 run() {
     if command -v vhs >/dev/null && command -v rustc >/dev/null; then "$@"; else nix develop -c "$@"; fi
