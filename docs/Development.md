@@ -1,5 +1,6 @@
-[`CLAUDE.md`](https://github.com/hbro/leeroy/blob/main/CLAUDE.md) describes the architecture and how to verify changes (tests,
-snapshots, tmux, screenshots). CI (`.github/workflows/ci.yml`) runs rustfmt and
+[`AGENTS.md`](https://github.com/hbro/leeroy/blob/main/AGENTS.md) describes
+the architecture and how to verify changes (tests, snapshots, tmux,
+screenshots). CI (`.github/workflows/ci.yml`) runs rustfmt and
 clippy, and the tests on Linux (x86_64 glibc and musl, ARM64), macOS and
 Windows, for every push to `main` and every pull request.
 
