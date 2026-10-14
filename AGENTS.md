@@ -251,6 +251,9 @@ User docs = `docs/*.md`, one file per wiki page (`Home.md`, `_Sidebar.md`,
 getting started, links). `.github/workflows/wiki.yml` overwrites
 https://github.com/hbro/leeroy/wiki from `docs/` on release tags (or by hand);
 never edit the wiki directly. Document user-visible changes in the right page.
+Problems and their fixes are explained only in `Troubleshooting.md` (log
+locations too); other pages link to its section. Auth = plain headers for now,
+docs say it'll become friendlier: update them when that changes.
 
 ## Versioning and CI
 

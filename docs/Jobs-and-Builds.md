@@ -27,8 +27,10 @@ it took, what triggered it, parameters, description and the SCM changes it
 included. A running build shows its elapsed time against Jenkins' estimate as a
 progress bar. For a Pipeline (Jenkinsfile) build, its stages are shown in order,
 `● Checkout 4s ─▶ ● Build 1m 02s ─▶ ✕ Test 38s ─▶ ○ Deploy`, when Jenkins has the
-Pipeline Stage View plugin (its `wfapi`); without it the section is left out. `r` and auto-refresh re-fetch the build while this view is open (so
-a running build updates live), and the header's `⟳` age refers to it.
+Pipeline Stage View plugin (its `wfapi`); without it the section is left out
+([no stages](Troubleshooting.md#a-pipeline-build-has-no-stages)). `r` and
+auto-refresh re-fetch the build while this view is open (so a running build
+updates live), and the header's `⟳` age refers to it.
 
 | Key | Action |
 | --- | --- |

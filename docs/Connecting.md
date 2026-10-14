@@ -4,6 +4,9 @@ connecting, connected (Jenkins version and user), or the reason it failed.
 
 ## Authentication
 
+> **Note:** authentication is currently plain HTTP headers that you set
+> yourself. It's likely to become more user-friendly in the near future.
+
 Leeroy doesn't assume an auth scheme: it sends whatever HTTP headers you
 configure under `[jenkins.headers]`, with every request. Add them in the settings
 view (`+ add header`, edit as `Name: value`, clear the field to remove one).
@@ -28,17 +31,8 @@ LEEROY_JENKINS_HEADERS_AUTHORIZATION="Basic $(printf 'me:%s' "$(pass show work/j
 
 (`head -n1`: `pass show` prints the whole entry, including any extra lines.)
 
-**Troubleshooting a 401/403:** the error says who refused: Jenkins itself, or a
-server in front of it (plus the login it asks for). Common causes:
-
-- The credentials contain a newline (`echo … | base64` instead of `printf '%s' …`,
-  or a multi-line `pass` entry). Leeroy rejects such `Basic` values up front.
-- A redirect to another scheme/host/port (e.g. `http://` → `https://`): the
-  `Authorization` header is dropped on such redirects for safety. The error names
-  the redirect target; use that as the Jenkins URL.
-- With `RUST_LOG=debug` (see [Troubleshooting](Troubleshooting.md)), the log
-  shows which header *names* were sent, the final URL and the response status
-  (never header values).
+Refused with a 401/403: see
+[Authentication fails](Troubleshooting.md#authentication-fails).
 
 Env-provided headers win over the file and are read-only in the TUI.
 Credentials embedded in the Jenkins URL (`https://user:pass@host`) also work, but
@@ -59,10 +53,6 @@ When Jenkins is only reachable through a proxy, set `proxy.url` to
 | `socks5`     | SOCKS5          | locally        |
 | `socks5h`    | SOCKS5          | **on the proxy** |
 
-**Remote DNS with SOCKS:** use `socks5h://` (or `socks4a://`) when the Jenkins
-host name only resolves inside the proxied network. With `socks5://` the name is
-resolved on your machine first.
-
 Without a proxy setting, the usual env vars apply, like with curl:
 `https_proxy`/`HTTPS_PROXY` (or `http_proxy`/`HTTP_PROXY` for an `http://`
 Jenkins URL), then `all_proxy`/`ALL_PROXY`, except for hosts listed in
@@ -71,4 +61,5 @@ view shows which one is in effect. An explicit Leeroy proxy setting ignores
 `NO_PROXY`.
 
 Passwords in proxy URLs are masked on screen (except while you edit the field)
-and in logs.
+and in logs. Can't connect through the proxy: see
+[Cannot connect](Troubleshooting.md#cannot-connect).

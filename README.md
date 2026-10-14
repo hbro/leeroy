@@ -52,8 +52,9 @@ Or build from source: `cargo install --git https://github.com/hbro/leeroy`.
 
 Run `leeroy`, open the settings with `0` and enter your Jenkins URL; add an
 `Authorization` header if your instance needs a login (see
-[Connecting](docs/Connecting.md)). `1`–`4` switch between the Jobs, Builds,
-Pipelines and Pipeline runs tabs, and `h` or `?` lists every key.
+[Connecting](docs/Connecting.md); authentication is plain HTTP headers for now
+and likely to become more user-friendly soon). `1`–`4` switch between the
+Jobs, Builds, Pipelines and Pipeline runs tabs, and `h` or `?` lists every key.
 
 ## Documentation
 
@@ -62,7 +63,7 @@ its source is in [`docs/`](docs/) (also included in the release archives):
 
 - [Installing](docs/Installing.md)
 - [Configuration](docs/Configuration.md): the config file, env vars, TLS, colours
-- [Connecting](docs/Connecting.md): authentication headers, proxies
+- [Connecting](docs/Connecting.md): authentication (plain HTTP headers for now), proxies
 - [Using Leeroy](docs/Using-Leeroy.md): tabs and global keys
 - [Jobs and Builds](docs/Jobs-and-Builds.md): job list, build details, console
   output, build history

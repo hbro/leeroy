@@ -72,7 +72,8 @@ Build Pipeline view (at the top level or in a folder): the new build then has
 the upstream build as its cause
 (it joins the run) and gets its parameters. Without such a view, the job is
 started directly with the upstream build's parameters; it runs, but isn't linked
-to the run (the notice says so).
+to the run (the notice says so; see
+[Troubleshooting](Troubleshooting.md#a-promotion-or-re-run-isnt-part-of-the-run)).
 
 ## Re-running
 

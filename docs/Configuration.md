@@ -11,9 +11,7 @@ Leeroy uses the XDG one and prints a warning to stderr.
 
 On **Windows**, step 3 is `%XDG_CONFIG_HOME%\leeroy\config.toml` only when that
 variable is set to an absolute path; otherwise the config lives in
-`%APPDATA%\leeroy\config.toml`. The log file defaults to
-`%LOCALAPPDATA%\leeroy\leeroy.log` there (`~/.local/state/leeroy/leeroy.log`
-elsewhere; `LEEROY_LOG` overrides both).
+`%APPDATA%\leeroy\config.toml`.
 
 ```toml
 [jenkins]
@@ -50,11 +48,13 @@ can't be edited in the TUI while set):
 | Confirm quit | `LEEROY_UI_CONFIRM_QUIT` |
 | Theme | `LEEROY_UI_THEME` (`auto`/`dark`/`light`) |
 | Timestamps | `LEEROY_UI_TIMESTAMPS` (`relative`/`absolute`) |
+| Log file | `LEEROY_LOG` (env var only; see [Logs](Troubleshooting.md#logs)) |
 
 Saving from the TUI keeps comments and unknown keys in the file.
 
 Headers (authentication) and the proxy are explained under
-[Connecting](Connecting.md).
+[Connecting](Connecting.md). Authentication is currently plain HTTP headers;
+it's likely to become more user-friendly in the near future.
 
 ## TLS
 
@@ -63,7 +63,8 @@ company CA installed system-wide just works. For self-signed or otherwise
 invalid certificates, `skip_tls_verify = true` (toggle "Skip TLS verify" in the
 settings) disables verification. **This is insecure**: anyone between you and
 Jenkins can read your credentials. It's off by default, and while it's on the
-header shows `⚠ TLS NOT VERIFIED`.
+header shows `⚠ TLS NOT VERIFIED`. Certificate errors: see
+[Untrusted TLS certificate](Troubleshooting.md#untrusted-tls-certificate).
 
 ## Colours
 
@@ -74,3 +75,4 @@ The default, `auto`, asks the terminal for its background colour at startup and
 picks accordingly; terminals that don't answer (tmux, for one) get `dark`. The
 settings view shows what was detected. Change it with Enter on "Theme" in the
 settings (it applies right away), `ui.theme` in the file, or `LEEROY_UI_THEME`.
+See also [Colours are hard to read](Troubleshooting.md#colours-are-hard-to-read).

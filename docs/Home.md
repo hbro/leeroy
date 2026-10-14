@@ -4,7 +4,7 @@ terminal.
 
 - [Installing](Installing.md): release archives, building from source
 - [Configuration](Configuration.md): the config file, env vars, TLS, colours
-- [Connecting](Connecting.md): authentication headers, proxies
+- [Connecting](Connecting.md): authentication (plain HTTP headers for now), proxies
 - [Using Leeroy](Using-Leeroy.md): tabs and global keys
 - [Jobs and Builds](Jobs-and-Builds.md): job list, build details, console
   output, build history
