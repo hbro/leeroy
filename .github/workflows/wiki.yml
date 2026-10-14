@@ -1,0 +1,73 @@
+name: Wiki
+
+# Copies docs/ to the repository's wiki (https://github.com/hbro/leeroy/wiki),
+# replacing whatever is there: the wiki is generated, docs/ is the source.
+# Runs for every release tag, so the wiki describes the released version; run
+# it by hand (workflow_dispatch) to publish doc fixes between releases.
+#
+# The wiki's git repo only exists once a first page has been created in the
+# web UI (Wiki → Create the first page); until then the clone fails.
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: wiki
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Sync docs to the wiki
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Clone the wiki
+        env:
+          TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: git clone --depth 1 "https://x-access-token:$TOKEN@github.com/$REPO.wiki.git" wiki
+      - name: Copy docs/
+        run: |
+          find wiki -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
+          cp -R docs/. wiki/
+          # docs/README.md explains the directory; it's not a wiki page.
+          rm wiki/README.md
+          # Links between pages are written as Page.md (works in the repo);
+          # wiki page URLs have no extension.
+          sed -E -i 's/\]\(([A-Za-z0-9_-]+)\.md(#[^)]*)?\)/](\1\2)/g' wiki/*.md
+      - name: Name the version in the footer
+        env:
+          REF: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          REPO: ${{ github.repository }}
+        run: |
+          if [[ $REF_TYPE == tag ]]; then
+            what="Leeroy $REF"
+          else
+            what="the \`$REF\` branch (may include unreleased changes)"
+          fi
+          {
+            echo
+            echo "These pages describe $what. Other versions: \`docs/\` at that" \
+              "version's [tag](https://github.com/$REPO/tags), also included in" \
+              "its release archive."
+          } >> wiki/_Footer.md
+      - name: Commit and push
+        working-directory: wiki
+        env:
+          REF: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+        run: |
+          git add -A
+          if git diff --cached --quiet; then
+            echo "The wiki is up to date."
+            exit 0
+          fi
+          git -c user.name="github-actions[bot]" \
+            -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit -q -m "Sync docs from ${SHA:0:7} ($REF)"
+          git push -q origin HEAD

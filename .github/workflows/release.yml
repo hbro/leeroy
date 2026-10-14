@@ -114,8 +114,9 @@ jobs:
         shell: bash
         run: |
           name="leeroy-v${{ needs.version.outputs.version }}-${{ matrix.name }}"
-          mkdir -p "dist/$name"
+          mkdir -p "dist/$name/docs"
           cp README.md LICENSE CHANGELOG.md "dist/$name/"
+          cp docs/*.md "dist/$name/docs/"
           if [[ "${{ runner.os }}" == Windows ]]; then
             cp "target/${{ matrix.target }}/release/leeroy.exe" "dist/$name/"
             (cd dist && 7z a -tzip "$name.zip" "$name" > /dev/null)

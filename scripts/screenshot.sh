@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Render VHS tapes to PNG screenshots in target/screenshots/ (readme.tape:
-# docs/screenshots/, committed and shown in the README).
+# docs/screenshots/, committed and shown in the README and wiki).
 #
 #   scripts/screenshot.sh            run every tapes/*.tape
 #   scripts/screenshot.sh help       run tapes/help.tape only

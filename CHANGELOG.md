@@ -10,6 +10,12 @@ A release's section is used as its GitHub release notes.
 
 ## [Unreleased]
 
+### Changed
+
+- The documentation moved from the README to the
+  [wiki](https://github.com/hbro/leeroy/wiki), generated from `docs/` in the
+  repository; release archives include it as `docs/*.md`.
+
 ## [0.5.2] - 2026-10-02
 
 ### Fixed

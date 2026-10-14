@@ -244,6 +244,14 @@ Rules:
 - Never print to stdout/stderr while the TUI runs; use `tracing` (logs go to
   `$LEEROY_LOG`, default `~/.local/state/leeroy/leeroy.log`; level via `RUST_LOG`).
 
+## Documentation
+
+User docs = `docs/*.md`, one file per wiki page (`Home.md`, `_Sidebar.md`,
+`_Footer.md`; links as `Page.md`). README stays short (overview, install,
+getting started, links). `.github/workflows/wiki.yml` overwrites
+https://github.com/hbro/leeroy/wiki from `docs/` on release tags (or by hand);
+never edit the wiki directly. Document user-visible changes in the right page.
+
 ## Versioning and CI
 
 - SemVer; `Cargo.toml` `version` is the single source. User-visible changes get
@@ -312,7 +320,7 @@ Run all three layers for UI changes; layer 1 is mandatory for every change.
    VHS 0.11 has no `Home`/`End` commands (they get typed as text): use `Left N`.
    VHS is pinned to 0.11.0 in `flake.nix`: 0.12.0 silently writes nothing
    (charmbracelet/vhs#787). The script checks that screenshots were produced.
-   `tapes/readme.tape` writes the README screenshots to `docs/screenshots/`
+   `tapes/readme.tape` writes the README/wiki screenshots to `docs/screenshots/`
    (committed, 960x540, mock instance `jenkins.example.com` via the fake as a
    proxy): regenerate them with `scripts/screenshot.sh readme` when the UI changes.
    Tapes run with a fresh `target/vhs/config.toml` and no `LEEROY_*`/`*_proxy` vars,

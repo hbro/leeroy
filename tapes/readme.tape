@@ -1,4 +1,4 @@
-# Screenshots for the README (960x540: a quarter of full HD), committed in
+# Screenshots for the README and wiki (960x540: a quarter of full HD), committed in
 # docs/screenshots/. Regenerate with
 # scripts/screenshot.sh readme after UI changes. Data: the fake Jenkins.
 Set Theme "Catppuccin Mocha"
