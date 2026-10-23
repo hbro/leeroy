@@ -56,6 +56,28 @@ Elm-style: pure core, thin IO shell.
   `MAX_LINES`. Follow = pinned to the bottom; scrolling up pauses, `End` resumes.
 - `src/config.rs` — config file location, load/save, env var overrides. Takes the
   environment as a parameter (never reads `std::env` itself) so it's testable.
+- `src/auth.rs` — auth modes (`AuthConfig`: headers | anonymous | basic | oidc,
+  from `Settings::auth_config()`), `Secret` (redacting `Debug`), `Credentials`
+  (→ the `Authorization` value), `TokenSet` (`refresh_at` = 30 s before expiry
+  or halfway, whichever is later), PKCE. Pure.
+- `src/secrets.rs` — OS keyring (keyring 3: Secret Service via zbus/pure Rust,
+  Keychain, Credential Manager; service `leeroy`, accounts from
+  `auth::password_account` / `token_account`), password command (`sh -c` /
+  `cmd /C`, stdin null, first line, output never shown), tokens file
+  (`<state dir>/tokens.toml`, 0600). IO.
+- `src/oidc.rs` — discovery, device flow (RFC 8628), browser flow (PKCE,
+  listener on `127.0.0.1:0`, `state` checked), refresh. IO; wiremock tests.
+- `src/credentials.rs` — what the executor calls: `resolve` (password from its
+  store; tokens of this session, else the stored refresh token refreshed, else
+  `Resolved::LoginNeeded`), `login`, `refresh`, `store`. Stores rotated
+  refresh tokens itself (only refresh tokens: Windows' keyring caps at 2560 B).
+- `src/detect.rs` — login detection ("Detect login" row, `Effect::DetectLogin`,
+  `Context::Detect`): `whoAmI/api/json` without credentials, redirects followed
+  by hand (stopping at the identity provider), `classify` (pure) → anonymous /
+  Jenkins login (+ its SSO plugin via `securityRealm/commenceLogin`) / basic /
+  SSO proxy (issuer + client from the Keycloak redirect; device login tried
+  with that client). `Detection::suggested_settings()` goes into the draft; Enter then
+  saves and logs in, or opens the missing user/password field.
 - `src/event.rs` — `map_key(&App, KeyEvent) -> Option<Action>`.
 - `src/ui.rs` — `render(&mut Frame, &App)`. **Deterministic**: no clock, randomness,
   or env reads. Time enters only via `Action::Tick(Instant, SystemTime)` →
@@ -68,7 +90,9 @@ Elm-style: pure core, thin IO shell.
 
 Rules:
 - New behaviour = new `Action` variant + `update` arm + tests.
-- Header: app name + connected Jenkins instance (`App::connection`).
+- Header: app name + connected Jenkins instance (`App::connection`): the state
+  only (`✕ … · not connected`); why it failed is the settings view's Connection
+  row (`ui::connection_lines`, wrapped), the Jobs tab points there.
 - Tabs: `app::Tab`, selected with digits: content tabs `1`–`9` (`Tab::key`),
   Settings `0`, right-aligned in the tab bar. New content = new `Tab` + `View`
   variant. Tab keys work everywhere except text input (digits are typed there).
@@ -88,7 +112,7 @@ Rules:
   header shows an `h/?` hint): q, h/?, i (instance overlay: `src/instance.rs`,
   three requests fetched fresh on every open, header names only), r (refresh),
   R (toggle auto-refresh), t (`App::absolute_times`: relative ⇄ absolute
-  build times; saved as `ui.timestamps` via `commit`, session-only when the
+  build times; saved as `ui.timestamps` right away via `save_now`, session-only when the
   env var is set; `ui::started_text` renders them in `App::time_zone`,
   detected in `main.rs` with jiff, UTC in tests). The help popup's section for the view below is
   titled "Navigation"; its bottom border shows `App::about` (`Leeroy 0.4.0 ·
@@ -198,10 +222,17 @@ Rules:
   Delete, Ctrl-U. ↑/↓ while editing = save the field (if valid) and move. The
   field being edited is shown exactly as typed (no masking, per user request);
   masking applies only to fields that aren't being edited.
+- Saving settings is explicit: edits in the settings view change
+  `SettingsState::draft` (via `commit`), shown with `edited()`; `Ctrl-S` /
+  the Save row (`Action::SaveChanges`, also keeps a field being typed) writes
+  it, makes it `file` (what `effective()` / `connection_config()` use) and
+  reconnects if the connection changed; a keyring password waits in
+  `pending_password` and the reconnect follows its `StoreSecret`. `Ctrl-D` /
+  Discard (`Action::DiscardChanges`) drops the draft. Unsaved changes: title says so, quitting always asks.
 - Settings: add a `SettingKey` variant (label, TOML path, env var
   `LEEROY_<TABLE>_<KEY>`, `section`, `doc`, `validate`, `display`) plus a field in
   `Settings`. The view groups rows by `config::Section`: Jenkins (URL, TLS, proxy,
-  then the Headers sub-section) and Application (refresh, confirm quit). Tests and
+  then the "Additional HTTP Headers" sub-section) and Application (refresh, confirm quit). Tests and
   tapes navigate settings by row, so select rows explicitly rather than wrapping. `doc` is shown in the settings view and written as a TOML comment
   when the key is first saved. Invalid values keep the edit open; invalid file/env
   values fail at startup. Precedence: env var >
@@ -212,18 +243,35 @@ Rules:
   `~` paths (log: `%LOCALAPPDATA%`). Path logic takes a `config::Platform`
   parameter so every platform's rules are tested on Linux; never use `cfg!` for
   it outside `Platform::current()`. Empty env values count as unset.
-- Auth is generic: `[jenkins.headers]` (`Settings::header`/`set_header`, names
-  case-insensitive) sent with every request; env `LEEROY_JENKINS_HEADERS_<NAME>`
-  (`_` → `-`). Settings view rows = `SettingsState::rows()`: fixed `SettingKey`s,
+- Auth: `[auth]` (`auth.mode` = headers (default, as before auth modes) |
+  anonymous | basic | oidc; `SettingKey::Auth*`, shown per mode via
+  `SettingKey::applies`). `connect()` → `Effect::ResolveCredentials` (status
+  `Authenticating`) → `CredentialsResolved` → `Connect` with
+  `App::request_config()` (= `connection_config()` + `App::credentials`; every
+  fetch uses it); `LoginNeeded` → `Context::Login` overlay + `Effect::Login`
+  (`LoginStarted` prompt, `LoginFinished`); `Tick` refreshes due tokens
+  (`Effect::RefreshToken`, one in flight; failure = log in again, data kept).
+  `connection_config()` never holds credentials, so it stays the reconnect key.
+  The password row stores via `Effect::StoreSecret` (keyring) or the file
+  (`auth.password`, only with `password_store = "file"`); `LEEROY_AUTH_PASSWORD`
+  wins and is env-only. Outside headers mode a custom `Authorization` header
+  isn't sent (`Settings::ignored_header` / `sent_headers`; the row says so).
+  Headers: `[jenkins.headers]` (`Settings::header`/`set_header`, names
+  case-insensitive) sent with every request, every mode; env
+  `LEEROY_JENKINS_HEADERS_<NAME>` (`_` → `-`). Settings view rows =
+  `SettingsState::rows()`: fixed `SettingKey`s (that apply) with "Detect login"
+  (`SettingsRow::DetectLogin`) right after Authentication, then Password (basic),
   then one row per header, then `+ add header` (edit `Name: value`, empty =
-  delete). Removed `jenkins.username`/`token` must keep failing loudly at startup.
+  delete), then Save and Discard (always there); the list scrolls with the
+  selection on small screens. Removed `jenkins.username`/`token` must keep failing loudly at startup.
   `Authorization: Basic` values are decoded and rejected when not base64, without
   `:`, or containing a newline (echo / multi-line `pass show`). 401/403 errors say
   who refused (`X-Jenkins` present = Jenkins) and whether a cross-origin redirect
   dropped the header (reqwest strips `Authorization` then); keep that.
-- Secrets: header values are masked in the UI (fixed `••••••••`) except in the
-  field currently being edited, sent as sensitive `HeaderValue`s, and only header *names* appear
-  in `Debug`. `Input` actions are never logged. Passwords in the Jenkins and proxy
+- Secrets: header values and the password are masked in the UI (fixed
+  `••••••••`) except in the field currently being edited, sent as sensitive
+  `HeaderValue`s, and only header *names* appear in `Debug`. Passwords and
+  tokens are `auth::Secret` everywhere (`Action`s are logged with `?action`). `Input` actions are never logged. Passwords in the Jenkins and proxy
   URLs go through `config::redact_url` everywhere they're shown (the header's
   `ConnectionStatus` stores the redacted URL). Keep it that way.
 - Connection: every attempt bumps `App::connection_generation`; `ConnectFinished`
@@ -252,8 +300,7 @@ getting started, links). `.github/workflows/wiki.yml` overwrites
 https://github.com/hbro/leeroy/wiki from `docs/` on release tags (or by hand);
 never edit the wiki directly. Document user-visible changes in the right page.
 Problems and their fixes are explained only in `Troubleshooting.md` (log
-locations too); other pages link to its section. Auth = plain headers for now,
-docs say it'll become friendlier: update them when that changes.
+locations too); other pages link to its section.
 
 ## Versioning and CI
 
@@ -293,8 +340,12 @@ Run all three layers for UI changes; layer 1 is mandatory for every change.
    App log for the run: `target/tui.log` (RUST_LOG=debug).
    Fake Jenkins for connection tests: `scripts/fake-jenkins.py [--port 8099]
    [--auth USER:TOKEN] [--delay SECS] [--status CODE] [--tls] [--jobs N] [--churn]
-   [--log-lines N]`
-   (job tree with folders/multibranch/all statuses, each job's builds when the tree
+   [--log-lines N] [--oidc] [--token-ttl SECS]`
+   (always an OpenID Connect provider too, issuer `http://127.0.0.1:8099/realms/fake`:
+   device code `FAKE-CODE`, approved by opening `/realms/fake/device`, or by itself
+   after two polls with `--oidc`, which also makes the API require its bearer
+   token; the authorize URL redirects straight back, so `curl -L` on the URL from
+   the login overlay is the "browser"; job tree with folders/multibranch/all statuses, each job's builds when the tree
    asks for `builds[…]{0,N}` (with their upstream causes when it asks for
    `causes[`); job chains `libs/core → backend/api/main → deploy/staging →
    tests/*`, `frontend/web/main → deploy/staging`, `tests/e2e →
@@ -308,7 +359,10 @@ Run all three layers for UI changes; layer 1 is mandatory for every change.
    Run it in the background with its own process group; don't `pkill -f` it (the
    pattern can match unrelated shells).
    Isolation: all `LEEROY_*` and `*_proxy` vars from your shell are cleared and the config is a
-   fresh `target/tui/config.toml` per start. Test env overrides with `-e`, a
+   fresh `target/tui/config.toml` per start, the state dir (tokens file)
+   `target/tui/state`. Keyring stores still use your real OS keyring: prefer
+   `token_store`/`password_store` file or memory in tests, or delete the entry
+   afterwards (empty password / "Detect login" + Enter, then Esc). Test env overrides with `-e`, a
    prepared config with `-- --config FILE`.
 
 3. **Pixel screenshots** (colors/layout) — VHS

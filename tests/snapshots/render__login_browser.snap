@@ -1,0 +1,28 @@
+---
+source: tests/render.rs
+expression: render(&app).backend()
+---
+" Leeroy  ◌ https://ci.example.com · logging in…                       h/?  help "
+" 1 Jobs   2 Builds   3 Pipelines   4 Pipeline runs                   0 Settings "
+"Jobs ───────────────────────────────────────────────────────────────────────────"
+"                                                                                "
+"                      Logging in to https://ci.example.com…                     "
+"                                                                                "
+"                                                                                "
+"  ╔ Log in · Keycloak / OpenID Connect ══════════════════════════════════════╗  "
+"  ║                                                                          ║  "
+"  ║  Log in in the browser window that opened.                               ║  "
+"  ║  Didn't open? Press o, or open this address:                             ║  "
+"  ║  https://sso.example.com/realms/acme/protocol/openid-connect/auth?respo  ║  "
+"  ║  nse_type=code&client_id=leeroy&redirect_uri=http%3A%2F%2F127.0.0.1%3A4  ║  "
+"  ║  0123%2Fcallback                                                         ║  "
+"  ║                                                                          ║  "
+"  ║  Leeroy continues once you're logged in.                                 ║  "
+"  ║                                                                          ║  "
+"  ║  o open in browser   b code login instead   r try again   Esc cancel     ║  "
+"  ╚══════════════════════════════════════════════════════════════════════════╝  "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"────────────────────────────────────────────────────────────────────────────────"
+" o  open in browser   b  device code/browser   r  try again   Esc  cancel       "

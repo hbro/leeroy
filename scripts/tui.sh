@@ -11,7 +11,8 @@
 #   scripts/tui.sh stop                       kill session
 #
 # Runs are isolated from your own setup: every LEEROY_* and *_PROXY env var is cleared and
-# the config file is target/tui/config.toml, wiped on each start. Pass env vars
+# the config file is target/tui/config.toml, wiped on each start (as is the state
+# dir, target/tui/state: the tokens file). Pass env vars
 # for a run with -e (e.g. -e LEEROY_JENKINS_URL=https://ci), or a config with
 # -- --config FILE. Logs of the run go to target/tui.log.
 set -euo pipefail
@@ -64,7 +65,8 @@ start)
     # Wrapper keeps the pane alive after exit so crashes/exit codes stay visible.
     tm new-session -d -s "$SESSION" -x "${size%x*}" -y "${size#*x}" \
         -e LEEROY_LOG="$PWD/target/tui.log" -e RUST_LOG="${RUST_LOG:-debug}" \
-        -e LEEROY_CONFIG="$PWD/target/tui/config.toml" "${envs[@]}" \
+        -e LEEROY_CONFIG="$PWD/target/tui/config.toml" \
+        -e XDG_STATE_HOME="$PWD/target/tui/state" "${envs[@]}" \
         "$BIN${*:+ $(printf '%q ' "$@")}; code=\$?; echo; echo \"$EXIT_MARKER \$code]\"; sleep 86400"
     echo "started $SESSION ($size)"
     ;;

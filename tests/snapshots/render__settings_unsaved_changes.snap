@@ -1,0 +1,28 @@
+---
+source: tests/render.rs
+expression: screen
+---
+" Leeroy  ○ not connected                                              h/?  help "
+" 1 Jobs   2 Builds   3 Pipelines   4 Pipeline runs                   0 Settings "
+"Settings · unsaved changes · more ↑ ────────────────────────────────────────────"
+"   Authentication    anonymous                                                  "
+"   Detect login      Enter: detect how Jenkins logs in, and log in              "
+"                                                                                "
+"   Additional HTTP Headers                                                      "
+"   Authorization     ••••••••  not sent: Authentication is anonymous            "
+"   + add header                                                                 "
+"                                                                                "
+" Application                                                                    "
+"   Auto-refresh      on                                                         "
+"   Refresh every     10 s (default)                                             "
+"   Confirm quit      on                                                         "
+"   Theme             auto (default; terminal didn't say: dark)                  "
+"   Timestamps        relative (default)                                         "
+"                                                                                "
+" ▶ ✓ Save            write the changes to the config file and use them (Ctrl-S) "
+"   ✕ Discard         back to the saved settings (Ctrl-D)                        "
+"                                                                                "
+"   Not saved yet: Ctrl-S saves, Ctrl-D discards                                 "
+"                                                                                "
+"────────────────────────────────────────────────────────────────────────────────"
+" Enter  edit/toggle   C-s  save   C-d  discard                                  "

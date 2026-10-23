@@ -7,3 +7,4 @@ Set Padding 10
 Set TypingSpeed 0
 Env LEEROY_LOG "target/vhs.log"
 Env LEEROY_CONFIG "target/vhs/config.toml"
+Env XDG_STATE_HOME "target/vhs/state"

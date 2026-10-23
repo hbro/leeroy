@@ -1,0 +1,28 @@
+---
+source: tests/render.rs
+expression: screen
+---
+" Leeroy  ◌ https://ci.example.com · logging in…                       h/?  help "
+" 1 Jobs   2 Builds   3 Pipelines   4 Pipeline runs                   0 Settings "
+"Jobs ───────────────────────────────────────────────────────────────────────────"
+"                                                                                "
+"                      Logging in to https://ci.example.com…                     "
+"                                                                                "
+"                                                                                "
+"  ╔ Log in · Keycloak / OpenID Connect ══════════════════════════════════════╗  "
+"  ║                                                                          ║  "
+"  ║  Open this page in any browser:                                          ║  "
+"  ║  https://sso.example.com/realms/acme/device                              ║  "
+"  ║                                                                          ║  "
+"  ║  and enter the code  WDJB-MJHT                                           ║  "
+"  ║  (valid for 10m 00s)                                                     ║  "
+"  ║                                                                          ║  "
+"  ║  Leeroy continues once you're logged in.                                 ║  "
+"  ║                                                                          ║  "
+"  ║  o open in browser   b browser login instead   r try again   Esc cancel  ║  "
+"  ╚══════════════════════════════════════════════════════════════════════════╝  "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"────────────────────────────────────────────────────────────────────────────────"
+" o  open in browser   b  device code/browser   r  try again   Esc  cancel       "

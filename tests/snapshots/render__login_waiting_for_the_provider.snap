@@ -1,0 +1,28 @@
+---
+source: tests/render.rs
+expression: render(&logging_in()).backend()
+---
+" Leeroy  ◌ https://ci.example.com · logging in…                       h/?  help "
+" 1 Jobs   2 Builds   3 Pipelines   4 Pipeline runs                   0 Settings "
+"Jobs ───────────────────────────────────────────────────────────────────────────"
+"                                                                                "
+"                      Logging in to https://ci.example.com…                     "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"  ╔ Log in · Keycloak / OpenID Connect ══════════════════════════════════════╗  "
+"  ║                                                                          ║  "
+"  ║  Contacting the identity provider…                                       ║  "
+"  ║                                                                          ║  "
+"  ║  o open in browser   b browser login instead   r try again   Esc cancel  ║  "
+"  ╚══════════════════════════════════════════════════════════════════════════╝  "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"────────────────────────────────────────────────────────────────────────────────"
+" o  open in browser   b  device code/browser   r  try again   Esc  cancel       "

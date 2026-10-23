@@ -1,0 +1,28 @@
+---
+source: tests/render.rs
+expression: render(&app).backend()
+---
+" Leeroy  ○ not connected                                              h/?  help "
+" 1 Jobs   2 Builds   3 Pipelines   4 Pipeline runs                   0 Settings "
+"Settings · unsaved changes · more ↓ ────────────────────────────────────────────"
+"   Config file       /home/user/.config/leeroy/config.toml                      "
+"   Connection        not configured                                             "
+"                                                                                "
+" Jenkins                                                                        "
+"   Jenkins URL       https://ci.example.com                                     "
+" ▶ Skip TLS verify   on (insecure)                                              "
+"   Proxy URL         (not set; direct connection)                               "
+"   Authentication ╔ Quit Leeroy? ════════════════════════════╗                  "
+"   Detect login   ║                                          ║g in              "
+"                  ║  Unsaved settings changes will be lost.  ║                  "
+"   Additional HTTP║                                          ║                  "
+"   + add header   ║  y / Enter quit     n / Esc stay         ║                  "
+"                  ╚══════════════════════════════════════════╝                  "
+" Application                                                                    "
+"   Auto-refresh      on                                                         "
+"   Refresh every     10 s (default)                                             "
+"                                                                                "
+"   Not saved yet: Ctrl-S saves, Ctrl-D discards                                 "
+"                                                                                "
+"────────────────────────────────────────────────────────────────────────────────"
+" y/Enter  quit   n/Esc  stay                                                    "

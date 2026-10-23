@@ -8,6 +8,7 @@ Type "0"
 Enter
 Type "http://127.0.0.1:8099"
 Enter
+Ctrl+S
 Escape
 Sleep 1s
 Show

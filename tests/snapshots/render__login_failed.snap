@@ -1,0 +1,28 @@
+---
+source: tests/render.rs
+expression: render(&app).backend()
+---
+" Leeroy  ◌ https://ci.example.com · logging in…                       h/?  help "
+" 1 Jobs   2 Builds   3 Pipelines   4 Pipeline runs                   0 Settings "
+"Jobs ───────────────────────────────────────────────────────────────────────────"
+"                                                                                "
+"                      Logging in to https://ci.example.com…                     "
+"                                                                                "
+"  ╔ Log in · Keycloak / OpenID Connect ══════════════════════════════════════╗  "
+"  ║                                                                          ║  "
+"  ║  The login didn't work:                                                  ║  "
+"  ║  device login refused: Client is not allowed to initiate OAuth 2.0       ║  "
+"  ║  Device Authorization Grant. The flow is disabled for the client.        ║  "
+"  ║  (unauthorized_client)                                                   ║  "
+"  ║                                                                          ║  "
+"  ║  Device login is off for this client: turn on "OAuth 2.0 Device          ║  "
+"  ║  Authorization Grant" in Keycloak's client settings, or press b for the  ║  "
+"  ║  browser login.                                                          ║  "
+"  ║                                                                          ║  "
+"  ║  o open in browser   b browser login instead   r try again   Esc close   ║  "
+"  ╚══════════════════════════════════════════════════════════════════════════╝  "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"────────────────────────────────────────────────────────────────────────────────"
+" o  open in browser   b  device code/browser   r  try again   Esc  cancel       "

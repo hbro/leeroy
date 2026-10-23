@@ -1,0 +1,28 @@
+---
+source: tests/render.rs
+expression: screen
+---
+" Leeroy  ✕ https://ci.example.com · not connected                     h/?  help "
+" 1 Jobs   2 Builds   3 Pipelines   4 Pipeline runs                   0 Settings "
+"Settings · more ↓ ──────────────────────────────────────────────────────────────"
+"   Config file       /home/user/.config/leeroy/config.toml                      "
+"   Connection        ✕ not connected (r: retry)                                 "
+"                     redirected to a login page (https://sso.example.com): the  "
+"                     server in front of Jenkins doesn't accept the token (it    "
+"                     has to allow bearer tokens, e.g. oauth2-proxy              "
+"                     --skip-jwt-bearer-tokens)                                  "
+"                                                                                "
+" Jenkins                                                                        "
+" ▶ Jenkins URL       https://ci.example.com                                     "
+"   Skip TLS verify   off                                                        "
+"   Proxy URL         (not set; direct connection)                               "
+"   Authentication    headers only (default)                                     "
+"   Detect login      Enter: detect how Jenkins logs in, and log in              "
+"                                                                                "
+"   Additional HTTP Headers                                                      "
+"   + add header                                                                 "
+"                                                                                "
+"   Base URL of the Jenkins instance, e.g. https://jenkins.example.com           "
+"   For authentication, use the Authentication setting below rather than         "
+"────────────────────────────────────────────────────────────────────────────────"
+" Enter  edit/toggle   C-s  save   C-d  discard                                  "

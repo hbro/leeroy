@@ -1,0 +1,28 @@
+---
+source: tests/render.rs
+expression: render(&app).backend()
+---
+" Leeroy  ○ not connected                                              h/?  help "
+" 1 Jobs   2 Builds   3 Pipelines   4 Pipeline runs                   0 Settings "
+"Settings · more ↓ ──────────────────────────────────────────────────────────────"
+"   Config file       /home/user/.config/leeroy/config.toml                      "
+"   Connection        not configured                                             "
+"                                                                                "
+" Jenkins                                                                        "
+"   Jenkins URL       https://ci.example.com                                     "
+"   Skip TLS verify   off                                                        "
+"   Proxy URL         (not set; direct connection)                               "
+"   Authentication    username + password                                        "
+"   Detect login      Enter: detect how Jenkins logs in, and log in              "
+"   Username          me                                                         "
+"   Password from     keyring (default)                                          "
+" ▶ Password          in the OS keyring (Enter: set or replace)                  "
+"                                                                                "
+"   Additional HTTP Headers                                                      "
+"   + add header                                                                 "
+"                                                                                "
+"                                                                                "
+"   The password or a Jenkins API token (Jenkins: your user → Security → API     "
+"   Token).                                                                      "
+"────────────────────────────────────────────────────────────────────────────────"
+" Enter  edit/toggle   C-s  save   C-d  discard                                  "

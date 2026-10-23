@@ -1,4 +1,8 @@
-Settings can be edited in the TUI (Settings tab: `0`) and are saved to a TOML file:
+Settings can be edited in the TUI (Settings tab: `0`): changes are kept until you
+save them with `Ctrl-S` (or the **Save** row; `Ctrl-D` or **Discard** drops
+them), then
+written to a TOML file and used, reconnecting if they change the connection.
+Quitting with unsaved changes asks first. The file is:
 
 1. `--config FILE`, if given
 2. else `$LEEROY_CONFIG`
@@ -18,8 +22,13 @@ variable is set to an absolute path; otherwise the config lives in
 url = "https://jenkins.example.com"
 skip_tls_verify = false  # default; see "TLS" below
 
-[jenkins.headers]  # see Authentication on the Connecting page; the file is written with mode 0600
-Authorization = "Basic bWU6czNjcmV0"
+[jenkins.headers]  # sent with every request; the file is written with mode 0600
+X-Forwarded-User = "me"
+
+[auth]             # see Authentication on the Connecting page
+mode = "basic"     # headers (default) | anonymous | basic | oidc
+username = "me"
+password_store = "keyring"  # default; or "command" (password_command) / "file" (password)
 
 [proxy]
 url = "socks5h://user:pass@bastion.example.com:1080"
@@ -43,6 +52,10 @@ can't be edited in the TUI while set):
 | Header `<Name>` | `LEEROY_JENKINS_HEADERS_<NAME>` (`-` written as `_`, e.g. `LEEROY_JENKINS_HEADERS_X_API_KEY`) |
 | Skip TLS verify | `LEEROY_JENKINS_SKIP_TLS_VERIFY` (`true`/`false`, `1`/`0`, `yes`/`no`, `on`/`off`) |
 | Proxy    | `LEEROY_PROXY_URL`        |
+| Authentication | `LEEROY_AUTH_MODE` (`headers`/`anonymous`/`basic`/`oidc`) |
+| Username, password from, password command | `LEEROY_AUTH_USERNAME`, `LEEROY_AUTH_PASSWORD_STORE`, `LEEROY_AUTH_PASSWORD_COMMAND` |
+| Password | `LEEROY_AUTH_PASSWORD` (env var only: never saved) |
+| Issuer URL, client ID, login with, keep login in | `LEEROY_AUTH_ISSUER`, `LEEROY_AUTH_CLIENT_ID`, `LEEROY_AUTH_LOGIN_FLOW`, `LEEROY_AUTH_TOKEN_STORE` |
 | Auto-refresh | `LEEROY_REFRESH_AUTO` |
 | Refresh interval | `LEEROY_REFRESH_INTERVAL` (seconds, ≥ 1) |
 | Confirm quit | `LEEROY_UI_CONFIRM_QUIT` |
@@ -52,9 +65,8 @@ can't be edited in the TUI while set):
 
 Saving from the TUI keeps comments and unknown keys in the file.
 
-Headers (authentication) and the proxy are explained under
-[Connecting](Connecting.md). Authentication is currently plain HTTP headers;
-it's likely to become more user-friendly in the near future.
+Authentication, headers and the proxy are explained under
+[Connecting](Connecting.md).
 
 ## TLS
 

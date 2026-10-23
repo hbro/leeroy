@@ -10,8 +10,32 @@ A release's section is used as its GitHub release notes.
 
 ## [Unreleased]
 
+### Added
+
+- Authentication modes (Authentication in the settings, `auth.mode`):
+  `anonymous`; `basic`, a user name with a password or Jenkins API token,
+  kept in the OS keyring, read from a command (e.g. `pass show …`) or stored
+  in the config file (`$LEEROY_AUTH_PASSWORD` too); and `oidc`, logging in
+  through Keycloak or another OpenID Connect provider, with a code to enter in
+  any browser or by opening the browser, for an SSO proxy in front of Jenkins
+  that accepts bearer tokens. The login is kept (OS keyring, a private file or
+  only in memory) and its token refreshed before it expires. Custom headers
+  are still sent in every mode, and `headers` (the default) works as before.
+- **Detect login** in the settings finds out how the Jenkins URL logs in
+  (anonymous, a Jenkins login or its SSO plugin, basic auth, or a single
+  sign-on proxy through Keycloak, whose client it tries), says what to do
+  (e.g. create an API token, or what to ask the Keycloak admin) and logs in
+  with it.
+- A failed login keeps its window open with the provider's reason and a hint;
+  `r` tries again, `b` switches between the code and the browser login.
+- The `i` overlay says how Leeroy logs in.
+
 ### Changed
 
+- Settings changes are kept until you save them: `Ctrl-S` or the Save row
+  (`Ctrl-D` or Discard drops them). Quitting with unsaved changes asks first. `t` still
+  saves the timestamp style right away.
+- The settings list scrolls with the selection when it doesn't fit.
 - The documentation moved from the README to the
   [wiki](https://github.com/hbro/leeroy/wiki), generated from `docs/` in the
   repository; release archives include it as `docs/*.md`.

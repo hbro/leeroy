@@ -1,8 +1,11 @@
 //! Snapshot tests: render the UI into an in-memory buffer and compare to
 //! `tests/snapshots/*.snap`. Review changes with `cargo insta review`.
 
+use std::time::Duration;
+
 use leeroy::{
     app::{Action, App, ConnectionStatus, Effect, SettingsState, Tab, View},
+    auth::{LoginFlow, LoginPrompt, Resolved},
     builds::{Build, BuildPage, BuildRef, BuildStep, Change, Stage, StageStatus},
     config::{SettingKey, Settings},
     console::ConsoleChunk,
@@ -268,11 +271,13 @@ fn settings_empty() {
 fn settings_theme_selected() {
     let mut app = test_app();
     app.terminal_appearance = Some(Appearance::Light);
-    // Next to last: Theme, with its docs below.
+    // Theme (before Timestamps, Save, Discard), with its docs below.
     apply(
         &mut app,
         &[
             Action::SwitchTab(Tab::Settings),
+            Action::SelectPrev,
+            Action::SelectPrev,
             Action::SelectPrev,
             Action::SelectPrev,
         ],
@@ -294,12 +299,16 @@ fn switching_theme_recolours_right_away() {
         &mut app,
         &[
             Action::SwitchTab(Tab::Settings),
-            Action::SelectPrev,
-            Action::SelectPrev,
+            Action::SelectPrev, // Discard
+            Action::SelectPrev, // Save
+            Action::SelectPrev, // Timestamps
+            Action::SelectPrev, // Theme
         ],
     );
     assert_eq!(bar_bg(&app), Color::White, "auto on a dark terminal");
     apply(&mut app, &[Action::StartEdit, Action::StartEdit]); // auto → dark → light
+    assert_eq!(bar_bg(&app), Color::White, "not before it's saved");
+    apply(&mut app, &[Action::SaveChanges]);
     assert_eq!(app.settings.file.get(SettingKey::Theme), Some("light"));
     assert_eq!(bar_bg(&app), Color::Black);
 }
@@ -310,7 +319,8 @@ fn settings_editing_header() {
         Action::SwitchTab(Tab::Settings),
         Action::SelectNext,
         Action::SelectNext,
-        Action::SelectNext, // "+ add header", after URL / TLS / proxy
+        Action::SelectNext,
+        Action::SelectNext, // "+ add header", after URL / TLS / proxy / auth
         Action::StartEdit,
     ];
     actions.extend(type_str("Authorization: Basic s3cret"));
@@ -332,7 +342,11 @@ fn settings_saved_with_env_header() {
         .set_header("X-Forwarded-User", Some("me".into()));
     let mut actions = vec![Action::SwitchTab(Tab::Settings), Action::StartEdit];
     actions.extend(type_str("https://ci.example.com"));
-    actions.extend([Action::ConfirmEdit, Action::SettingsSaved(Ok(()))]);
+    actions.extend([
+        Action::ConfirmEdit,
+        Action::SaveChanges,
+        Action::SettingsSaved(Ok(())),
+    ]);
     apply(&mut app, &actions);
     let screen = format!("{}", render(&app).backend());
     assert!(!screen.contains("from-env"), "env header value shown");
@@ -1511,4 +1525,202 @@ fn list_speed() {
     time("run view (tree)", &mut app, Action::SelectNext);
     app.update(Action::ToggleRunView);
     time("run view (boxes)", &mut app, Action::SelectNext);
+}
+
+// --- Authentication ---------------------------------------------------------
+
+fn auth_app(pairs: &[(SettingKey, &str)]) -> App {
+    let mut app = test_app();
+    app.settings.file.set(
+        SettingKey::JenkinsUrl,
+        Some("https://ci.example.com".into()),
+    );
+    for (key, value) in pairs {
+        app.settings.file.set(*key, Some((*value).into()));
+    }
+    app
+}
+
+#[test]
+fn settings_basic_auth() {
+    let mut app = auth_app(&[
+        (SettingKey::AuthMode, "basic"),
+        (SettingKey::AuthUsername, "me"),
+    ]);
+    apply(&mut app, &[Action::SwitchTab(Tab::Settings)]);
+    for _ in 0..7 {
+        app.update(Action::SelectNext); // the Password row
+    }
+    insta::assert_snapshot!(render(&app).backend());
+}
+
+#[test]
+fn settings_oidc_auth() {
+    let mut app = auth_app(&[
+        (SettingKey::AuthMode, "oidc"),
+        (
+            SettingKey::AuthIssuer,
+            "https://sso.example.com/realms/acme",
+        ),
+        (SettingKey::AuthClientId, "leeroy"),
+    ]);
+    apply(&mut app, &[Action::SwitchTab(Tab::Settings)]);
+    for _ in 0..3 {
+        app.update(Action::SelectNext); // Authentication
+    }
+    insta::assert_snapshot!(render(&app).backend());
+}
+
+fn logging_in() -> App {
+    let mut app = auth_app(&[
+        (SettingKey::AuthMode, "oidc"),
+        (
+            SettingKey::AuthIssuer,
+            "https://sso.example.com/realms/acme",
+        ),
+        (SettingKey::AuthClientId, "leeroy"),
+    ]);
+    app.start();
+    app.update(Action::CredentialsResolved {
+        generation: 1,
+        result: Ok(Resolved::LoginNeeded),
+    });
+    app
+}
+
+#[test]
+fn login_waiting_for_the_provider() {
+    insta::assert_snapshot!(render(&logging_in()).backend());
+}
+
+#[test]
+fn login_device_code() {
+    let mut app = logging_in();
+    app.update(Action::LoginStarted {
+        generation: 1,
+        prompt: LoginPrompt {
+            flow: LoginFlow::Device,
+            url: "https://sso.example.com/realms/acme/device".into(),
+            complete_url: None,
+            user_code: Some("WDJB-MJHT".into()),
+            expires_at: Some(app.wall_now + Duration::from_secs(600)),
+        },
+    });
+    let screen = format!("{}", render(&app).backend());
+    assert!(screen.contains("WDJB-MJHT"), "{screen}");
+    insta::assert_snapshot!(screen);
+}
+
+#[test]
+fn login_browser() {
+    let mut app = logging_in();
+    app.update(Action::SwitchLoginFlow);
+    app.update(Action::LoginStarted {
+        generation: 1,
+        prompt: LoginPrompt {
+            flow: LoginFlow::Browser,
+            url: "https://sso.example.com/realms/acme/protocol/openid-connect/auth?response_type=code&client_id=leeroy&redirect_uri=http%3A%2F%2F127.0.0.1%3A40123%2Fcallback".into(),
+            complete_url: None,
+            user_code: None,
+            expires_at: None,
+        },
+    });
+    insta::assert_snapshot!(render(&app).backend());
+}
+
+#[test]
+fn settings_unsaved_changes() {
+    let mut app = auth_app(&[]);
+    app.settings
+        .file
+        .set_header("Authorization", Some("Basic bWU6dG9r".into()));
+    apply(
+        &mut app,
+        &[
+            Action::SwitchTab(Tab::Settings),
+            Action::SelectNext,
+            Action::SelectNext,
+            Action::SelectNext,
+            Action::StartEdit, // Authentication: headers → anonymous
+        ],
+    );
+    app.settings.selected = app.settings.rows().len() - 2; // Save
+    let screen = format!("{}", render(&app).backend());
+    assert!(screen.contains("not sent"), "{screen}");
+    insta::assert_snapshot!(screen);
+}
+
+#[test]
+fn quit_with_unsaved_changes() {
+    let mut app = auth_app(&[]);
+    apply(
+        &mut app,
+        &[
+            Action::SwitchTab(Tab::Settings),
+            Action::SelectNext,
+            Action::StartEdit, // Skip TLS verify: on
+            Action::RequestQuit,
+        ],
+    );
+    insta::assert_snapshot!(render(&app).backend());
+}
+
+#[test]
+fn login_failed() {
+    let mut app = logging_in();
+    app.update(Action::LoginFinished {
+        generation: 1,
+        result: Err(
+            "device login refused: Client is not allowed to initiate OAuth 2.0 \
+                     Device Authorization Grant. The flow is disabled for the client. \
+                     (unauthorized_client)"
+                .into(),
+        ),
+    });
+    insta::assert_snapshot!(render(&app).backend());
+}
+
+#[test]
+fn login_detection_sso_proxy() {
+    use leeroy::detect::{Detection, DeviceCheck, Sso};
+    let mut app = auth_app(&[]);
+    apply(&mut app, &[Action::SwitchTab(Tab::Settings)]);
+    app.settings.selected = 4; // Detect login
+    app.update(Action::StartEdit);
+    app.update(Action::LoginDetected {
+        url: "https://ci.example.com".into(),
+        result: Ok(Detection::SsoProxy {
+            sso: Sso {
+                login_at: "https://sso.example.com".into(),
+                issuer: Some("https://sso.example.com/realms/acme".into()),
+                client_id: Some("ci-proxy".into()),
+                device: DeviceCheck::Refused(
+                    "device login refused: Invalid client or Invalid client credentials \
+                     (unauthorized_client)"
+                        .into(),
+                ),
+            },
+            proxy: Some("oauth2-proxy".into()),
+        }),
+    });
+    insta::assert_snapshot!(render(&app).backend());
+}
+
+#[test]
+fn settings_show_why_the_connection_failed() {
+    let mut app = auth_app(&[]);
+    app.start();
+    app.update(Action::ConnectFinished {
+        generation: 1,
+        result: Err(
+            "redirected to a login page (https://sso.example.com): the server in \
+                     front of Jenkins doesn't accept the token (it has to allow bearer \
+                     tokens, e.g. oauth2-proxy --skip-jwt-bearer-tokens)"
+                .into(),
+        ),
+    });
+    apply(&mut app, &[Action::SwitchTab(Tab::Settings)]);
+    let screen = format!("{}", render(&app).backend());
+    assert!(screen.contains("--skip-jwt-bearer-tokens"), "{screen}");
+    insta::assert_snapshot!(screen);
 }

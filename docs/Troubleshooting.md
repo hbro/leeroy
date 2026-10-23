@@ -38,8 +38,9 @@ you type in the settings are never logged; job names and host names are, so
 look through a log before sharing it. Stay below `trace`, where libraries log
 much more of what goes over the wire.
 
-Also check the header (connection state, `⚠ TLS NOT VERIFIED`), the settings
-view (which proxy and theme are in effect) and `i` (how Leeroy connects).
+Also check the settings view (Connection: why it isn't connected; which proxy
+and theme are in effect), the header (`⚠ TLS NOT VERIFIED`) and `i` (how
+Leeroy connects).
 
 ## Common problems
 
@@ -48,9 +49,11 @@ view (which proxy and theme are in effect) and `i` (how Leeroy connects).
 The error, `authentication failed (HTTP 401/403 …)`, says whether Jenkins or a
 server in front of it refused, and which login it asks for. Usual causes:
 
-- The credentials contain a newline (`echo … | base64` instead of
-  `printf '%s' …`, or a multi-line `pass` entry). Leeroy rejects such `Basic`
-  values up front.
+- Wrong user name or password. With a Jenkins that logs in through Keycloak
+  (or another SSO), the password has to be a Jenkins API token.
+- The credentials contain a newline (a multi-line `pass` entry, or
+  `echo … | base64` for a hand-made header instead of `printf '%s' …`). Leeroy
+  rejects those up front.
 - A redirect to another scheme, host or port (e.g. `http://` → `https://`):
   the `Authorization` header is dropped on such redirects for safety. The
   error names the redirect target; use that as the Jenkins URL.
@@ -60,6 +63,50 @@ server in front of it refused, and which login it asks for. Usual causes:
 With `RUST_LOG=debug` (see [More detail](#more-detail)) the log shows which
 header *names* were sent, the final URL and the response status. See
 [Authentication](Connecting.md#authentication).
+
+### Redirected to a login page
+
+The error is `redirected to a login page (…)`: a server in front of Jenkins
+(an SSO proxy) sent its browser login page instead of the API's answer. With
+auth mode `oidc` it didn't accept the token: it has to allow bearer tokens
+(oauth2-proxy: `--skip-jwt-bearer-tokens`, with Keycloak as a trusted issuer).
+Otherwise, try auth mode `oidc`. See [Authentication](Connecting.md#authentication).
+
+### No password in the OS keyring
+
+`no password in the OS keyring yet`: set it with the Password row in the
+settings (`0`). `no OS keyring available`: there's no keyring service (a
+server without a desktop session, WSL, a container): use `password_store =
+"command"` or `"file"` (and for OpenID Connect `token_store = "file"`), or
+`$LEEROY_AUTH_PASSWORD`.
+
+### Password command fails
+
+`the password command failed (exit code N)`, `didn't finish`, or `printed
+nothing`: run the command yourself to check it. Leeroy runs it without a
+terminal, so it can't ask for anything there: with `pass`, the GPG key has to
+be unlocked by gpg-agent already, or use a graphical pinentry
+(`pinentry-program` in `~/.gnupg/gpg-agent.conf`). Its output is never shown
+or logged; only the first line is used.
+
+### Login fails or keeps asking
+
+The login window stays open with the provider's reason and a hint; `r`
+tries again, `b` switches between the code and the browser login.
+
+- `device login refused`, `the identity provider doesn't offer device login`:
+  turn on "OAuth 2.0 Device Authorization Grant" for the Keycloak client, or
+  set `login_flow = "browser"`.
+- `invalid_client`, `unauthorized_client`: the client ID is wrong, or the
+  client isn't public (client authentication has to be off).
+- The browser shows a Keycloak error about the redirect URI: add
+  `http://127.0.0.1/*` to the client's valid redirect URIs.
+- `no OpenID configuration at …`: the issuer URL is wrong; for Keycloak it's
+  `https://<host>/realms/<realm>`.
+- The login window comes back after a while: the Keycloak session ended
+  (its SSO session idle or max time), so the refresh token stopped working.
+  That's Keycloak's setting, not Leeroy's.
+- With `token_store = "memory"`, Leeroy asks at every start by design.
 
 ### Untrusted TLS certificate
 
@@ -81,9 +128,9 @@ inside the proxied network, use `socks5h://` (or `socks4a://`): with
 ### Username and token settings rejected at startup
 
 The error starts with `jenkins.username / jenkins.token … were replaced by
-custom headers`. Those settings (and their env vars) were removed in favour of
-headers. Remove them and add an `Authorization: Basic` header instead; the
-message shows how. See [Authentication](Connecting.md#authentication).
+the [auth] settings`. Those old settings (and their env vars) are gone:
+remove them and set `auth.mode = "basic"` with `auth.username`; the message
+shows how. See [Authentication](Connecting.md#authentication).
 
 ### Leeroy uses a different config file than expected
 

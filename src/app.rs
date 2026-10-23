@@ -4,6 +4,10 @@ use std::{
 };
 
 use crate::{
+    auth::{
+        AuthConfig, Credentials, LoginFlow, LoginPrompt, PasswordStore, Resolved, Secret,
+        SecretStore, TokenSet,
+    },
     builds::{BuildLoad, BuildPage, BuildRef, BuildStep, BuildView},
     config::{Section, SettingKey, Settings, header_env_var, parse_header, redact_url},
     console::{ConsoleChunk, ConsoleLoad, ConsoleView},
@@ -109,8 +113,12 @@ pub enum Action {
     CursorHome,
     CursorEnd,
     ClearInput,
-    /// Store the edited value and save the config file.
+    /// Keep the edited value (in the draft: see [`Action::SaveChanges`]).
     ConfirmEdit,
+    /// Save the settings view's edits (`Ctrl-S`, the Save row) and use them.
+    SaveChanges,
+    /// Drop them.
+    DiscardChanges,
     /// Outcome of [`Effect::SaveSettings`]; `Err` holds a printable message.
     SettingsSaved(Result<(), String>),
     /// Outcome of [`Effect::Connect`] attempt `generation`.
@@ -118,6 +126,37 @@ pub enum Action {
         generation: u64,
         result: Result<ServerInfo, String>,
     },
+    /// Outcome of [`Effect::ResolveCredentials`].
+    CredentialsResolved {
+        generation: u64,
+        result: Result<Resolved, String>,
+    },
+    /// [`Effect::Login`] is under way: what to show on the login overlay.
+    LoginStarted {
+        generation: u64,
+        prompt: LoginPrompt,
+    },
+    /// Outcome of [`Effect::Login`] (the executor has stored the tokens).
+    LoginFinished {
+        generation: u64,
+        result: Result<TokenSet, String>,
+    },
+    /// Outcome of [`Effect::RefreshToken`].
+    TokenRefreshed {
+        generation: u64,
+        result: Result<TokenSet, String>,
+    },
+    /// `b` on the login overlay: log in the other way (device ⇄ browser).
+    SwitchLoginFlow,
+    /// Outcome of [`Effect::DetectLogin`] for `url`.
+    LoginDetected {
+        url: String,
+        result: Result<crate::detect::Detection, String>,
+    },
+    /// Enter on the detection overlay: put its suggestion in the draft.
+    ApplyDetection,
+    /// Outcome of [`Effect::StoreSecret`]; reconnects once it's stored.
+    SecretStored(Result<(), String>),
     /// Outcome of [`Effect::FetchJobs`] for connection `generation`.
     JobsFetched {
         generation: u64,
@@ -169,6 +208,44 @@ pub enum Effect {
     Connect {
         generation: u64,
         config: ConnectionConfig,
+    },
+    /// Get the credentials `config.auth` needs (password from its store;
+    /// stored or `tokens` refreshed); answer with
+    /// [`Action::CredentialsResolved`]. `password`: from `$LEEROY_AUTH_PASSWORD`
+    /// or the config file, when that's where it comes from. `tokens`: the
+    /// ones this session already has.
+    ResolveCredentials {
+        generation: u64,
+        config: ConnectionConfig,
+        password: Option<Secret>,
+        tokens: Option<TokenSet>,
+    },
+    /// Log in with the OpenID Connect provider; answer with
+    /// [`Action::LoginStarted`], then [`Action::LoginFinished`]. Replaces
+    /// (cancels) a login under way.
+    Login {
+        generation: u64,
+        config: ConnectionConfig,
+        flow: LoginFlow,
+    },
+    /// Stop the login under way.
+    CancelLogin,
+    /// Find out how `config.url` logs in; answer with [`Action::LoginDetected`].
+    DetectLogin {
+        config: ConnectionConfig,
+    },
+    /// Get a new access token; answer with [`Action::TokenRefreshed`].
+    RefreshToken {
+        generation: u64,
+        config: ConnectionConfig,
+        refresh: Secret,
+    },
+    /// Write (`None`: delete) a secret; answer with [`Action::SecretStored`]
+    /// (then the connection is made again, with it).
+    StoreSecret {
+        store: SecretStore,
+        account: String,
+        secret: Option<Secret>,
     },
     /// Load the job list; answer with [`Action::JobsFetched`]. `generation`
     /// is the connection it belongs to.
@@ -373,6 +450,10 @@ impl View {
 pub enum Context {
     /// "Quit Leeroy?" prompt, on top of everything else.
     ConfirmQuit,
+    /// Logging in with the OpenID Connect provider (code / browser).
+    Login,
+    /// What login detection found.
+    Detect,
     /// "Start a run?" prompt.
     ConfirmStart,
     /// The run's promotions (`p`).
@@ -416,6 +497,8 @@ impl Context {
             Context::Runs | Context::RunsFiltered => "Pipeline runs",
             Context::Run => "Run",
             Context::ConfirmQuit => "Quit?",
+            Context::Login => "Log in",
+            Context::Detect => "Detect login",
             Context::ConfirmStart => "Start?",
             Context::Promote => "Promote",
             Context::Build => "Build",
@@ -446,6 +529,8 @@ impl Context {
             | Context::RunsFilter
             | Context::Run
             | Context::ConfirmQuit
+            | Context::Login
+            | Context::Detect
             | Context::ConfirmStart
             | Context::Promote
             | Context::Build
@@ -474,7 +559,11 @@ impl Context {
         self.captures_input()
             || matches!(
                 self,
-                Context::ConfirmQuit | Context::ConfirmStart | Context::Promote
+                Context::ConfirmQuit
+                    | Context::Login
+                    | Context::Detect
+                    | Context::ConfirmStart
+                    | Context::Promote
             )
     }
 }
@@ -483,9 +572,21 @@ impl Context {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConnectionStatus {
     NotConfigured,
-    Connecting { url: String },
-    Connected { url: String, info: ServerInfo },
-    Failed { url: String, error: String },
+    /// Getting a password or token, or waiting for a login.
+    Authenticating {
+        url: String,
+    },
+    Connecting {
+        url: String,
+    },
+    Connected {
+        url: String,
+        info: ServerInfo,
+    },
+    Failed {
+        url: String,
+        error: String,
+    },
 }
 
 /// One row of the settings view.
@@ -496,13 +597,25 @@ pub enum SettingsRow {
     Header(String),
     /// "+ add header".
     AddHeader,
+    /// The basic-auth password (stored per `auth.password_store`).
+    Password,
+    /// Find out how the Jenkins URL logs in, and suggest settings.
+    DetectLogin,
+    /// Save the edits (shown while there are any).
+    Save,
+    /// Drop the edits.
+    Discard,
 }
 
 impl SettingsRow {
     pub fn section(&self) -> Section {
         match self {
             SettingsRow::Setting(key) => key.section(),
-            SettingsRow::Header(_) | SettingsRow::AddHeader => Section::Jenkins,
+            SettingsRow::Header(_)
+            | SettingsRow::AddHeader
+            | SettingsRow::Password
+            | SettingsRow::DetectLogin => Section::Jenkins,
+            SettingsRow::Save | SettingsRow::Discard => Section::Application,
         }
     }
 }
@@ -518,8 +631,14 @@ pub enum StatusMessage {
 pub struct SettingsState {
     /// Config file location.
     pub path: PathBuf,
-    /// Values from (and saved to) the config file.
+    /// Values from (and saved to) the config file: what Leeroy uses.
     pub file: Settings,
+    /// The settings view's edits, not saved yet (`None`: nothing edited
+    /// since the last save). Saved with [`Action::SaveChanges`].
+    pub draft: Option<Settings>,
+    /// A basic-auth password typed for the keyring, stored on save
+    /// (`Some(None)`: remove it).
+    pub pending_password: Option<Option<Secret>>,
     /// Values from env vars. They win over `file` and can't be edited here.
     pub env: Settings,
     /// Conventional proxy env vars, the fallback when no proxy is configured.
@@ -535,6 +654,8 @@ impl SettingsState {
         Self {
             path,
             file,
+            draft: None,
+            pending_password: None,
             env,
             proxy_env: ProxyEnv::default(),
             selected: 0,
@@ -543,26 +664,73 @@ impl SettingsState {
         }
     }
 
-    /// Rows in display order: fixed settings, then headers, then "+ add header".
+    /// Rows in display order: fixed settings (the auth ones of the current
+    /// mode, with the password or log-in row), then headers, then "+ add
+    /// header".
     pub fn rows(&self) -> Vec<SettingsRow> {
+        let effective = &self.edited();
         let in_section = |section: Section| {
             SettingKey::ALL
                 .into_iter()
-                .filter(move |key| key.section() == section)
+                .filter(move |key| key.section() == section && key.applies(effective))
                 .map(SettingsRow::Setting)
         };
         // Jenkins connection (with its headers), then the application settings.
         let mut rows: Vec<SettingsRow> = in_section(Section::Jenkins).collect();
+        if effective.get(SettingKey::JenkinsUrl).is_some()
+            && let Some(at) = rows
+                .iter()
+                .position(|r| *r == SettingsRow::Setting(SettingKey::AuthMode))
+        {
+            rows.insert(at + 1, SettingsRow::DetectLogin);
+        }
+        match effective.auth_config() {
+            AuthConfig::Basic(basic) if basic.store != PasswordStore::Command => {
+                rows.push(SettingsRow::Password);
+            }
+            _ => {}
+        }
         rows.extend(
-            self.effective()
+            effective
                 .jenkins
                 .headers
-                .into_keys()
+                .keys()
+                .cloned()
                 .map(SettingsRow::Header),
         );
         rows.push(SettingsRow::AddHeader);
         rows.extend(in_section(Section::Application));
+        rows.extend([SettingsRow::Save, SettingsRow::Discard]);
         rows
+    }
+
+    /// The file layer as edited in the settings view (saved or not).
+    pub fn draft(&self) -> &Settings {
+        self.draft.as_ref().unwrap_or(&self.file)
+    }
+
+    fn draft_mut(&mut self) -> &mut Settings {
+        self.draft.get_or_insert_with(|| self.file.clone())
+    }
+
+    /// What the settings view shows: env vars over the draft.
+    pub fn edited(&self) -> Settings {
+        self.draft().overlaid(&self.env)
+    }
+
+    /// Say whether there's something to save now.
+    fn note_changes(&mut self) {
+        let text = if self.unsaved() {
+            "Not saved yet: Ctrl-S saves, Ctrl-D discards"
+        } else {
+            NOTHING_UNSAVED
+        };
+        self.message = Some(StatusMessage::Info(text.into()));
+    }
+
+    /// Edits that haven't been saved.
+    pub fn unsaved(&self) -> bool {
+        self.draft.as_ref().is_some_and(|d| *d != self.file) || self.pending_password.is_some()
     }
 
     pub fn selected_row(&self) -> SettingsRow {
@@ -590,6 +758,18 @@ impl SettingsState {
         self.env.get(key).is_some()
     }
 
+    /// The basic-auth password Leeroy has without asking a store: from
+    /// `$LEEROY_AUTH_PASSWORD`, or the config file when that's its store.
+    pub fn known_password(&self) -> Option<Secret> {
+        if let Some(password) = &self.env.auth.password {
+            return Some(Secret::new(password.clone()));
+        }
+        let store = PasswordStore::parse(self.effective().get(SettingKey::AuthPasswordStore));
+        (store == PasswordStore::File)
+            .then(|| self.file.auth.password.clone().map(Secret::new))
+            .flatten()
+    }
+
     /// The system proxy that applies when no proxy setting is set.
     pub fn system_proxy(&self) -> SystemProxy {
         self.proxy_env
@@ -598,21 +778,32 @@ impl SettingsState {
 
     /// How to reach Jenkins with the current settings; `None` without a URL.
     pub fn connection_config(&self) -> Option<ConnectionConfig> {
-        let settings = self.effective();
+        self.config_for(self.effective())
+    }
+
+    /// The same for the settings as edited (not saved yet): for detecting
+    /// how the URL being entered logs in.
+    pub fn edited_connection_config(&self) -> Option<ConnectionConfig> {
+        self.config_for(self.edited())
+    }
+
+    fn config_for(&self, settings: Settings) -> Option<ConnectionConfig> {
         let url = settings.get(SettingKey::JenkinsUrl)?.to_owned();
         let proxy = match settings.get(SettingKey::ProxyUrl) {
             Some(proxy) => Some(proxy.to_owned()),
-            None => match self.system_proxy() {
+            None => match self.proxy_env.for_target(Some(&url)) {
                 SystemProxy::Proxy { url, .. } => Some(url),
                 SystemProxy::Bypassed { .. } | SystemProxy::None => None,
             },
         };
-        let headers = settings.jenkins.headers.clone().into_iter().collect();
+        let headers = settings.sent_headers();
         Some(ConnectionConfig {
             url,
             headers,
             proxy,
             skip_tls_verify: settings.is_on(SettingKey::JenkinsSkipTlsVerify),
+            auth: settings.auth_config(),
+            credentials: crate::auth::Credentials::None,
         })
     }
 }
@@ -640,6 +831,16 @@ pub struct App {
     pub connection: ConnectionStatus,
     /// Id of the latest connection attempt; results of older ones are stale.
     pub connection_generation: u64,
+    /// What this connection authenticates with (resolved when connecting).
+    pub credentials: Credentials,
+    /// This session's OpenID Connect login: reused when reconnecting.
+    pub session_login: Option<SessionLogin>,
+    /// The login overlay: a login under way.
+    pub login: Option<LoginState>,
+    /// The login detection overlay.
+    pub detection: Option<DetectState>,
+    /// An access token refresh is under way.
+    pub token_refreshing: bool,
     pub settings: SettingsState,
     pub jobs: JobsState,
     pub history: HistoryState,
@@ -701,6 +902,11 @@ impl App {
             info: InfoLoad::NotLoaded,
             connection: ConnectionStatus::NotConfigured,
             connection_generation: 0,
+            credentials: Credentials::None,
+            session_login: None,
+            login: None,
+            detection: None,
+            token_refreshing: false,
             auto_refresh: settings.effective().is_on(SettingKey::RefreshAuto),
             absolute_times: settings.effective().absolute_times(),
             time_zone: jiff::tz::TimeZone::UTC,
@@ -755,23 +961,173 @@ impl App {
         self.console = None;
         self.run = None;
         self.pending_promotions.clear();
+        self.credentials = Credentials::None;
+        self.login = None;
+        self.token_refreshing = false;
         let Some(config) = self.settings.connection_config() else {
             self.connection = ConnectionStatus::NotConfigured;
             return None;
         };
         // Display-only copy: credentials in the URL are never shown.
-        self.connection = ConnectionStatus::Connecting {
-            url: redact_url(&config.url),
+        let url = redact_url(&config.url);
+        if let Some(error) = self.auth_problem(&config) {
+            self.connection = ConnectionStatus::Failed { url, error };
+            return None;
+        }
+        if !config.auth.needs_credentials() {
+            self.connection = ConnectionStatus::Connecting { url };
+            return Some(Effect::Connect {
+                generation: self.connection_generation,
+                config,
+            });
+        }
+        self.connection = ConnectionStatus::Authenticating { url };
+        let tokens = match (&config.auth, &self.session_login) {
+            (AuthConfig::Oidc(oidc), Some(login))
+                if oidc.account().as_ref() == Ok(&login.account) =>
+            {
+                Some(login.tokens.clone())
+            }
+            _ => None,
         };
-        Some(Effect::Connect {
+        Some(Effect::ResolveCredentials {
             generation: self.connection_generation,
+            password: self.settings.known_password(),
+            tokens,
             config,
         })
+    }
+
+    /// Why the auth settings can't be used to connect (yet), if so.
+    fn auth_problem(&self, config: &ConnectionConfig) -> Option<String> {
+        match &config.auth {
+            AuthConfig::Basic(basic) => basic
+                .missing(self.settings.known_password().is_some())
+                .map(|missing| missing.message().into()),
+            AuthConfig::Oidc(oidc) => oidc.issuer_and_client().err(),
+            _ => None,
+        }
+    }
+
+    /// The connection settings plus this connection's credentials: what
+    /// every request uses.
+    pub fn request_config(&self) -> Option<ConnectionConfig> {
+        let mut config = self.settings.connection_config()?;
+        config.credentials = self.credentials.clone();
+        Some(config)
+    }
+
+    /// The keyring account / tokens file key and store of the OpenID Connect
+    /// login, `None` when kept in memory only (or not OpenID Connect).
+    fn token_store(&self) -> Option<(SecretStore, String)> {
+        let AuthConfig::Oidc(oidc) = self.settings.effective().auth_config() else {
+            return None;
+        };
+        Some((oidc.store.secret_store()?, oidc.account().ok()?))
+    }
+
+    /// Start (or restart) the login with `flow` for the current connection.
+    fn start_login(&mut self, flow: LoginFlow) -> Vec<Effect> {
+        let Some(config) = self.request_config() else {
+            return Vec::new();
+        };
+        self.login = Some(LoginState {
+            flow,
+            prompt: None,
+            error: None,
+        });
+        vec![Effect::Login {
+            generation: self.connection_generation,
+            config,
+            flow,
+        }]
+    }
+
+    /// Use `tokens` from now on (and keep them for reconnects).
+    fn use_tokens(&mut self, tokens: TokenSet) {
+        self.credentials = Credentials::Bearer(tokens.access.clone());
+        if let AuthConfig::Oidc(oidc) = self.settings.effective().auth_config()
+            && let Ok(account) = oidc.account()
+        {
+            self.session_login = Some(SessionLogin { account, tokens });
+        }
+    }
+
+    /// Credentials are there: check the connection with them.
+    fn connect_with_credentials(&mut self) -> Vec<Effect> {
+        let url = match &self.connection {
+            ConnectionStatus::Authenticating { url } => url.clone(),
+            _ => return Vec::new(),
+        };
+        self.connection = ConnectionStatus::Connecting { url };
+        self.request_config()
+            .map(|config| Effect::Connect {
+                generation: self.connection_generation,
+                config,
+            })
+            .into_iter()
+            .collect()
+    }
+
+    /// Authenticating failed: show why in the header.
+    fn auth_failed(&mut self, error: String) {
+        self.login = None;
+        if let ConnectionStatus::Authenticating { url } | ConnectionStatus::Connecting { url } =
+            &self.connection
+        {
+            self.connection = ConnectionStatus::Failed {
+                url: url.clone(),
+                error,
+            };
+        } else {
+            self.notice = Some(Notice::error(error, self.now));
+        }
+    }
+
+    /// `Tick`: refresh the access token shortly before it expires.
+    fn refresh_token_if_due(&mut self) -> Vec<Effect> {
+        if self.token_refreshing
+            || self.login.is_some()
+            || !matches!(self.connection, ConnectionStatus::Connected { .. })
+        {
+            return Vec::new();
+        }
+        let Some(SessionLogin { tokens, .. }) = &self.session_login else {
+            return Vec::new();
+        };
+        if !matches!(self.credentials, Credentials::Bearer(_)) || !tokens.refresh_due(self.wall_now)
+        {
+            return Vec::new();
+        }
+        let Some(refresh) = tokens.refresh.clone() else {
+            return self.start_login(self.login_flow());
+        };
+        let Some(config) = self.request_config() else {
+            return Vec::new();
+        };
+        self.token_refreshing = true;
+        vec![Effect::RefreshToken {
+            generation: self.connection_generation,
+            config,
+            refresh,
+        }]
+    }
+
+    /// The configured OpenID Connect login flow.
+    fn login_flow(&self) -> LoginFlow {
+        match self.settings.effective().auth_config() {
+            AuthConfig::Oidc(oidc) => oidc.flow,
+            _ => LoginFlow::Device,
+        }
     }
 
     pub fn context(&self) -> Context {
         if self.confirm_quit {
             Context::ConfirmQuit
+        } else if self.login.is_some() {
+            Context::Login
+        } else if self.detection.is_some() {
+            Context::Detect
         } else if self.confirm_start.is_some() {
             Context::ConfirmStart
         } else if self.promote.is_some() {
@@ -811,7 +1167,9 @@ impl App {
         match action {
             Action::Quit => self.running = false,
             Action::RequestQuit => {
-                if self.confirm_quit || !self.settings.effective().is_on(SettingKey::ConfirmQuit) {
+                let ask = self.settings.effective().is_on(SettingKey::ConfirmQuit)
+                    || self.settings.unsaved();
+                if self.confirm_quit || !ask {
                     self.running = false; // q q, or no confirmation wanted
                 } else {
                     self.confirm_quit = true;
@@ -833,7 +1191,7 @@ impl App {
                 let Some(start) = self.confirm_start.take() else {
                     return Vec::new();
                 };
-                let Some(config) = self.settings.connection_config() else {
+                let Some(config) = self.request_config() else {
                     return Vec::new();
                 };
                 if let Some(rerun) = start.rerun {
@@ -939,7 +1297,7 @@ impl App {
                     .iter()
                     .filter_map(|&i| list.promotions.get(i).cloned())
                     .collect();
-                let Some(config) = self.settings.connection_config() else {
+                let Some(config) = self.request_config() else {
                     return Vec::new();
                 };
                 return vec![Effect::Promote {
@@ -990,6 +1348,23 @@ impl App {
                     return self.fetch_pipelines();
                 }
             }
+            Action::OpenInBrowser if context == Context::Detect => {
+                if let Some(DetectState {
+                    url,
+                    result: Some(Ok(found)),
+                }) = &self.detection
+                    && let Some(url) = found.token_page(url)
+                {
+                    return vec![Effect::OpenBrowser { url }];
+                }
+            }
+            Action::OpenInBrowser if context == Context::Login => {
+                if let Some(prompt) = self.login.as_ref().and_then(|l| l.prompt.as_ref()) {
+                    return vec![Effect::OpenBrowser {
+                        url: prompt.open_url().to_owned(),
+                    }];
+                }
+            }
             Action::OpenInBrowser => {
                 return match self.browser_url() {
                     Some(url) => vec![Effect::OpenBrowser { url }],
@@ -1016,11 +1391,18 @@ impl App {
                     };
                 }
             }
-            Action::Back => self.back(),
+            Action::Back => {
+                self.back();
+                if context == Context::Login {
+                    return vec![Effect::CancelLogin];
+                }
+            }
             Action::Tick(now, wall) => {
                 self.now = now;
                 self.wall_now = wall;
-                return self.auto_refresh_if_due();
+                let mut effects = self.refresh_token_if_due();
+                effects.extend(self.auto_refresh_if_due());
+                return effects;
             }
             Action::ToggleTimestamps => {
                 self.absolute_times = !self.absolute_times;
@@ -1040,7 +1422,7 @@ impl App {
                 self.notice = Some(Notice::info(text.into(), self.now));
                 // Sticky: saved like a change in the settings view.
                 let value = self.absolute_times.then(|| "absolute".to_owned());
-                return self.commit(|file| file.set(SettingKey::Timestamps, value));
+                return self.save_now(|file| file.set(SettingKey::Timestamps, value.clone()));
             }
             Action::ToggleAutoRefresh => {
                 self.auto_refresh = !self.auto_refresh;
@@ -1149,6 +1531,11 @@ impl App {
                 // unconditionally (an older job's fetch is simply ignored).
                 self.build = Some(BuildView::new(job));
                 return self.build_effect().into_iter().collect();
+            }
+            Action::Refresh if context == Context::Login => {
+                if let Some(login) = &self.login {
+                    return self.start_login(login.flow);
+                }
             }
             Action::Refresh => return self.refresh(),
             Action::SelectNext
@@ -1411,30 +1798,38 @@ impl App {
                     SettingsRow::Setting(key) if key.choices().is_some() => {
                         // Next value, wrapping; the first (default) = unset.
                         let choices = key.choices().expect("checked");
-                        let current = s.file.get(key).unwrap_or(choices[0]);
+                        let current = s.draft().get(key).unwrap_or(choices[0]);
                         let i = choices.iter().position(|c| *c == current).unwrap_or(0);
                         let next = choices[(i + 1) % choices.len()];
                         let value = (next != choices[0]).then(|| next.to_owned());
-                        return self.commit(|settings| settings.set(key, value));
+                        self.commit(|settings| settings.set(key, value));
                     }
                     SettingsRow::Setting(key) if key.is_bool() => {
                         // On/off settings toggle directly. Back to the default =
                         // unset, so the file only holds deviations from it.
-                        let on = !s.file.is_on(key);
+                        let on = !s.draft().is_on(key);
                         let value = (on != key.default_on()).then(|| on.to_string());
-                        return self.commit(|settings| settings.set(key, value));
+                        self.commit(|settings| settings.set(key, value));
                     }
                     SettingsRow::Setting(key) => {
-                        s.editing = Some(TextInput::new(s.file.get(key).unwrap_or_default()));
+                        s.editing = Some(TextInput::new(s.draft().get(key).unwrap_or_default()));
                     }
                     SettingsRow::Header(name) if s.is_header_overridden(&name) => {
                         s.message = Some(read_only(&name, &header_env_var(&name)));
                     }
                     SettingsRow::Header(name) => {
-                        let value = s.file.header(&name).map_or("", |(_, v)| v);
+                        let value = s.draft().header(&name).map_or("", |(_, v)| v);
                         s.editing = Some(TextInput::new(&format!("{name}: {value}")));
                     }
                     SettingsRow::AddHeader => s.editing = Some(TextInput::default()),
+                    SettingsRow::Password if s.env.auth.password.is_some() => {
+                        s.message = Some(read_only("The password", crate::config::PASSWORD_ENV));
+                    }
+                    // Never prefilled: it's typed fresh (and shown while typed).
+                    SettingsRow::Password => s.editing = Some(TextInput::default()),
+                    SettingsRow::DetectLogin => return self.detect_login(),
+                    SettingsRow::Save => return self.save(),
+                    SettingsRow::Discard => self.discard(),
                 }
             }
             Action::Input(_)
@@ -1504,6 +1899,18 @@ impl App {
                 }
             }
             Action::ConfirmEdit => return self.confirm_edit(),
+            Action::SaveChanges => {
+                // Saving while typing keeps the field first (if it's valid).
+                let mut effects = self.confirm_edit();
+                if self.settings.editing.is_none() {
+                    effects.extend(self.save());
+                }
+                return effects;
+            }
+            Action::DiscardChanges => {
+                self.settings.editing = None;
+                self.discard();
+            }
             Action::SettingsSaved(Ok(())) => {
                 s.message = Some(StatusMessage::Info(format!(
                     "Saved to {}",
@@ -1513,6 +1920,122 @@ impl App {
             Action::SettingsSaved(Err(err)) => {
                 s.message = Some(StatusMessage::Error(format!("Save failed: {err}")));
             }
+            Action::CredentialsResolved { generation, result } => {
+                if generation != self.connection_generation
+                    || !matches!(self.connection, ConnectionStatus::Authenticating { .. })
+                {
+                    return Vec::new();
+                }
+                match result {
+                    Ok(Resolved::Credentials(credentials)) => {
+                        self.credentials = credentials;
+                        return self.connect_with_credentials();
+                    }
+                    Ok(Resolved::Tokens(tokens)) => {
+                        self.use_tokens(tokens);
+                        return self.connect_with_credentials();
+                    }
+                    Ok(Resolved::LoginNeeded) => {
+                        self.session_login = None;
+                        return self.start_login(self.login_flow());
+                    }
+                    Err(error) => self.auth_failed(error),
+                }
+            }
+            Action::LoginStarted { generation, prompt } => {
+                if generation != self.connection_generation {
+                    return Vec::new();
+                }
+                let Some(login) = self.login.as_mut().filter(|l| l.flow == prompt.flow) else {
+                    return Vec::new();
+                };
+                let browser = prompt.flow == LoginFlow::Browser;
+                let url = prompt.open_url().to_owned();
+                login.prompt = Some(prompt);
+                // The browser flow needs the browser; the device flow shows a
+                // code that can be entered anywhere (`o` opens it here).
+                if browser {
+                    return vec![Effect::OpenBrowser { url }];
+                }
+            }
+            Action::LoginFinished { generation, result } => {
+                if generation != self.connection_generation || self.login.is_none() {
+                    return Vec::new();
+                }
+                match result {
+                    Err(error) => {
+                        // Stays open with the reason: retry, switch, or close.
+                        if let Some(login) = &mut self.login {
+                            login.prompt = None;
+                            login.error = Some(error);
+                        }
+                    }
+                    Ok(tokens) => {
+                        self.login = None;
+                        self.use_tokens(tokens);
+                        if matches!(self.connection, ConnectionStatus::Connected { .. }) {
+                            // Logged in again after the login expired.
+                            self.notice = Some(Notice::info("Logged in".into(), self.now));
+                            return Vec::new();
+                        }
+                        return self.connect_with_credentials();
+                    }
+                }
+            }
+            Action::TokenRefreshed { generation, result } => {
+                if generation != self.connection_generation {
+                    return Vec::new();
+                }
+                self.token_refreshing = false;
+                match result {
+                    Ok(tokens) => self.use_tokens(tokens),
+                    Err(error) => {
+                        tracing::info!(%error, "token refresh failed, logging in again");
+                        self.session_login = None;
+                        return self.start_login(self.login_flow());
+                    }
+                }
+            }
+            Action::LoginDetected { url, result } => {
+                if let Some(detection) = self.detection.as_mut().filter(|d| d.url == url) {
+                    detection.result = Some(result);
+                }
+            }
+            Action::ApplyDetection => {
+                let suggestion = match self.detection.as_ref().and_then(|d| d.result.as_ref()) {
+                    Some(Ok(detection)) => detection.suggested_settings(),
+                    _ => return Vec::new(),
+                };
+                self.detection = None;
+                if suggestion.is_empty() {
+                    return Vec::new();
+                }
+                self.commit(|draft| {
+                    for (key, value) in suggestion {
+                        draft.set(key, value);
+                    }
+                });
+                return self.log_in_with_draft();
+            }
+            Action::SwitchLoginFlow => {
+                if let Some(login) = &self.login {
+                    return self.start_login(login.flow.other());
+                }
+            }
+            Action::SecretStored(result) => match result {
+                Ok(()) => {
+                    s.message = Some(StatusMessage::Info("Saved".into()));
+                    return self.connect().into_iter().collect();
+                }
+                Err(err) => {
+                    let text = format!("Couldn't save the secret: {err}");
+                    if self.view == View::Settings {
+                        s.message = Some(StatusMessage::Error(text));
+                    } else {
+                        self.notice = Some(Notice::error(text, self.now));
+                    }
+                }
+            },
             Action::ConnectFinished { generation, result } => {
                 if generation != self.connection_generation {
                     return Vec::new(); // superseded by a newer attempt
@@ -1719,7 +2242,7 @@ impl App {
         if self.jobs.fetch_in_flight() {
             return Vec::new();
         }
-        let Some(config) = self.settings.connection_config() else {
+        let Some(config) = self.request_config() else {
             return Vec::new();
         };
         // Keep showing the current list while it reloads (no flicker, and the
@@ -1757,7 +2280,7 @@ impl App {
             job: build.job.clone(),
             which: build.target,
             want_numbers: build.numbers.is_none() && matches!(build.target, BuildRef::Number(_)),
-            config: self.settings.connection_config()?,
+            config: self.request_config()?,
         })
     }
 
@@ -1769,7 +2292,7 @@ impl App {
             job: console.job.clone(),
             number: console.number,
             start: console.offset,
-            config: self.settings.connection_config()?,
+            config: self.request_config()?,
         })
     }
 
@@ -1852,7 +2375,7 @@ impl App {
         if !connected || self.history.fetch_in_flight() {
             return Vec::new();
         }
-        let Some(config) = self.settings.connection_config() else {
+        let Some(config) = self.request_config() else {
             return Vec::new();
         };
         if self.history.load == HistoryLoad::Loaded {
@@ -1870,7 +2393,7 @@ impl App {
     /// Fresh instance details for the overlay (only when connected).
     fn fetch_info(&mut self) -> Vec<Effect> {
         let connected = matches!(self.connection, ConnectionStatus::Connected { .. });
-        let config = self.settings.connection_config().filter(|_| connected);
+        let config = self.request_config().filter(|_| connected);
         let Some(config) = config else {
             self.info = InfoLoad::NotLoaded;
             return Vec::new();
@@ -1889,7 +2412,7 @@ impl App {
         if !connected || self.pipelines.fetch_in_flight() {
             return Vec::new();
         }
-        let Some(config) = self.settings.connection_config() else {
+        let Some(config) = self.request_config() else {
             return Vec::new();
         };
         if self.pipelines.load == PipelineLoad::Loaded {
@@ -2138,6 +2661,12 @@ impl App {
             }
             ConnectionStatus::Connected { .. } => self.fetch_jobs(),
             ConnectionStatus::Connecting { .. } => Vec::new(),
+            // Getting the password may hang (a keyring waiting to be
+            // unlocked): start over. A login under way has its own overlay.
+            ConnectionStatus::Authenticating { .. } if self.login.is_none() => {
+                self.connect().into_iter().collect()
+            }
+            ConnectionStatus::Authenticating { .. } => Vec::new(),
             ConnectionStatus::NotConfigured | ConnectionStatus::Failed { .. } => {
                 self.connect().into_iter().collect()
             }
@@ -2151,6 +2680,9 @@ impl App {
         let Some(input) = s.editing.take() else {
             return Vec::new();
         };
+        if s.selected_row() == SettingsRow::Password {
+            return self.keep_typed_password(input);
+        }
         let text = input.value().trim().to_owned();
         let result = match s.selected_row() {
             SettingsRow::Setting(key) if text.is_empty() => Ok(Change::Set(key, None)),
@@ -2172,7 +2704,7 @@ impl App {
                         "{name} is set by ${}; unset it to change it here",
                         header_env_var(&name)
                     ))
-                } else if renamed && s.file.header(&name).is_some() {
+                } else if renamed && s.draft().header(&name).is_some() {
                     Err(format!(
                         "header {name} already exists; edit that row instead"
                     ))
@@ -2198,7 +2730,7 @@ impl App {
                 let select = new
                     .as_ref()
                     .map(|(name, _)| SettingsRow::Header(name.clone()));
-                let effects = self.commit(|settings| {
+                self.commit(|settings| {
                     if let Some(old) = &old {
                         settings.set_header(old, None);
                     }
@@ -2211,18 +2743,57 @@ impl App {
                     Some(row) => s.select(&row),
                     None => s.selected = s.selected.min(s.rows().len() - 1),
                 }
-                effects
             }
         }
+        Vec::new()
     }
 
-    /// Apply `change` to the file layer, save, and reconnect if that changed
-    /// how Jenkins is reached.
-    fn commit(&mut self, change: impl FnOnce(&mut Settings)) -> Vec<Effect> {
+    /// Apply `change` to the draft: it takes effect when saved.
+    fn commit(&mut self, change: impl FnOnce(&mut Settings)) {
+        change(self.settings.draft_mut());
+        self.settings.note_changes();
+    }
+
+    /// `change` saved right away (and applied to the draft too), e.g. `t`.
+    fn save_now(&mut self, change: impl Fn(&mut Settings)) -> Vec<Effect> {
         let s = &mut self.settings;
-        let before = s.connection_config();
-        let auto_before = s.effective().is_on(SettingKey::RefreshAuto);
         change(&mut s.file);
+        if let Some(draft) = &mut s.draft {
+            change(draft);
+        }
+        self.absolute_times = self.settings.effective().absolute_times();
+        vec![Effect::SaveSettings {
+            path: self.settings.path.clone(),
+            settings: self.settings.file.clone(),
+        }]
+    }
+
+    /// Save the draft: write the file, use the new settings (reconnecting if
+    /// they change how Jenkins is reached), store a new keyring password.
+    fn save(&mut self) -> Vec<Effect> {
+        self.save_with(Reconnect::IfChanged)
+    }
+
+    /// [`App::save`], reconnecting as `reconnect` says. A new keyring password
+    /// always reconnects, once it's stored.
+    fn save_with(&mut self, reconnect: Reconnect) -> Vec<Effect> {
+        let s = &mut self.settings;
+        let pending = s.pending_password.take();
+        let Some(draft) = s.draft.take().filter(|d| *d != s.file) else {
+            if let Some(password) = pending {
+                return self.store_password(password);
+            }
+            s.message = Some(StatusMessage::Info(NOTHING_UNSAVED.into()));
+            return match reconnect {
+                Reconnect::Always => self.connect().into_iter().collect(),
+                Reconnect::IfChanged | Reconnect::Never => Vec::new(),
+            };
+        };
+        let before = s.connection_config();
+        let password_before = s.known_password();
+        let auto_before = s.effective().is_on(SettingKey::RefreshAuto);
+        s.file = draft;
+        s.selected = s.selected.min(s.rows().len() - 1);
         // Changing the default applies to the running session right away.
         let auto_after = s.effective().is_on(SettingKey::RefreshAuto);
         if auto_after != auto_before {
@@ -2235,16 +2806,154 @@ impl App {
             path: s.path.clone(),
             settings: s.file.clone(),
         }];
-        if s.connection_config() != before {
+        let changed = s.connection_config() != before || s.known_password() != password_before;
+        if let Some(password) = pending {
+            effects.extend(self.store_password(password));
+        } else if reconnect == Reconnect::Always || reconnect == Reconnect::IfChanged && changed {
             effects.extend(self.connect());
         }
         effects
+    }
+
+    /// Drop the draft.
+    fn discard(&mut self) {
+        let s = &mut self.settings;
+        let had_changes = s.unsaved();
+        s.draft = None;
+        s.pending_password = None;
+        s.selected = s.selected.min(s.rows().len() - 1);
+        s.message = Some(StatusMessage::Info(if had_changes {
+            "Changes discarded".into()
+        } else {
+            NOTHING_UNSAVED.into()
+        }));
+    }
+
+    /// Store `password` in the keyring for the saved user, then reconnect.
+    fn store_password(&mut self, password: Option<Secret>) -> Vec<Effect> {
+        let s = &mut self.settings;
+        let settings = s.effective();
+        let (AuthConfig::Basic(basic), Some(url)) =
+            (settings.auth_config(), settings.get(SettingKey::JenkinsUrl))
+        else {
+            return Vec::new();
+        };
+        let Some(username) = basic.username else {
+            s.message = Some(StatusMessage::Error(
+                "set the Username first: the password is stored for that user".into(),
+            ));
+            return Vec::new();
+        };
+        vec![Effect::StoreSecret {
+            store: SecretStore::Keyring,
+            account: crate::auth::password_account(url, &username),
+            secret: password,
+        }]
+    }
+
+    /// Keep the password typed in the settings view (empty: remove it) for
+    /// saving: in the draft (file store) or as the pending keyring password.
+    fn keep_typed_password(&mut self, input: TextInput) -> Vec<Effect> {
+        let s = &mut self.settings;
+        let value = input.value().to_owned();
+        let password = (!value.is_empty()).then_some(value);
+        if let Some(password) = &password
+            && let Err(err) = crate::config::validate_password(password)
+        {
+            s.editing = Some(input);
+            s.message = Some(StatusMessage::Error(err));
+            return Vec::new();
+        }
+        let AuthConfig::Basic(basic) = s.edited().auth_config() else {
+            return Vec::new();
+        };
+        match basic.store {
+            PasswordStore::File => self.commit(|draft| draft.auth.password = password),
+            PasswordStore::Keyring => {
+                s.pending_password = Some(password.map(Secret::new));
+                s.note_changes();
+            }
+            PasswordStore::Command => {}
+        }
+        Vec::new()
+    }
+
+    /// After applying a detection: log in with the draft, unless it still
+    /// needs a user name or password (then that field is opened).
+    fn log_in_with_draft(&mut self) -> Vec<Effect> {
+        let s = &mut self.settings;
+        let edited = s.edited();
+        if let AuthConfig::Basic(basic) = edited.auth_config() {
+            let known = s.env.auth.password.is_some()
+                || s.pending_password.is_some()
+                || (basic.store == PasswordStore::File && edited.auth.password.is_some());
+            let missing = basic.missing(known).map(|missing| match missing {
+                crate::auth::Missing::Username => SettingsRow::Setting(SettingKey::AuthUsername),
+                crate::auth::Missing::PasswordCommand => {
+                    SettingsRow::Setting(SettingKey::AuthPasswordCommand)
+                }
+                crate::auth::Missing::Password => SettingsRow::Password,
+            });
+            if let Some(row) = missing {
+                s.select(&row);
+                s.editing = Some(TextInput::default());
+                s.message = Some(StatusMessage::Info(
+                    "Fill in the user name, then the password or API token, and save \
+                     with Ctrl-S to log in"
+                        .into(),
+                ));
+                return Vec::new();
+            }
+        }
+        // A fresh login: OpenID Connect forgets the stored one (reconnecting
+        // once it's gone); the others (re)connect with the saved settings.
+        if matches!(self.settings.edited().auth_config(), AuthConfig::Oidc(_)) {
+            let mut effects = self.save_with(Reconnect::Never);
+            effects.extend(self.forget_login());
+            return effects;
+        }
+        self.save_with(Reconnect::Always)
+    }
+
+    /// Open the detection overlay for the URL as edited.
+    fn detect_login(&mut self) -> Vec<Effect> {
+        let Some(config) = self.settings.edited_connection_config() else {
+            return Vec::new();
+        };
+        self.detection = Some(DetectState {
+            url: config.url.clone(),
+            result: None,
+        });
+        vec![Effect::DetectLogin { config }]
+    }
+
+    /// "Log in again": forget the stored login, then reconnect (which logs in).
+    fn forget_login(&mut self) -> Vec<Effect> {
+        self.session_login = None;
+        match self.token_store() {
+            Some((store, account)) => vec![Effect::StoreSecret {
+                store,
+                account,
+                secret: None,
+            }],
+            None => self.connect().into_iter().collect(),
+        }
     }
 
     /// Close whatever is on top: help popup, then an edit, then the settings view.
     fn back(&mut self) {
         match self.context() {
             Context::ConfirmQuit => self.confirm_quit = false,
+            Context::Login => {
+                let error = self.login.take().and_then(|l| l.error);
+                if let ConnectionStatus::Authenticating { url } = &self.connection {
+                    self.connection = ConnectionStatus::Failed {
+                        url: url.clone(),
+                        error: error.unwrap_or_else(|| "login cancelled: press r to log in".into()),
+                    };
+                }
+            }
+            Context::Detect => self.detection = None,
             Context::ConfirmStart => self.confirm_start = None,
             Context::Promote => self.promote = None,
             Context::Help => self.show_help = false,
@@ -2283,6 +2992,72 @@ impl App {
             | Context::Runs
             | Context::Settings => {}
         }
+    }
+}
+
+const NOTHING_UNSAVED: &str = "No unsaved changes";
+
+/// Whether saving the settings reconnects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Reconnect {
+    /// When the saved settings change the connection.
+    IfChanged,
+    /// Always (a fresh login).
+    Always,
+    /// Never: the caller does.
+    Never,
+}
+
+/// An OpenID Connect login of this session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionLogin {
+    /// Its keyring account / tokens file key ([`crate::auth::token_account`]).
+    pub account: String,
+    pub tokens: TokenSet,
+}
+
+/// The login detection overlay.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DetectState {
+    /// The Jenkins URL looked at.
+    pub url: String,
+    /// `None` while detecting.
+    pub result: Option<Result<crate::detect::Detection, String>>,
+}
+
+/// The login overlay.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoginState {
+    pub flow: LoginFlow,
+    /// What to show; `None` until the provider answered.
+    pub prompt: Option<LoginPrompt>,
+    /// Why the login failed: shown (with a hint) until retried or closed.
+    pub error: Option<String>,
+}
+
+/// What to do about a failed login, from the provider's error.
+pub fn login_hint(error: &str, flow: LoginFlow) -> &'static str {
+    if error.contains("invalid_client")
+        || error.contains("Invalid client")
+        || (error.contains("unauthorized_client") && error.contains("secret"))
+    {
+        "The client needs a secret (it's confidential). Leeroy needs a public client: \
+         client authentication off, in Keycloak's client settings."
+    } else if error.contains("Device Authorization Grant")
+        || error.contains("doesn't offer device login")
+        || flow == LoginFlow::Device && error.contains("unauthorized_client")
+    {
+        "Device login is off for this client: turn on \"OAuth 2.0 Device Authorization \
+         Grant\" in Keycloak's client settings, or press b for the browser login."
+    } else if error.contains("unauthorized_client") {
+        "This client may not use this login: check its Capability config in Keycloak, \
+         or press b for the other login."
+    } else if error.contains("OpenID configuration") {
+        "Check the Issuer URL in the settings (0): for Keycloak https://<host>/realms/<realm>."
+    } else if error.contains("expired") {
+        "Press r for a new code."
+    } else {
+        "Check the Issuer URL and Client ID in the settings (0), or press r to try again."
     }
 }
 
@@ -2388,6 +3163,11 @@ mod tests {
         assert_eq!(app.settings.selected_row(), row);
     }
 
+    /// `Ctrl-S` in the settings view.
+    fn save(app: &mut App) -> Vec<Effect> {
+        app.update(Action::SaveChanges)
+    }
+
     fn type_str(app: &mut App, text: &str) {
         for c in text.chars() {
             app.update(Action::Input(c));
@@ -2469,11 +3249,13 @@ mod tests {
             "default = unset"
         );
 
-        // Changed in the settings view: follows right away.
+        // Changed in the settings view: follows once saved.
         app.update(Action::SwitchTab(Tab::Settings));
         app.settings
             .select(&SettingsRow::Setting(SettingKey::Timestamps));
         app.update(Action::StartEdit);
+        assert!(!app.absolute_times);
+        save(&mut app);
         assert!(app.absolute_times);
     }
 
@@ -2504,8 +3286,8 @@ mod tests {
         app.update(Action::SelectPrev);
         assert_eq!(
             app.settings.selected_row(),
-            SettingsRow::Setting(SettingKey::Timestamps),
-            "last row: the Application section follows the headers"
+            SettingsRow::Discard,
+            "last row: Save and Discard, after the Application section"
         );
         app.update(Action::SelectNext);
         assert_eq!(
@@ -2521,7 +3303,14 @@ mod tests {
         type_str(&mut app, " https://cii ");
         app.update(Action::DeleteChar); // trailing space
         app.update(Action::DeleteChar); // extra 'i'
-        let effects = app.update(Action::ConfirmEdit);
+        assert_eq!(app.update(Action::ConfirmEdit), Vec::new());
+        assert!(app.settings.unsaved());
+        assert_eq!(
+            app.settings.selected_row(),
+            SettingsRow::Setting(SettingKey::JenkinsUrl)
+        );
+        let effects = save(&mut app);
+        assert!(!app.settings.unsaved());
 
         let mut expected = Settings::default();
         expected.set(SettingKey::JenkinsUrl, Some("https://ci".into()));
@@ -2548,6 +3337,7 @@ mod tests {
         );
         app.update(Action::ClearInput);
         app.update(Action::ConfirmEdit);
+        save(&mut app);
         assert_eq!(app.settings.file.get(SettingKey::JenkinsUrl), None);
     }
 
@@ -2610,7 +3400,9 @@ mod tests {
         app.update(Action::StartEdit);
         app.update(Action::ClearInput);
         type_str(app, url);
-        app.update(Action::ConfirmEdit)
+        let mut effects = app.update(Action::ConfirmEdit);
+        effects.extend(app.update(Action::SaveChanges));
+        effects
     }
 
     fn connect_generation(effects: &[Effect]) -> Option<u64> {
@@ -2716,7 +3508,9 @@ mod tests {
         select(app, SettingsRow::AddHeader);
         app.update(Action::StartEdit);
         type_str(app, line);
-        app.update(Action::ConfirmEdit)
+        let mut effects = app.update(Action::ConfirmEdit);
+        effects.extend(app.update(Action::SaveChanges));
+        effects
     }
 
     #[test]
@@ -2742,6 +3536,7 @@ mod tests {
         app.update(Action::ClearInput);
         type_str(&mut app, "X-Renamed: two");
         app.update(Action::ConfirmEdit);
+        save(&mut app);
         assert_eq!(app.settings.file.header("X-Token"), None);
         assert_eq!(
             app.settings.file.header("X-Renamed"),
@@ -2751,10 +3546,11 @@ mod tests {
         // Clearing the field deletes it.
         app.update(Action::StartEdit);
         app.update(Action::ClearInput);
-        let effects = app.update(Action::ConfirmEdit);
+        app.update(Action::ConfirmEdit);
+        assert_eq!(app.settings.selected_row(), SettingsRow::AddHeader);
+        let effects = save(&mut app);
         assert!(matches!(effects.first(), Some(Effect::SaveSettings { .. })));
         assert!(app.settings.file.jenkins.headers.is_empty());
-        assert_eq!(app.settings.selected_row(), SettingsRow::AddHeader);
     }
 
     #[test]
@@ -2855,12 +3651,13 @@ mod tests {
             SettingsRow::Setting(SettingKey::JenkinsSkipTlsVerify),
         );
 
-        let effects = app.update(Action::StartEdit);
+        app.update(Action::StartEdit);
         assert_eq!(
             app.context(),
             Context::Settings,
             "no text edit for a toggle"
         );
+        let effects = save(&mut app);
         assert!(app.settings.file.is_on(SettingKey::JenkinsSkipTlsVerify));
         assert!(matches!(
             effects.last(),
@@ -2868,6 +3665,7 @@ mod tests {
         ));
 
         app.update(Action::StartEdit);
+        save(&mut app);
         assert_eq!(
             app.settings.file.get(SettingKey::JenkinsSkipTlsVerify),
             None
@@ -2895,12 +3693,16 @@ mod tests {
         let mut app = settings_app();
         app.update(Action::StartEdit);
         type_str(&mut app, "https://ci");
-        let effects = app.update(Action::SelectNext);
-        assert!(matches!(effects.first(), Some(Effect::SaveSettings { .. })));
         assert_eq!(
-            app.settings.file.get(SettingKey::JenkinsUrl),
+            app.update(Action::SelectNext),
+            Vec::new(),
+            "kept, not saved"
+        );
+        assert_eq!(
+            app.settings.draft().get(SettingKey::JenkinsUrl),
             Some("https://ci")
         );
+        assert_eq!(app.settings.file.get(SettingKey::JenkinsUrl), None);
         assert_eq!(
             app.settings.selected_row(),
             SettingsRow::Setting(SettingKey::JenkinsSkipTlsVerify)
@@ -3184,12 +3986,15 @@ mod tests {
         assert!(app.auto_refresh, "default on");
         select(&mut app, SettingsRow::Setting(SettingKey::RefreshAuto));
         app.update(Action::StartEdit); // off: stored explicitly
+        assert!(app.auto_refresh, "only once saved");
+        save(&mut app);
         assert_eq!(
             app.settings.file.get(SettingKey::RefreshAuto),
             Some("false")
         );
         assert!(!app.auto_refresh);
         app.update(Action::StartEdit); // back to the default: unset
+        save(&mut app);
         assert_eq!(app.settings.file.get(SettingKey::RefreshAuto), None);
         assert!(app.auto_refresh);
     }
@@ -3203,12 +4008,12 @@ mod tests {
         );
         app.update(Action::StartEdit);
         assert_eq!(
-            app.settings.file.get(SettingKey::JenkinsSkipTlsVerify),
+            app.settings.draft().get(SettingKey::JenkinsSkipTlsVerify),
             Some("true")
         );
         app.update(Action::StartEdit);
         assert_eq!(
-            app.settings.file.get(SettingKey::JenkinsSkipTlsVerify),
+            app.settings.draft().get(SettingKey::JenkinsSkipTlsVerify),
             None
         );
     }
@@ -3615,6 +4420,7 @@ mod tests {
         assert!(app.settings.effective().is_on(SettingKey::ConfirmQuit));
         select(&mut app, SettingsRow::Setting(SettingKey::ConfirmQuit));
         app.update(Action::StartEdit);
+        save(&mut app);
         assert_eq!(
             app.settings.file.get(SettingKey::ConfirmQuit),
             Some("false")
@@ -3622,7 +4428,7 @@ mod tests {
     }
 
     #[test]
-    fn theme_setting_cycles_and_applies_right_away() {
+    fn theme_setting_cycles_and_applies_when_saved() {
         let mut app = settings_app();
         app.terminal_appearance = Some(Appearance::Light);
         assert_eq!(app.theme().name, "light", "auto follows the terminal");
@@ -3630,7 +4436,8 @@ mod tests {
 
         let mut seen = Vec::new();
         for _ in 0..3 {
-            let effects = app.update(Action::StartEdit);
+            app.update(Action::StartEdit);
+            let effects = save(&mut app);
             assert!(
                 effects
                     .iter()
@@ -4690,5 +5497,741 @@ mod tests {
         app.update(Action::SelectNext); // b #9
         assert_eq!(rerun_of(&start(&mut app, RERUN)), ("b", Some(9), false));
         assert_eq!(new_build_of(&start(&mut app, NEW)), "b");
+    }
+
+    // --- Authentication ---------------------------------------------------
+
+    fn auth_app(pairs: &[(SettingKey, &str)]) -> App {
+        let mut file = Settings::default();
+        file.set(
+            SettingKey::JenkinsUrl,
+            Some("https://ci.example.com".into()),
+        );
+        for (key, value) in pairs {
+            file.set(*key, Some((*value).into()));
+        }
+        App::new(SettingsState::new(
+            PathBuf::from("config.toml"),
+            file,
+            Settings::default(),
+        ))
+    }
+
+    fn oidc_app() -> App {
+        auth_app(&[
+            (SettingKey::AuthMode, "oidc"),
+            (
+                SettingKey::AuthIssuer,
+                "https://sso.example.com/realms/acme",
+            ),
+            (SettingKey::AuthClientId, "leeroy"),
+        ])
+    }
+
+    fn tokens(access: &str, expires_at: Option<SystemTime>) -> TokenSet {
+        TokenSet {
+            access: Secret::new(access),
+            refresh: Some(Secret::new(format!("{access}-refresh"))),
+            expires_at,
+            refresh_at: expires_at.map(|at| at - crate::auth::REFRESH_AHEAD),
+        }
+    }
+
+    fn prompt(flow: LoginFlow) -> LoginPrompt {
+        LoginPrompt {
+            flow,
+            url: "https://sso.example.com/device".into(),
+            complete_url: Some("https://sso.example.com/device?user_code=ABCD".into()),
+            user_code: (flow == LoginFlow::Device).then(|| "ABCD".into()),
+            expires_at: None,
+        }
+    }
+
+    /// The credentials of the first `Connect` effect.
+    fn connect_credentials(effects: &[Effect]) -> Option<Credentials> {
+        effects.iter().find_map(|e| match e {
+            Effect::Connect { config, .. } => Some(config.credentials.clone()),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn basic_auth_gets_the_password_before_connecting() {
+        let mut app = auth_app(&[
+            (SettingKey::AuthMode, "basic"),
+            (SettingKey::AuthUsername, "me"),
+        ]);
+        let effects = app.start();
+        assert!(matches!(
+            effects.as_slice(),
+            [Effect::ResolveCredentials {
+                generation: 1,
+                password: None,
+                tokens: None,
+                ..
+            }]
+        ));
+        assert!(matches!(
+            app.connection,
+            ConnectionStatus::Authenticating { .. }
+        ));
+        let basic = Credentials::Basic {
+            username: "me".into(),
+            password: Secret::new("pw"),
+        };
+        let effects = app.update(Action::CredentialsResolved {
+            generation: 1,
+            result: Ok(Resolved::Credentials(basic.clone())),
+        });
+        assert_eq!(connect_credentials(&effects), Some(basic.clone()));
+        let effects = app.update(Action::ConnectFinished {
+            generation: 1,
+            result: Ok(info("me")),
+        });
+        // Every request after that authenticates too.
+        assert!(effects.iter().any(|e| matches!(
+            e,
+            Effect::FetchJobs { config, .. } if config.credentials == basic
+        )));
+    }
+
+    #[test]
+    fn basic_auth_settings_missing_fail_with_a_hint() {
+        let mut app = auth_app(&[(SettingKey::AuthMode, "basic")]);
+        assert_eq!(app.start(), Vec::new());
+        assert!(matches!(
+            &app.connection,
+            ConnectionStatus::Failed { error, .. } if error.contains("Username")
+        ));
+        let mut app = auth_app(&[
+            (SettingKey::AuthMode, "basic"),
+            (SettingKey::AuthUsername, "me"),
+            (SettingKey::AuthPasswordStore, "file"),
+        ]);
+        assert_eq!(app.start(), Vec::new());
+        assert!(matches!(
+            &app.connection,
+            ConnectionStatus::Failed { error, .. } if error.contains("Password")
+        ));
+    }
+
+    #[test]
+    fn env_password_is_passed_along_and_read_only() {
+        let mut app = auth_app(&[
+            (SettingKey::AuthMode, "basic"),
+            (SettingKey::AuthUsername, "me"),
+        ]);
+        app.settings.env.auth.password = Some("from-env".into());
+        assert!(matches!(
+            app.start().as_slice(),
+            [Effect::ResolveCredentials { password: Some(p), .. }] if p.expose() == "from-env"
+        ));
+        app.update(Action::SwitchTab(Tab::Settings));
+        select(&mut app, SettingsRow::Password);
+        app.update(Action::StartEdit);
+        assert_eq!(app.settings.editing, None);
+        assert!(
+            matches!(&app.settings.message, Some(StatusMessage::Error(m)) if m.contains("LEEROY_AUTH_PASSWORD"))
+        );
+    }
+
+    #[test]
+    fn anonymous_connects_without_credentials() {
+        let mut app = auth_app(&[(SettingKey::AuthMode, "anonymous")]);
+        assert_eq!(connect_credentials(&app.start()), Some(Credentials::None));
+    }
+
+    #[test]
+    fn oidc_logs_in_when_there_is_no_login() {
+        let mut app = oidc_app();
+        app.start();
+        let effects = app.update(Action::CredentialsResolved {
+            generation: 1,
+            result: Ok(Resolved::LoginNeeded),
+        });
+        assert!(matches!(
+            effects.as_slice(),
+            [Effect::Login {
+                generation: 1,
+                flow: LoginFlow::Device,
+                ..
+            }]
+        ));
+        assert_eq!(app.context(), Context::Login);
+        // The device flow doesn't open a browser by itself; `o` does.
+        assert_eq!(
+            app.update(Action::LoginStarted {
+                generation: 1,
+                prompt: prompt(LoginFlow::Device)
+            }),
+            Vec::new()
+        );
+        assert_eq!(
+            app.update(Action::OpenInBrowser),
+            vec![Effect::OpenBrowser {
+                url: "https://sso.example.com/device?user_code=ABCD".into()
+            }]
+        );
+        // `b`: the browser flow instead, which opens the browser right away.
+        assert!(matches!(
+            app.update(Action::SwitchLoginFlow).as_slice(),
+            [Effect::Login {
+                flow: LoginFlow::Browser,
+                ..
+            }]
+        ));
+        // A late prompt of the device flow no longer applies.
+        app.update(Action::LoginStarted {
+            generation: 1,
+            prompt: prompt(LoginFlow::Device),
+        });
+        assert_eq!(app.login.as_ref().unwrap().prompt, None);
+        assert!(matches!(
+            app.update(Action::LoginStarted {
+                generation: 1,
+                prompt: prompt(LoginFlow::Browser)
+            })
+            .as_slice(),
+            [Effect::OpenBrowser { .. }]
+        ));
+        let effects = app.update(Action::LoginFinished {
+            generation: 1,
+            result: Ok(tokens("acc", None)),
+        });
+        assert_eq!(app.login, None);
+        assert_eq!(
+            connect_credentials(&effects),
+            Some(Credentials::Bearer(Secret::new("acc")))
+        );
+    }
+
+    #[test]
+    fn detected_login_fills_in_the_draft() {
+        use crate::detect::{Detection, DeviceCheck, Sso};
+        let mut app = auth_app(&[]);
+        app.update(Action::SwitchTab(Tab::Settings));
+        select(&mut app, SettingsRow::DetectLogin);
+        let effects = app.update(Action::StartEdit);
+        assert!(matches!(effects.as_slice(), [Effect::DetectLogin { .. }]));
+        // An answer for another URL (edited meanwhile) doesn't apply.
+        app.update(Action::LoginDetected {
+            url: "https://other".into(),
+            result: Ok(Detection::Anonymous { version: None }),
+        });
+        assert_eq!(app.detection.as_ref().unwrap().result, None);
+        let sso = Sso {
+            login_at: "https://sso".into(),
+            issuer: Some("https://sso/realms/acme".into()),
+            client_id: Some("ci-proxy".into()),
+            device: DeviceCheck::Refused("unauthorized_client".into()),
+        };
+        app.update(Action::LoginDetected {
+            url: "https://ci.example.com".into(),
+            result: Ok(Detection::SsoProxy {
+                sso,
+                proxy: Some("oauth2-proxy".into()),
+            }),
+        });
+        // Enter: saved and logging in right away.
+        let effects = app.update(Action::ApplyDetection);
+        assert_eq!(app.detection, None);
+        assert!(matches!(
+            effects.as_slice(),
+            [
+                Effect::SaveSettings { .. },
+                // A login it had for this provider is forgotten first.
+                Effect::StoreSecret { secret: None, .. }
+            ]
+        ));
+        let file = &app.settings.file;
+        assert_eq!(file.get(SettingKey::AuthMode), Some("oidc"));
+        assert_eq!(
+            file.get(SettingKey::AuthIssuer),
+            Some("https://sso/realms/acme")
+        );
+    }
+
+    #[test]
+    fn detected_basic_auth_asks_for_the_user_first() {
+        let mut app = auth_app(&[]);
+        app.update(Action::SwitchTab(Tab::Settings));
+        select(&mut app, SettingsRow::DetectLogin);
+        app.update(Action::StartEdit);
+        app.update(Action::LoginDetected {
+            url: "https://ci.example.com".into(),
+            result: Ok(crate::detect::Detection::JenkinsLogin {
+                version: None,
+                sso: None,
+            }),
+        });
+        assert_eq!(app.update(Action::ApplyDetection), Vec::new(), "not yet");
+        assert_eq!(app.context(), Context::EditSetting);
+        assert_eq!(
+            app.settings.selected_row(),
+            SettingsRow::Setting(SettingKey::AuthUsername)
+        );
+        assert_eq!(
+            app.settings.draft().get(SettingKey::AuthMode),
+            Some("basic")
+        );
+    }
+
+    #[test]
+    fn jenkins_login_detection_opens_the_token_page() {
+        let mut app = auth_app(&[]);
+        app.update(Action::SwitchTab(Tab::Settings));
+        select(&mut app, SettingsRow::DetectLogin);
+        app.update(Action::StartEdit);
+        app.update(Action::LoginDetected {
+            url: "https://ci.example.com".into(),
+            result: Ok(crate::detect::Detection::JenkinsLogin {
+                version: None,
+                sso: None,
+            }),
+        });
+        assert_eq!(
+            app.update(Action::OpenInBrowser),
+            vec![Effect::OpenBrowser {
+                url: "https://ci.example.com/me/security/".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn a_failed_login_stays_open_with_the_reason() {
+        let mut app = oidc_app();
+        app.start();
+        app.update(Action::CredentialsResolved {
+            generation: 1,
+            result: Ok(Resolved::LoginNeeded),
+        });
+        let refused = "device login refused: Client is not allowed to initiate OAuth 2.0 \
+                       Device Authorization Grant. The flow is disabled for the client. \
+                       (unauthorized_client)";
+        app.update(Action::LoginFinished {
+            generation: 1,
+            result: Err(refused.into()),
+        });
+        assert_eq!(app.context(), Context::Login, "still open");
+        let login = app.login.as_ref().unwrap();
+        assert_eq!(login.error.as_deref(), Some(refused));
+        assert!(login_hint(refused, login.flow).contains("press b"));
+        // r tries again, b the other way.
+        assert!(matches!(
+            app.update(Action::Refresh).as_slice(),
+            [Effect::Login {
+                flow: LoginFlow::Device,
+                ..
+            }]
+        ));
+        assert_eq!(app.login.as_ref().unwrap().error, None);
+        app.update(Action::LoginFinished {
+            generation: 1,
+            result: Err(refused.into()),
+        });
+        // Esc: closed, the reason stays in the header.
+        app.update(Action::Back);
+        assert!(matches!(
+            &app.connection,
+            ConnectionStatus::Failed { error, .. } if error == refused
+        ));
+        assert!(
+            login_hint("device login refused: invalid_client", LoginFlow::Device)
+                .contains("public client")
+        );
+        // Keycloak's answer for a confidential client.
+        assert!(
+            login_hint(
+                "device login refused: Invalid client or Invalid client credentials \
+                 (unauthorized_client)",
+                LoginFlow::Device
+            )
+            .contains("public client")
+        );
+    }
+
+    #[test]
+    fn cancelled_login_can_be_retried() {
+        let mut app = oidc_app();
+        app.start();
+        app.update(Action::CredentialsResolved {
+            generation: 1,
+            result: Ok(Resolved::LoginNeeded),
+        });
+        assert_eq!(app.update(Action::Back), vec![Effect::CancelLogin]);
+        assert!(matches!(
+            &app.connection,
+            ConnectionStatus::Failed { error, .. } if error.contains("cancelled")
+        ));
+        assert!(matches!(
+            app.update(Action::Refresh).as_slice(),
+            [Effect::ResolveCredentials { generation: 2, .. }]
+        ));
+    }
+
+    #[test]
+    fn stale_auth_results_are_ignored() {
+        let mut app = oidc_app();
+        app.start();
+        app.update(Action::CredentialsResolved {
+            generation: 1,
+            result: Ok(Resolved::LoginNeeded),
+        });
+        // Settings changed meanwhile: a new connection.
+        app.update(Action::SwitchTab(Tab::Settings));
+        select(
+            &mut app,
+            SettingsRow::Setting(SettingKey::JenkinsSkipTlsVerify),
+        );
+        app.update(Action::StartEdit);
+        save(&mut app);
+        assert_eq!(app.connection_generation, 2);
+        assert_eq!(
+            app.update(Action::LoginFinished {
+                generation: 1,
+                result: Ok(tokens("old", None)),
+            }),
+            Vec::new()
+        );
+        assert_eq!(app.credentials, Credentials::None);
+    }
+
+    #[test]
+    fn tokens_are_refreshed_before_they_expire() {
+        let mut app = oidc_app();
+        app.start();
+        let wall = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+        app.wall_now = wall;
+        app.update(Action::CredentialsResolved {
+            generation: 1,
+            result: Ok(Resolved::Tokens(tokens(
+                "acc",
+                Some(wall + std::time::Duration::from_secs(300)),
+            ))),
+        });
+        app.update(Action::ConnectFinished {
+            generation: 1,
+            result: Ok(info("me")),
+        });
+        let now = app.now;
+        let refreshes = |effects: &[Effect]| {
+            effects
+                .iter()
+                .filter(|e| matches!(e, Effect::RefreshToken { .. }))
+                .count()
+        };
+        assert_eq!(refreshes(&app.update(Action::Tick(now, wall))), 0);
+        let later = wall + std::time::Duration::from_secs(290);
+        assert_eq!(refreshes(&app.update(Action::Tick(now, later))), 1);
+        assert_eq!(
+            refreshes(&app.update(Action::Tick(now, later))),
+            0,
+            "one in flight"
+        );
+        app.update(Action::TokenRefreshed {
+            generation: 1,
+            result: Ok(tokens(
+                "acc2",
+                Some(later + std::time::Duration::from_secs(300)),
+            )),
+        });
+        assert_eq!(app.credentials, Credentials::Bearer(Secret::new("acc2")));
+        assert!(matches!(app.connection, ConnectionStatus::Connected { .. }));
+        // A failed refresh (session ended) logs in again, keeping the data.
+        let effects = app.update(Action::TokenRefreshed {
+            generation: 1,
+            result: Err("the login expired".into()),
+        });
+        assert!(matches!(effects.as_slice(), [Effect::Login { .. }]));
+        let effects = app.update(Action::LoginFinished {
+            generation: 1,
+            result: Ok(tokens("acc3", None)),
+        });
+        assert_eq!(effects, Vec::new(), "no reconnect needed");
+        assert_eq!(app.credentials, Credentials::Bearer(Secret::new("acc3")));
+    }
+
+    #[test]
+    fn reconnecting_reuses_this_sessions_tokens() {
+        let mut app = oidc_app();
+        app.start();
+        app.update(Action::CredentialsResolved {
+            generation: 1,
+            result: Ok(Resolved::Tokens(tokens("acc", None))),
+        });
+        app.update(Action::SwitchTab(Tab::Settings));
+        select(
+            &mut app,
+            SettingsRow::Setting(SettingKey::JenkinsSkipTlsVerify),
+        );
+        app.update(Action::StartEdit);
+        let effects = save(&mut app);
+        assert!(effects.iter().any(|e| matches!(
+            e,
+            Effect::ResolveCredentials { tokens: Some(t), .. } if t.access.expose() == "acc"
+        )));
+    }
+
+    #[test]
+    fn settings_rows_follow_the_auth_mode() {
+        let rows = |app: &App| app.settings.rows();
+        let app = auth_app(&[]);
+        assert!(!rows(&app).contains(&SettingsRow::Password));
+        let mut app = auth_app(&[
+            (SettingKey::AuthMode, "basic"),
+            (SettingKey::AuthUsername, "me"),
+        ]);
+        assert!(rows(&app).contains(&SettingsRow::Password));
+        app.settings
+            .file
+            .set(SettingKey::AuthPasswordStore, Some("command".into()));
+        assert!(!rows(&app).contains(&SettingsRow::Password));
+        assert!(rows(&app).contains(&SettingsRow::Setting(SettingKey::AuthPasswordCommand)));
+        assert!(rows(&oidc_app()).contains(&SettingsRow::DetectLogin));
+    }
+
+    #[test]
+    fn password_goes_to_its_store_when_saved() {
+        let mut app = auth_app(&[
+            (SettingKey::AuthMode, "basic"),
+            (SettingKey::AuthUsername, "me"),
+        ]);
+        app.update(Action::SwitchTab(Tab::Settings));
+        select(&mut app, SettingsRow::Password);
+        app.update(Action::StartEdit);
+        type_str(&mut app, "s3cret");
+        assert_eq!(
+            app.update(Action::ConfirmEdit),
+            Vec::new(),
+            "not stored yet"
+        );
+        assert!(app.settings.unsaved());
+        assert_eq!(
+            save(&mut app),
+            vec![Effect::StoreSecret {
+                store: SecretStore::Keyring,
+                account: "basic:https://ci.example.com:me".into(),
+                secret: Some(Secret::new("s3cret")),
+            }]
+        );
+        assert!(app.settings.file.auth.password.is_none(), "not in the file");
+        assert!(!app.settings.unsaved());
+        let effects = app.update(Action::SecretStored(Ok(())));
+        assert!(matches!(
+            effects.as_slice(),
+            [Effect::ResolveCredentials { .. }]
+        ));
+
+        // Saved together with a new user name: stored for that user, and
+        // the reconnect waits for the keyring.
+        select(&mut app, SettingsRow::Setting(SettingKey::AuthUsername));
+        app.update(Action::StartEdit);
+        app.update(Action::ClearInput);
+        type_str(&mut app, "you");
+        app.update(Action::ConfirmEdit);
+        select(&mut app, SettingsRow::Password);
+        app.update(Action::StartEdit);
+        type_str(&mut app, "y0urs");
+        app.update(Action::ConfirmEdit);
+        let effects = save(&mut app);
+        assert!(matches!(
+            effects.as_slice(),
+            [Effect::SaveSettings { .. }, Effect::StoreSecret { account, .. }]
+                if account == "basic:https://ci.example.com:you"
+        ));
+
+        // File store: in the config once saved, then reconnected with it.
+        select(
+            &mut app,
+            SettingsRow::Setting(SettingKey::AuthPasswordStore),
+        );
+        app.update(Action::StartEdit); // keyring → command
+        app.update(Action::StartEdit); // → file
+        save(&mut app);
+        select(&mut app, SettingsRow::Password);
+        app.update(Action::StartEdit);
+        type_str(&mut app, "f1le");
+        app.update(Action::ConfirmEdit);
+        let effects = save(&mut app);
+        assert!(effects.iter().any(|e| matches!(
+            e,
+            Effect::SaveSettings { settings, .. } if settings.auth.password.as_deref() == Some("f1le")
+        )));
+        assert!(effects.iter().any(|e| matches!(
+            e,
+            Effect::ResolveCredentials { password: Some(p), .. } if p.expose() == "f1le"
+        )));
+        // A multi-line paste is refused, the edit stays open.
+        app.update(Action::StartEdit);
+        type_str(&mut app, "a\nb");
+        assert_eq!(app.update(Action::ConfirmEdit), Vec::new());
+        assert!(app.settings.editing.is_some());
+    }
+
+    #[test]
+    fn logging_in_again_forgets_the_stored_login() {
+        use crate::detect::{Detection, DeviceCheck, Sso};
+        let found = || Detection::SsoProxy {
+            sso: Sso {
+                login_at: "https://sso.example.com".into(),
+                issuer: Some("https://sso.example.com/realms/acme".into()),
+                client_id: Some("leeroy".into()),
+                device: DeviceCheck::Works,
+            },
+            proxy: None,
+        };
+        let mut app = oidc_app();
+        app.start();
+        app.session_login = Some(SessionLogin {
+            account: "x".into(),
+            tokens: tokens("acc", None),
+        });
+        app.update(Action::SwitchTab(Tab::Settings));
+        select(&mut app, SettingsRow::DetectLogin);
+        app.update(Action::StartEdit);
+        app.update(Action::LoginDetected {
+            url: "https://ci.example.com".into(),
+            result: Ok(found()),
+        });
+        // Same settings: nothing to save; the stored login is forgotten,
+        // reconnecting (and so logging in) once it's gone.
+        assert_eq!(
+            app.update(Action::ApplyDetection),
+            vec![Effect::StoreSecret {
+                store: SecretStore::Keyring,
+                account: "oidc:https://sso.example.com/realms/acme:leeroy".into(),
+                secret: None,
+            }]
+        );
+        assert_eq!(app.session_login, None);
+        // Kept in memory only: nothing to delete, log in right away.
+        app.settings
+            .file
+            .set(SettingKey::AuthTokenStore, Some("memory".into()));
+        app.update(Action::StartEdit);
+        app.update(Action::LoginDetected {
+            url: "https://ci.example.com".into(),
+            result: Ok(found()),
+        });
+        assert!(matches!(
+            app.update(Action::ApplyDetection).as_slice(),
+            [Effect::ResolveCredentials { tokens: None, .. }]
+        ));
+    }
+
+    #[test]
+    fn switching_away_from_headers_stops_sending_authorization() {
+        let mut app = auth_app(&[]);
+        app.settings
+            .file
+            .set_header("Authorization", Some("Basic bWU6dG9r".into()));
+        app.settings.file.set_header("X-Api-Key", Some("k".into()));
+        app.update(Action::SwitchTab(Tab::Settings));
+        select(&mut app, SettingsRow::Setting(SettingKey::AuthMode));
+        app.update(Action::StartEdit); // headers → anonymous
+        save(&mut app);
+        assert_eq!(
+            app.settings.file.get(SettingKey::AuthMode),
+            Some("anonymous")
+        );
+        let config = app.request_config().unwrap();
+        assert_eq!(config.headers, vec![("X-Api-Key".into(), "k".into())]);
+        // Kept in the file: back to headers sends it again.
+        select(&mut app, SettingsRow::Setting(SettingKey::AuthMode));
+        for _ in 0..3 {
+            app.update(Action::StartEdit); // → basic → oidc → headers
+        }
+        save(&mut app);
+        assert_eq!(app.request_config().unwrap().headers.len(), 2);
+    }
+
+    #[test]
+    fn unsaved_changes_can_be_discarded_and_make_quitting_ask() {
+        let mut app = settings_app();
+        app.settings
+            .file
+            .set(SettingKey::ConfirmQuit, Some("false".into()));
+        set_url(&mut app, "https://ci");
+        select(
+            &mut app,
+            SettingsRow::Setting(SettingKey::JenkinsSkipTlsVerify),
+        );
+        app.update(Action::StartEdit);
+        assert!(app.settings.rows().contains(&SettingsRow::Save));
+        app.update(Action::RequestQuit);
+        assert!(app.running && app.confirm_quit, "unsaved: asks first");
+        app.update(Action::Back);
+        select(&mut app, SettingsRow::Discard);
+        assert_eq!(app.update(Action::StartEdit), Vec::new());
+        assert!(!app.settings.unsaved());
+        assert!(
+            app.settings.rows().contains(&SettingsRow::Save),
+            "always there"
+        );
+        assert!(!app.settings.connection_config().unwrap().skip_tls_verify);
+        app.update(Action::RequestQuit);
+        assert!(!app.running, "nothing unsaved: quits right away");
+    }
+
+    #[test]
+    fn ctrl_d_discards_also_while_typing() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut app = settings_app();
+        set_url(&mut app, "https://ci");
+        select(&mut app, SettingsRow::Setting(SettingKey::ProxyUrl));
+        app.update(Action::StartEdit);
+        type_str(&mut app, "http://proxy:3128");
+        let ctrl_d = KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL);
+        let action = crate::event::map_key(&app, ctrl_d).unwrap();
+        assert_eq!(action, Action::DiscardChanges);
+        app.update(action);
+        assert_eq!(app.settings.editing, None);
+        assert!(!app.settings.unsaved());
+        assert_eq!(app.settings.edited().get(SettingKey::ProxyUrl), None);
+    }
+
+    #[test]
+    fn saving_while_typing_keeps_the_field_first() {
+        let mut app = settings_app();
+        app.update(Action::StartEdit);
+        type_str(&mut app, "https://ci");
+        let effects = save(&mut app);
+        assert_eq!(app.settings.editing, None);
+        assert!(matches!(effects.first(), Some(Effect::SaveSettings { .. })));
+        assert_eq!(
+            app.settings.file.get(SettingKey::JenkinsUrl),
+            Some("https://ci")
+        );
+        // An invalid value stays open, nothing saved.
+        app.update(Action::StartEdit);
+        app.update(Action::ClearInput);
+        type_str(&mut app, "ftp://x");
+        assert_eq!(save(&mut app), Vec::new());
+        assert!(app.settings.editing.is_some());
+    }
+
+    #[test]
+    fn auth_effects_and_actions_never_log_secrets() {
+        let mut app = oidc_app();
+        app.start();
+        let logged = format!(
+            "{:?} {:?} {:?}",
+            Effect::StoreSecret {
+                store: SecretStore::Keyring,
+                account: "a".into(),
+                secret: Some(Secret::new("pw-1")),
+            },
+            Action::LoginFinished {
+                generation: 1,
+                result: Ok(tokens("tok-2", None))
+            },
+            app.update(Action::CredentialsResolved {
+                generation: 1,
+                result: Ok(Resolved::Tokens(tokens("tok-3", None))),
+            }),
+        );
+        for secret in ["pw-1", "tok-2", "tok-3"] {
+            assert!(!logged.contains(secret), "{logged}");
+        }
     }
 }

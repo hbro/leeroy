@@ -146,11 +146,18 @@ pub fn context_bindings(context: Context) -> &'static [Binding] {
         nav("↑/↓", "select"),
         bind("C-u", "clear"),
     ];
-    const SETTINGS: &[Binding] = &[nav("↑/↓", "select"), bind("Enter", "edit/toggle")];
+    const SETTINGS: &[Binding] = &[
+        nav("↑/↓", "select"),
+        bind("Enter", "edit/toggle"),
+        bind("C-s", "save"),
+        bind("C-d", "discard"),
+    ];
     const EDIT: &[Binding] = &[
-        bind("Enter", "save"),
+        bind("Enter", "keep"),
         bind("Esc", "cancel"),
-        nav("↑/↓", "save & move"),
+        bind("C-s", "save"),
+        bind("C-d", "discard"),
+        nav("↑/↓", "keep & move"),
         bind("←/→", "cursor"),
         bind("C-u", "clear"),
     ];
@@ -158,6 +165,17 @@ pub fn context_bindings(context: Context) -> &'static [Binding] {
     const INFO: &[Binding] = &[bind("i/Esc", "close")];
     const CONFIRM_QUIT: &[Binding] = &[bind("y/Enter", "quit"), bind("n/Esc", "stay")];
     const CONFIRM_START: &[Binding] = &[bind("y/Enter", "start"), bind("n/Esc", "cancel")];
+    const DETECT: &[Binding] = &[
+        bind("Enter", "log in"),
+        bind("o", "open token page"),
+        bind("Esc", "close"),
+    ];
+    const LOGIN: &[Binding] = &[
+        bind("o", "open in browser"),
+        bind("b", "device code/browser"),
+        bind("r", "try again"),
+        bind("Esc", "cancel"),
+    ];
     const PROMOTE: &[Binding] = &[
         bind("Space", "select"),
         bind("Enter", "promote"),
@@ -166,6 +184,8 @@ pub fn context_bindings(context: Context) -> &'static [Binding] {
     ];
     match context {
         Context::ConfirmQuit => CONFIRM_QUIT,
+        Context::Login => LOGIN,
+        Context::Detect => DETECT,
         Context::ConfirmStart => CONFIRM_START,
         Context::Promote => PROMOTE,
         Context::Jobs => JOBS,
@@ -211,6 +231,27 @@ pub fn map_key(app: &App, key: KeyEvent) -> Option<Action> {
             _ => None,
         };
     }
+    // The detection overlay: its own keys only.
+    if context == Context::Detect {
+        return match key.code {
+            KeyCode::Enter => Some(Action::ApplyDetection),
+            KeyCode::Char('o') => Some(Action::OpenInBrowser),
+            KeyCode::Char('q') => Some(Action::RequestQuit),
+            KeyCode::Esc => Some(Action::Back),
+            _ => None,
+        };
+    }
+    // The login overlay too (q still asks to quit).
+    if context == Context::Login {
+        return match key.code {
+            KeyCode::Char('o') => Some(Action::OpenInBrowser),
+            KeyCode::Char('b') => Some(Action::SwitchLoginFlow),
+            KeyCode::Char('r') => Some(Action::Refresh),
+            KeyCode::Char('q') => Some(Action::RequestQuit),
+            KeyCode::Esc => Some(Action::Back),
+            _ => None,
+        };
+    }
     // The promotions list takes only its own keys.
     if context == Context::Promote {
         return match key.code {
@@ -231,6 +272,15 @@ pub fn map_key(app: &App, key: KeyEvent) -> Option<Action> {
         };
     }
 
+    // Settings: Ctrl-S saves the edits, Ctrl-D drops them, also while typing
+    // a field.
+    if ctrl && matches!(context, Context::Settings | Context::EditSetting) {
+        match key.code {
+            KeyCode::Char('s') => return Some(Action::SaveChanges),
+            KeyCode::Char('d') => return Some(Action::DiscardChanges),
+            _ => {}
+        }
+    }
     // Text input swallows everything else, including global keys.
     if context.captures_input() {
         return match key.code {
@@ -375,8 +425,10 @@ mod tests {
     use super::*;
     use crate::app::View;
 
-    const ALL_CONTEXTS: [Context; 22] = [
+    const ALL_CONTEXTS: [Context; 24] = [
         Context::ConfirmQuit,
+        Context::Login,
+        Context::Detect,
         Context::ConfirmStart,
         Context::Promote,
         Context::Jobs,
@@ -413,6 +465,22 @@ mod tests {
         match context {
             Context::Jobs => {}
             Context::ConfirmQuit => app.confirm_quit = true,
+            Context::Detect => {
+                app.detection = Some(crate::app::DetectState {
+                    url: "https://ci".into(),
+                    result: Some(Ok(crate::detect::Detection::JenkinsLogin {
+                        version: None,
+                        sso: None,
+                    })),
+                })
+            }
+            Context::Login => {
+                app.login = Some(crate::app::LoginState {
+                    flow: crate::auth::LoginFlow::Device,
+                    prompt: None,
+                    error: None,
+                })
+            }
             Context::Promote => {
                 app.promote = Some(crate::app::PromoteList {
                     promotions: Vec::new(),

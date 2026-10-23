@@ -6,8 +6,8 @@ use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{
-        Block, BorderType, Borders, Cell, Clear, HighlightSpacing, Paragraph, Row, Scrollbar,
-        ScrollbarOrientation, ScrollbarState, Table, TableState, Wrap,
+        Block, BorderType, Borders, Cell, Clear, HighlightSpacing, Padding, Paragraph, Row,
+        Scrollbar, ScrollbarOrientation, ScrollbarState, Table, TableState, Wrap,
     },
 };
 
@@ -63,8 +63,14 @@ pub fn render(frame: &mut Frame, app: &App) {
     if app.confirm_start.is_some() {
         render_confirm_start(frame, body, app);
     }
+    if app.detection.is_some() {
+        render_detection(frame, body, app);
+    }
+    if app.login.is_some() {
+        render_login(frame, body, app);
+    }
     if app.confirm_quit {
-        render_confirm_quit(frame, body, app.theme());
+        render_confirm_quit(frame, body, app.theme(), app.settings.unsaved());
     }
 }
 
@@ -96,6 +102,11 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App) {
             Span::raw(format!(" {url}")),
             Span::styled(" · connecting…", dim),
         ],
+        ConnectionStatus::Authenticating { url } => vec![
+            Span::styled("◌", dim),
+            Span::raw(format!(" {url}")),
+            Span::styled(" · logging in…", dim),
+        ],
         ConnectionStatus::Connected { url, info } => {
             let mut spans = vec![
                 Span::styled("●", Style::new().fg(t.success)),
@@ -107,10 +118,11 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App) {
             spans.push(Span::styled(format!(" · {}", info.user), dim));
             spans
         }
-        ConnectionStatus::Failed { url, error } => vec![
+        // Only the state: the reason is in the settings (it doesn't fit here).
+        ConnectionStatus::Failed { url, .. } => vec![
             Span::styled("✕", Style::new().fg(t.error).bold()),
             Span::raw(format!(" {url}")),
-            Span::styled(format!(" · {error}"), Style::new().fg(t.error)),
+            Span::styled(" · not connected", Style::new().fg(t.error)),
         ],
     });
     // Right end: the help hint, then the refresh status; the connection
@@ -183,11 +195,14 @@ fn render_jobs(frame: &mut Frame, area: Rect, app: &App) {
             Line::raw(""),
             Line::styled(format!("Connecting to {url}…"), Style::new().italic()),
         ],
-        ConnectionStatus::Failed { url, error } => vec![
+        ConnectionStatus::Authenticating { url } => vec![
             Line::raw(""),
-            Line::styled(format!("Cannot reach {url}"), Style::new().italic()),
-            Line::styled(error.clone(), Style::new().fg(t.error)),
-            Line::styled("Check the settings (0), or press r to retry", hint),
+            Line::styled(format!("Logging in to {url}…"), Style::new().italic()),
+        ],
+        ConnectionStatus::Failed { url, .. } => vec![
+            Line::raw(""),
+            Line::styled(format!("Not connected to {url}"), Style::new().italic()),
+            Line::styled("Why: see the settings (0). Press r to retry.", hint),
         ],
         ConnectionStatus::Connected { .. } => match app.jobs.load() {
             JobsLoad::NotLoaded | JobsLoad::Loading => vec![
@@ -1353,23 +1368,44 @@ fn status_symbol(t: &Theme, status: JobStatus) -> (&'static str, Color) {
 }
 
 const SECRET_MASK: &str = "••••••••";
+
+const PASSWORD_DOC: &str = concat!(
+    "The password or a Jenkins API token (Jenkins: your user → Security → API Token).\n",
+    "Saved where \"Password from\" says; it's shown while you type it. Empty: remove it.",
+);
+
+const DETECT_DOC: &str = concat!(
+    "Leeroy asks the Jenkins URL without credentials and follows where it's sent: an\n",
+    "anonymous Jenkins, a Jenkins login (own users or an SSO plugin: an API token),\n",
+    "basic auth, or a single sign-on proxy through Keycloak. Enter then uses what it\n",
+    "found and logs in (asking for a user name and password first if needed); a saved\n",
+    "Keycloak login is forgotten first, e.g. to log in as someone else.",
+);
+
+const SAVE_DOC: &str = concat!(
+    "Changes in this view are kept until you save them (Ctrl-S, or Save; Ctrl-D or\n",
+    "Discard drops them), then written to the config file and used, reconnecting if\n",
+    "they change the connection.",
+);
+
 const LABEL_WIDTH: usize = 16;
 
 fn render_settings(frame: &mut Frame, area: Rect, app: &App) {
     let s = &app.settings;
     let t = app.theme();
     let dim = t.dim();
-    let mut lines = vec![
-        Line::from(vec![
-            Span::styled(format!("   {:<LABEL_WIDTH$}", "Config file"), dim),
-            Span::raw(format!("  {}", s.path.display())),
-        ]),
-        Line::raw(""),
-    ];
+    let mut lines = vec![Line::from(vec![
+        Span::styled(format!("   {:<LABEL_WIDTH$}", "Config file"), dim),
+        Span::raw(format!("  {}", s.path.display())),
+    ])];
+    lines.extend(connection_lines(app, area.width));
+    lines.push(Line::raw(""));
 
-    let effective = s.effective();
+    // The draft: edits show right away, they're used once saved.
+    let effective = s.edited();
     let rows = s.rows();
     let selected_index = s.selected.min(rows.len() - 1);
+    let mut selected_line = 0;
     for (i, row) in rows.iter().enumerate() {
         let previous = i.checked_sub(1).map(|p| &rows[p]);
         // Section heading where the section changes.
@@ -1384,15 +1420,28 @@ fn render_settings(frame: &mut Frame, area: Rect, app: &App) {
         }
         // Headers sub-heading, within the Jenkins section.
         if matches!(row, SettingsRow::Header(_) | SettingsRow::AddHeader)
-            && matches!(previous, Some(SettingsRow::Setting(_)))
+            && previous
+                .is_some_and(|p| !matches!(p, SettingsRow::Header(_) | SettingsRow::AddHeader))
         {
             lines.push(Line::raw(""));
-            lines.push(Line::styled("   Headers", Style::new().bold()));
+            lines.push(Line::styled(
+                "   Additional HTTP Headers",
+                Style::new().bold(),
+            ));
+        }
+        if *row == SettingsRow::Save {
+            lines.push(Line::raw(""));
         }
         let selected = i == selected_index;
+        if selected {
+            selected_line = lines.len();
+        }
         let marker = if selected { "▶" } else { " " };
+        let idle = matches!(row, SettingsRow::Save | SettingsRow::Discard) && !s.unsaved();
         let label_style = if selected {
             Style::new().fg(t.highlight).bold()
+        } else if idle {
+            dim
         } else {
             Style::new()
         };
@@ -1400,6 +1449,10 @@ fn render_settings(frame: &mut Frame, area: Rect, app: &App) {
             SettingsRow::Setting(key) => key.label().to_owned(),
             SettingsRow::Header(name) => name.clone(),
             SettingsRow::AddHeader => "+ add header".to_owned(),
+            SettingsRow::Password => "Password".to_owned(),
+            SettingsRow::DetectLogin => "Detect login".to_owned(),
+            SettingsRow::Save => "✓ Save".to_owned(),
+            SettingsRow::Discard => "✕ Discard".to_owned(),
         };
         let mut spans = vec![Span::styled(
             format!(" {marker} {label:<LABEL_WIDTH$}"),
@@ -1431,7 +1484,10 @@ fn render_settings(frame: &mut Frame, area: Rect, app: &App) {
                         Span::styled(auto_theme_note(app.terminal_appearance), dim)
                     }
                     None if key.choices().is_some() => Span::styled(
-                        format!("{} (default)", key.choices().unwrap_or_default()[0]),
+                        format!(
+                            "{} (default)",
+                            key.display(key.choices().unwrap_or_default()[0])
+                        ),
                         dim,
                     ),
                     None if key == SettingKey::RefreshInterval => {
@@ -1451,6 +1507,15 @@ fn render_settings(frame: &mut Frame, area: Rect, app: &App) {
                 // Header values are credentials more often than not: always
                 // masked, fixed width so the length doesn't leak.
                 spans.push(Span::raw(SECRET_MASK));
+                if effective.ignored_header() == Some(name.as_str()) {
+                    spans.push(Span::styled(
+                        format!(
+                            "  not sent: Authentication is {}",
+                            effective.auth_mode().label()
+                        ),
+                        Style::new().fg(t.warning),
+                    ));
+                }
                 if s.is_header_overridden(name) {
                     spans.push(Span::styled(
                         format!("  (from ${})", header_env_var(name)),
@@ -1459,23 +1524,83 @@ fn render_settings(frame: &mut Frame, area: Rect, app: &App) {
                 }
             }
             SettingsRow::AddHeader => {}
+            SettingsRow::Password => {
+                use crate::auth::PasswordStore;
+                let store = PasswordStore::parse(effective.get(SettingKey::AuthPasswordStore));
+                let in_file = store == PasswordStore::File && effective.auth.password.is_some();
+                match &s.pending_password {
+                    Some(Some(_)) => spans.push(Span::raw(format!("{SECRET_MASK}  (not saved)"))),
+                    Some(None) => spans.push(Span::styled("removed (not saved)", dim)),
+                    None if in_file || s.env.auth.password.is_some() => {
+                        spans.push(Span::raw(SECRET_MASK))
+                    }
+                    None if store == PasswordStore::Keyring => spans.push(Span::styled(
+                        "in the OS keyring (Enter: set or replace)",
+                        dim,
+                    )),
+                    None => spans.push(Span::styled("(not set)", dim)),
+                }
+                if s.env.auth.password.is_some() {
+                    spans.push(Span::styled(
+                        format!("  (from ${})", crate::config::PASSWORD_ENV),
+                        dim,
+                    ));
+                }
+            }
+            SettingsRow::DetectLogin => spans.push(Span::styled(
+                if app.session_login.is_some() {
+                    "logged in · Enter: detect how Jenkins logs in, and log in again"
+                } else {
+                    "Enter: detect how Jenkins logs in, and log in"
+                },
+                dim,
+            )),
+            SettingsRow::Save if s.unsaved() => spans.push(Span::raw(
+                "write the changes to the config file and use them (Ctrl-S)",
+            )),
+            SettingsRow::Discard if s.unsaved() => {
+                spans.push(Span::raw("back to the saved settings (Ctrl-D)"))
+            }
+            SettingsRow::Save => spans.push(Span::styled("nothing to save", dim)),
+            SettingsRow::Discard => {}
         }
         lines.push(Line::from(spans));
     }
 
-    let block = view_block(t, "Settings");
+    // On a small screen the list scrolls to keep the selection in sight,
+    // leaving room below for the status message and the docs.
+    let inner_height = usize::from(view_block(t, "").inner(area).height);
+    let reserve = 3.min(inner_height / 3);
+    let list_height = lines.len().min(inner_height.saturating_sub(reserve));
+    let offset = selected_line
+        .saturating_sub(list_height.saturating_sub(2))
+        .min(lines.len() - list_height);
+    let mut title = String::from("Settings");
+    if s.unsaved() {
+        title.push_str(" · unsaved changes");
+    }
+    let more = match (offset > 0, offset + list_height < lines.len()) {
+        (true, true) => "↑↓",
+        (true, false) => "↑",
+        (false, true) => "↓",
+        (false, false) => "",
+    };
+    if !more.is_empty() {
+        title.push_str(&format!(" · more {more}"));
+    }
+    let block = view_block(t, &title);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     // A blank line before the docs, unless it would push the status message
     // ("Saved to …") off a small screen.
-    let spacer = u16::from(usize::from(inner.height) > lines.len() + 1);
+    let spacer = u16::from(inner_height > list_height + 1);
     let [top, _, docs] = Layout::vertical([
-        Constraint::Length(lines.len() as u16),
+        Constraint::Length(list_height as u16),
         Constraint::Length(spacer),
         Constraint::Min(0),
     ])
     .areas(inner);
-    frame.render_widget(Paragraph::new(lines), top);
+    frame.render_widget(Paragraph::new(lines).scroll((offset as u16, 0)), top);
 
     // Status message + docs for the selected row, in their own inset area so
     // wrapped lines keep the indent.
@@ -1491,12 +1616,91 @@ fn render_settings(frame: &mut Frame, area: Rect, app: &App) {
     let doc = match &rows[selected_index] {
         SettingsRow::Setting(key) => key.doc(),
         SettingsRow::Header(_) | SettingsRow::AddHeader => HEADERS_DOC,
+        SettingsRow::Password => PASSWORD_DOC,
+        SettingsRow::Save | SettingsRow::Discard => SAVE_DOC,
+        SettingsRow::DetectLogin => DETECT_DOC,
     };
     bottom_lines.extend(doc.lines().map(|line| Line::styled(line, dim)));
     frame.render_widget(
         Paragraph::new(bottom_lines).wrap(Wrap { trim: false }),
         bottom,
     );
+}
+
+/// The settings view's Connection row: the state, and why it failed, in full
+/// (wrapped to `width`).
+fn connection_lines(app: &App, width: u16) -> Vec<Line<'static>> {
+    let t = app.theme();
+    let dim = t.dim();
+    let label = Span::styled(format!("   {:<LABEL_WIDTH$}  ", "Connection"), dim);
+    let (state, error) = match &app.connection {
+        ConnectionStatus::NotConfigured => (Span::styled("not configured", dim), None),
+        ConnectionStatus::Authenticating { .. } => (Span::raw("◌ logging in…"), None),
+        ConnectionStatus::Connecting { .. } => (Span::raw("◌ connecting…"), None),
+        ConnectionStatus::Connected { info, .. } => {
+            let version = info
+                .version
+                .as_deref()
+                .map(|v| format!(" to Jenkins {v}"))
+                .unwrap_or_default();
+            (
+                Span::styled(
+                    format!("● connected{version} as {}", info.user),
+                    Style::new().fg(t.success),
+                ),
+                None,
+            )
+        }
+        ConnectionStatus::Failed { error, .. } => (
+            Span::styled(
+                "✕ not connected (r: retry)",
+                Style::new().fg(t.error).bold(),
+            ),
+            Some(error.clone()),
+        ),
+    };
+    let mut lines = vec![Line::from(vec![label, state])];
+    if let Some(error) = error {
+        let indent = 3 + LABEL_WIDTH + 2;
+        let room = usize::from(width).saturating_sub(indent + 1).max(20);
+        for line in wrap_words(&error, room) {
+            lines.push(Line::styled(
+                format!("{:indent$}{line}", ""),
+                Style::new().fg(t.error),
+            ));
+        }
+    }
+    lines
+}
+
+/// `text` in lines of at most `width` chars, broken at spaces (words longer
+/// than that are cut).
+fn wrap_words(text: &str, width: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    for word in text.split_whitespace() {
+        let mut word = word.to_owned();
+        while word.chars().count() > width {
+            if !line.is_empty() {
+                lines.push(std::mem::take(&mut line));
+            }
+            let cut: String = word.chars().take(width).collect();
+            word = word.chars().skip(width).collect();
+            lines.push(cut);
+        }
+        let len = line.chars().count();
+        if len > 0 && len + 1 + word.chars().count() > width {
+            lines.push(std::mem::take(&mut line));
+        }
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        line.push_str(&word);
+    }
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    lines
 }
 
 /// An input's text with the cursor: highlighted char, or a block at the end.
@@ -1688,23 +1892,29 @@ fn format_age(age: std::time::Duration) -> String {
     }
 }
 
-fn render_confirm_quit(frame: &mut Frame, area: Rect, t: &Theme) {
+fn render_confirm_quit(frame: &mut Frame, area: Rect, t: &Theme, unsaved: bool) {
     let key = Style::new().bold();
-    let lines = vec![
-        Line::raw(""),
-        Line::from(vec![
-            Span::raw("  "),
-            Span::styled("y", key),
-            Span::raw(" / "),
-            Span::styled("Enter", key),
-            Span::raw(" quit     "),
-            Span::styled("n", key),
-            Span::raw(" / "),
-            Span::styled("Esc", key),
-            Span::raw(" stay"),
-        ]),
-    ];
-    let popup = centered(area, 38, lines.len() as u16 + 2);
+    let mut lines = vec![Line::raw("")];
+    if unsaved {
+        lines.push(Line::styled(
+            "  Unsaved settings changes will be lost.",
+            Style::new().fg(t.warning),
+        ));
+        lines.push(Line::raw(""));
+    }
+    lines.extend([Line::from(vec![
+        Span::raw("  "),
+        Span::styled("y", key),
+        Span::raw(" / "),
+        Span::styled("Enter", key),
+        Span::raw(" quit     "),
+        Span::styled("n", key),
+        Span::raw(" / "),
+        Span::styled("Esc", key),
+        Span::raw(" stay"),
+    ])]);
+    let width = if unsaved { 44 } else { 38 };
+    let popup = centered(area, width, lines.len() as u16 + 2);
     let block = Block::bordered()
         .title(" Quit Leeroy? ")
         .border_type(BorderType::Double)
@@ -1790,6 +2000,7 @@ fn render_info(frame: &mut Frame, area: Rect, app: &App) {
             None => "none (direct)".into(),
         };
         lines.push(row("Proxy", Span::raw(proxy)));
+        lines.push(row("Login", Span::raw(login_summary(app, &config.auth))));
         let headers: Vec<&str> = config.headers.iter().map(|(n, _)| n.as_str()).collect();
         let headers = if headers.is_empty() {
             "none".to_owned()
@@ -1921,6 +2132,311 @@ fn render_confirm_start(frame: &mut Frame, area: Rect, app: &App) {
         .border_style(Style::new().fg(t.warning));
     frame.render_widget(Clear, popup);
     frame.render_widget(Paragraph::new(lines).block(block), popup);
+}
+
+/// How Leeroy authenticates, for the instance overlay (no secrets).
+fn login_summary(app: &App, auth: &crate::auth::AuthConfig) -> String {
+    use crate::auth::{AuthConfig, PasswordStore};
+    match auth {
+        AuthConfig::Headers | AuthConfig::Anonymous => auth.mode().label().to_owned(),
+        AuthConfig::Basic(basic) => {
+            let from = if app.settings.env.auth.password.is_some() {
+                format!("${}", crate::config::PASSWORD_ENV)
+            } else {
+                match basic.store {
+                    PasswordStore::Keyring => "keyring",
+                    PasswordStore::Command => "command",
+                    PasswordStore::File => "config file",
+                }
+                .to_owned()
+            };
+            let user = basic.username.as_deref().unwrap_or("?");
+            format!("basic as {user}, password from {from}")
+        }
+        AuthConfig::Oidc(oidc) => {
+            let valid = app
+                .session_login
+                .as_ref()
+                .and_then(|login| login.tokens.expires_at)
+                .and_then(|at| at.duration_since(app.wall_now).ok())
+                .map(|left| format!(", token valid {}", crate::builds::format_duration(left)))
+                .unwrap_or_default();
+            let issuer = oidc.issuer.as_deref().map(redact_url).unwrap_or_default();
+            let host = issuer.split("://").nth(1).unwrap_or(&issuer);
+            format!("OpenID Connect ({host}){valid}")
+        }
+    }
+}
+
+/// The login detection overlay: what was found, and what to do.
+fn render_detection(frame: &mut Frame, area: Rect, app: &App) {
+    use crate::detect::{Detection, DeviceCheck};
+    let Some(detection) = &app.detection else {
+        return;
+    };
+    let t = app.theme();
+    let key = Style::new().bold();
+    let dim = t.dim();
+    let url = redact_url(&detection.url);
+    let jenkins = |version: &Option<String>| match version {
+        Some(v) => format!("Jenkins {v}"),
+        None => "Jenkins".to_owned(),
+    };
+    let provider = |sso: &crate::detect::Sso| {
+        let name = if sso.keycloak() {
+            "Keycloak"
+        } else {
+            "an identity provider"
+        };
+        format!("{name} at {}", sso.login_at)
+    };
+    let mut lines = vec![Line::raw("")];
+    let mut suggest = None;
+    let token_page = match &detection.result {
+        Some(Ok(found)) => found.token_page(&detection.url).is_some(),
+        _ => false,
+    };
+    match &detection.result {
+        None => lines.push(Line::styled(
+            format!("Looking at how {url} logs in…"),
+            Style::new().italic(),
+        )),
+        Some(Err(error)) => {
+            lines.push(Line::styled(
+                format!("Couldn't reach {url}:"),
+                Style::new().fg(t.error).bold(),
+            ));
+            lines.push(Line::styled(error.clone(), Style::new().fg(t.error)));
+        }
+        Some(Ok(found)) => match found {
+            Detection::Anonymous { version } => {
+                lines.push(Line::raw(format!(
+                    "{} lets anyone read: no login needed.",
+                    jenkins(version)
+                )));
+                suggest = Some("anonymous, and connect");
+            }
+            Detection::JenkinsLogin { version, sso } => {
+                match sso {
+                    Some(sso) => lines.push(Line::raw(format!(
+                        "{} logs in through {} with its own plugin. Its API doesn't take \
+                             that login: use your Jenkins user name and an API token instead.",
+                        jenkins(version),
+                        provider(sso)
+                    ))),
+                    None => lines.push(Line::raw(format!(
+                        "{} asks for a login. Use your Jenkins user name with an API \
+                             token (or your password).",
+                        jenkins(version)
+                    ))),
+                }
+                lines.push(Line::raw(""));
+                lines.push(Line::styled(
+                    "Create the token in Jenkins (o opens the page; log in there first): \
+                         your user → Security → API Token. Then enter it as the Password.",
+                    dim,
+                ));
+                suggest = Some("basic (fill in your user name and password or API token)");
+            }
+            Detection::Basic { realm, jenkins } => {
+                let who = if *jenkins {
+                    "Jenkins"
+                } else {
+                    "A server in front of Jenkins"
+                };
+                let realm = realm
+                    .as_deref()
+                    .map(|r| format!(" (\"{r}\")"))
+                    .unwrap_or_default();
+                lines.push(Line::raw(format!("{who} asks for HTTP basic auth{realm}.")));
+                suggest = Some("basic (fill in your user name and password or API token)");
+            }
+            Detection::SsoProxy { sso, proxy } => {
+                let proxy = proxy.as_deref();
+                lines.push(Line::raw(format!(
+                    "Jenkins is behind a single sign-on proxy{} that logs in through {}.",
+                    proxy.map(|p| format!(" ({p})")).unwrap_or_default(),
+                    provider(sso)
+                )));
+                if let Some(issuer) = &sso.issuer {
+                    lines.push(Line::styled(format!("Issuer: {issuer}"), dim));
+                }
+                let client = sso.client_id.as_deref().unwrap_or("?");
+                lines.push(Line::raw(""));
+                match &sso.device {
+                    DeviceCheck::Works => {
+                        lines.push(Line::raw(format!(
+                            "Its client \"{client}\" allows a device login: Leeroy can \
+                                 log in with it (if the proxy accepts its tokens)."
+                        )));
+                        suggest = Some("Keycloak, with this issuer and client");
+                    }
+                    DeviceCheck::Refused(_) | DeviceCheck::Unavailable => {
+                        let why = match &sso.device {
+                            DeviceCheck::Refused(why) => why.clone(),
+                            _ => "the provider has no device login".to_owned(),
+                        };
+                        lines.push(Line::raw(format!(
+                            "Leeroy can't log in with its client \"{client}\":"
+                        )));
+                        lines.push(Line::styled(why, Style::new().fg(t.warning)));
+                        lines.push(Line::raw(""));
+                        lines.push(Line::raw("Ask your Keycloak admin for:"));
+                        for line in crate::detect::admin_request(sso, proxy) {
+                            lines.push(Line::styled(line, dim));
+                        }
+                        suggest = Some(
+                            "try anyway, with this issuer and client (replace Client ID with the new client's once you have it)",
+                        );
+                    }
+                    DeviceCheck::NotChecked => {
+                        lines.push(Line::raw(
+                            "Fill in the provider's issuer URL and a client for Leeroy \
+                                 under Authentication: oidc.",
+                        ));
+                        suggest = Some("Keycloak / OpenID Connect (fill in the issuer and client)");
+                    }
+                }
+            }
+            Detection::Unknown { reason } => {
+                lines.push(Line::raw("Couldn't tell how this Jenkins logs in:"));
+                lines.push(Line::styled(reason.clone(), Style::new().fg(t.warning)));
+            }
+        },
+    }
+    lines.push(Line::raw(""));
+    let mut keys = Vec::new();
+    if let Some(suggest) = suggest {
+        lines.push(Line::from(vec![
+            Span::styled("Enter", key),
+            Span::raw(format!(" log in: {suggest}")),
+        ]));
+    }
+    if token_page {
+        keys.extend([Span::styled("o", key), Span::raw(" open the token page   ")]);
+    }
+    keys.extend([Span::styled("Esc", key), Span::raw(" close")]);
+    lines.push(Line::from(keys));
+    render_popup(frame, area, t, " How does this Jenkins log in? ", lines);
+}
+
+/// The login overlay: where to log in, and the code for the device flow.
+fn render_login(frame: &mut Frame, area: Rect, app: &App) {
+    let Some(login) = &app.login else {
+        return;
+    };
+    let t = app.theme();
+    let key = Style::new().bold();
+    let dim = t.dim();
+    let mut lines = vec![Line::raw("")];
+    let other = match login.flow {
+        crate::auth::LoginFlow::Device => " browser login instead",
+        crate::auth::LoginFlow::Browser => " code login instead",
+    };
+    match &login.prompt {
+        None if login.error.is_some() => {
+            let error = login.error.as_deref().unwrap_or_default();
+            lines.push(Line::styled(
+                "The login didn't work:",
+                Style::new().fg(t.error).bold(),
+            ));
+            lines.push(Line::styled(error.to_string(), Style::new().fg(t.error)));
+            lines.push(Line::raw(""));
+            lines.push(Line::raw(
+                crate::app::login_hint(error, login.flow).to_string(),
+            ));
+        }
+        None => lines.push(Line::styled(
+            "Contacting the identity provider…",
+            Style::new().italic(),
+        )),
+        Some(prompt) => {
+            match &prompt.user_code {
+                Some(code) => {
+                    lines.push(Line::raw("Open this page in any browser:"));
+                    lines.push(Line::styled(
+                        prompt.url.to_string(),
+                        Style::new().fg(t.accent).underlined(),
+                    ));
+                    lines.push(Line::raw(""));
+                    lines.push(Line::from(vec![
+                        Span::raw("and enter the code  "),
+                        Span::styled(code.clone(), Style::new().fg(t.highlight).bold()),
+                    ]));
+                }
+                None => {
+                    lines.push(Line::raw("Log in in the browser window that opened."));
+                    lines.push(Line::styled(
+                        "Didn't open? Press o, or open this address:",
+                        dim,
+                    ));
+                    lines.push(Line::styled(
+                        prompt.url.to_string(),
+                        Style::new().fg(t.accent).underlined(),
+                    ));
+                }
+            }
+            if let Some(left) = prompt
+                .expires_at
+                .and_then(|at| at.duration_since(app.wall_now).ok())
+            {
+                lines.push(Line::styled(
+                    format!("(valid for {})", crate::builds::format_duration(left)),
+                    dim,
+                ));
+            }
+            lines.push(Line::raw(""));
+            lines.push(Line::styled("Leeroy continues once you're logged in.", dim));
+        }
+    }
+    lines.push(Line::raw(""));
+    lines.push(Line::from(vec![
+        Span::styled("o", key),
+        Span::raw(" open in browser   "),
+        Span::styled("b", key),
+        Span::raw(other),
+        Span::raw("   "),
+        Span::styled("r", key),
+        Span::raw(" try again   "),
+        Span::styled("Esc", key),
+        Span::raw(if login.error.is_some() {
+            " close"
+        } else {
+            " cancel"
+        }),
+    ]));
+    render_popup(
+        frame,
+        area,
+        t,
+        " Log in · Keycloak / OpenID Connect ",
+        lines,
+    );
+}
+
+/// A centred, double-bordered popup of `lines`, wrapped (up to 100 wide),
+/// as tall as the wrapped text.
+fn render_popup(frame: &mut Frame, area: Rect, t: &Theme, title: &str, lines: Vec<Line<'_>>) {
+    let width = area.width.saturating_sub(4).min(100);
+    // Borders and the padding inside them.
+    let inner_width = width.saturating_sub(6).max(1);
+    let height: u16 = lines
+        .iter()
+        .map(|l| (l.width() as u16).div_ceil(inner_width).max(1))
+        .sum();
+    let popup = centered(area, width, (height + 2).min(area.height));
+    let block = Block::bordered()
+        .title(title)
+        .border_type(BorderType::Double)
+        .border_style(Style::new().fg(t.accent))
+        .padding(Padding::horizontal(2));
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(block),
+        popup,
+    );
 }
 
 fn render_help(frame: &mut Frame, area: Rect, app: &App) {

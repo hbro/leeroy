@@ -5,6 +5,7 @@ use std::{fmt, time::Duration};
 use serde::Deserialize;
 
 use crate::{
+    auth::{AuthConfig, Credentials},
     builds::{self, BuildPage, BuildRef},
     config::redact_url,
     console::{self, ConsoleChunk},
@@ -29,6 +30,10 @@ pub struct ConnectionConfig {
     pub proxy: Option<String>,
     /// Accept invalid TLS certificates. Insecure; off by default.
     pub skip_tls_verify: bool,
+    /// The auth settings (no secrets): part of the connection's identity.
+    pub auth: AuthConfig,
+    /// Resolved at connect time (password, token); sent as `Authorization`.
+    pub credentials: Credentials,
 }
 
 /// Hand-written so header values and URL/proxy passwords never end up in logs.
@@ -46,6 +51,8 @@ impl fmt::Debug for ConnectionConfig {
             )
             .field("proxy", &self.proxy.as_deref().map(redact_url))
             .field("skip_tls_verify", &self.skip_tls_verify)
+            .field("auth", &self.auth)
+            .field("credentials", &self.credentials)
             .finish()
     }
 }
@@ -67,7 +74,17 @@ struct WhoAmI {
 /// Build an HTTP client for `config`. Env proxy vars are never read here:
 /// the proxy decision is made by the caller (see [`crate::proxy`]).
 pub fn client(config: &ConnectionConfig) -> Result<reqwest::Client, String> {
+    client_with(config, reqwest::redirect::Policy::default())
+}
+
+/// [`client`] with another redirect policy (login detection follows them
+/// itself, to see every hop).
+pub fn client_with(
+    config: &ConnectionConfig,
+    redirects: reqwest::redirect::Policy,
+) -> Result<reqwest::Client, String> {
     let mut builder = reqwest::Client::builder()
+        .redirect(redirects)
         .user_agent(concat!("leeroy/", env!("CARGO_PKG_VERSION")))
         .connect_timeout(CONNECT_TIMEOUT)
         .timeout(REQUEST_TIMEOUT)
@@ -469,6 +486,12 @@ async fn send(
             .header(reqwest::header::CONTENT_TYPE, content_type)
             .body(body);
     }
+    if let Some(value) = config.credentials.authorization() {
+        let mut value = reqwest::header::HeaderValue::from_str(value.expose())
+            .map_err(|_| "invalid characters in the user name, password or token".to_owned())?;
+        value.set_sensitive(true);
+        request = request.header(reqwest::header::AUTHORIZATION, value);
+    }
     for (name, value) in config.headers.iter().chain(extra) {
         let name = reqwest::header::HeaderName::from_bytes(name.as_bytes())
             .map_err(|_| format!("invalid header name {name:?}"))?;
@@ -480,7 +503,10 @@ async fn send(
     }
 
     let requested = endpoint_origin(&config.url);
-    let header_names: Vec<&str> = config.headers.iter().map(|(n, _)| n.as_str()).collect();
+    let mut header_names: Vec<&str> = config.headers.iter().map(|(n, _)| n.as_str()).collect();
+    if config.credentials != Credentials::None {
+        header_names.push("Authorization");
+    }
     let response = request.send().await.map_err(describe)?;
     let status = response.status();
     let final_url = response.url().clone();
@@ -503,19 +529,33 @@ async fn send(
         "response"
     );
     if matches!(status.as_u16(), 401 | 403) {
-        return Err(auth_failure(
+        let challenge = header("WWW-Authenticate");
+        let from_jenkins = answered_by_jenkins(version.is_some(), challenge.as_deref());
+        let mut error = auth_failure(
             status.as_u16(),
-            version.is_some(),
-            header("WWW-Authenticate"),
+            from_jenkins,
+            challenge,
             requested.as_deref() != Some(&origin(&final_url)),
             &final_url,
-        ));
+        );
+        if from_jenkins && matches!(config.credentials, Credentials::Bearer(_)) {
+            error.push_str(
+                ". Jenkins itself doesn't take the identity provider's token (its SSO \
+                 plugin is for browsers): use basic auth with a Jenkins API token \
+                 (Detect login in the settings)",
+            );
+        }
+        return Err(error);
     }
     if allow_not_found && status.as_u16() == 404 {
         return Ok(None);
     }
     if !status.is_success() {
         return Err(format!("unexpected response: HTTP {status}"));
+    }
+    let html = header("Content-Type").is_some_and(|t| t.starts_with("text/html"));
+    if html && requested.as_deref() != Some(&origin(&final_url)) {
+        return Err(login_page_error(&final_url, &config.credentials));
     }
     let headers = response.headers().clone();
     let bytes = response.bytes().await.map_err(describe)?.to_vec();
@@ -525,6 +565,19 @@ async fn send(
         headers,
         version,
     }))
+}
+
+/// Whether an answer came from Jenkins itself: it sends `X-Jenkins`, except
+/// on its own 401, which names its realm instead.
+pub(crate) fn answered_by_jenkins(x_jenkins: bool, www_authenticate: Option<&str>) -> bool {
+    x_jenkins || www_authenticate.is_some_and(|c| c.contains("realm=\"Jenkins\""))
+}
+
+/// The value of query parameter `name` in `url`.
+pub(crate) fn query_param(url: &url::Url, name: &str) -> Option<String> {
+    url.query_pairs()
+        .find(|(k, _)| k == name)
+        .map(|(_, v)| v.into_owned())
 }
 
 /// Explain a 401/403: who refused, and whether a redirect dropped our headers.
@@ -558,6 +611,26 @@ fn auth_failure(
     msg
 }
 
+/// We were redirected to another server's web page: most likely the login
+/// page of an SSO proxy in front of Jenkins that wants a browser session.
+fn login_page_error(final_url: &url::Url, credentials: &Credentials) -> String {
+    let mut target = final_url.clone();
+    target.set_path("");
+    target.set_query(None);
+    let target = redact_url(target.as_str().trim_end_matches('/'));
+    match credentials {
+        Credentials::Bearer(_) => format!(
+            "redirected to a login page ({target}): the server in front of Jenkins doesn't \
+             accept the token (it has to allow bearer tokens, e.g. oauth2-proxy \
+             --skip-jwt-bearer-tokens)"
+        ),
+        _ => format!(
+            "redirected to a login page ({target}): a server in front of Jenkins wants a \
+             browser login; try auth mode oidc"
+        ),
+    }
+}
+
 /// `scheme://host:port` of a URL, the unit redirects keep credentials within.
 fn origin(url: &url::Url) -> String {
     format!(
@@ -574,7 +647,7 @@ fn endpoint_origin(base: &str) -> Option<String> {
 
 /// `base` joined with `path`, keeping any path prefix of `base`
 /// (e.g. `https://host/jenkins`).
-fn api_url(base: &str, path: &str) -> Result<url::Url, String> {
+pub(crate) fn api_url(base: &str, path: &str) -> Result<url::Url, String> {
     let mut base = url::Url::parse(base).map_err(|err| format!("invalid Jenkins URL: {err}"))?;
     if !base.path().ends_with('/') {
         base.set_path(&format!("{}/", base.path()));
@@ -584,7 +657,7 @@ fn api_url(base: &str, path: &str) -> Result<url::Url, String> {
 }
 
 /// A short, human-readable reason for a failed request.
-fn describe(err: reqwest::Error) -> String {
+pub(crate) fn describe(err: reqwest::Error) -> String {
     // The URL is already shown in the UI; drop it from the message.
     let err = err.without_url();
     if err.is_timeout() {
@@ -632,6 +705,8 @@ mod tests {
             headers: Vec::new(),
             proxy: None,
             skip_tls_verify: false,
+            auth: AuthConfig::Headers,
+            credentials: Credentials::None,
         }
     }
 
@@ -664,9 +739,11 @@ mod tests {
             headers: vec![("Authorization".into(), "Basic s3cret".into())],
             proxy: Some("socks5h://u:hunter2@p:1080".into()),
             skip_tls_verify: false,
+            auth: AuthConfig::Headers,
+            credentials: Credentials::Bearer(crate::auth::Secret::new("t0ken")),
         };
         let debug = format!("{config:?}");
-        for secret in ["s3cret", "hunter2", "urlpass"] {
+        for secret in ["s3cret", "hunter2", "urlpass", "t0ken"] {
             assert!(!debug.contains(secret), "{debug}");
         }
         assert!(debug.contains("Authorization"), "{debug}");
@@ -743,6 +820,25 @@ mod tests {
             .await;
         let err = check(&config(&jenkins.uri())).await.unwrap_err();
         assert!(err.contains("from Jenkins"), "{err}");
+    }
+
+    /// Jenkins with its own OpenID Connect plugin, given a Keycloak token:
+    /// its 401 has no X-Jenkins header, only its realm.
+    #[tokio::test]
+    async fn keycloak_token_refused_by_jenkins_points_to_api_tokens() {
+        let jenkins = MockServer::start().await;
+        Mock::given(path("/whoAmI/api/json"))
+            .respond_with(
+                ResponseTemplate::new(401)
+                    .insert_header("WWW-Authenticate", "Basic realm=\"Jenkins\""),
+            )
+            .mount(&jenkins)
+            .await;
+        let mut config = config(&jenkins.uri());
+        config.credentials = Credentials::Bearer(crate::auth::Secret::new("kc-token"));
+        let err = check(&config).await.unwrap_err();
+        assert!(err.contains("from Jenkins"), "{err}");
+        assert!(err.contains("API token"), "{err}");
     }
 
     /// A redirect to another origin drops Authorization (reqwest does that for

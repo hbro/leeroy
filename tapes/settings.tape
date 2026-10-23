@@ -18,6 +18,7 @@ Screenshot target/screenshots/settings-editing.png
 Sleep 500ms
 Hide
 Enter
+Ctrl+S
 Sleep 1s
 Show
 Screenshot target/screenshots/settings-saved.png
@@ -27,6 +28,7 @@ Down 2
 Enter
 Type "socks5h://me:secret@bastion:1080"
 Enter
+Ctrl+S
 Sleep 500ms
 Show
 Screenshot target/screenshots/settings-proxy.png

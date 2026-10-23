@@ -1,0 +1,28 @@
+---
+source: tests/render.rs
+expression: render(&app).backend()
+---
+" Leeroy  ○ not connected                                              h/?  help "
+" 1 Jobs   2 Builds   3 Pipelines   4 Pipeline runs                   0 Settings "
+"Se╔ How does this Jenkins log in? ═══════════════════════════════════════════╗──"
+"  ║                                                                          ║  "
+"  ║  Jenkins is behind a single sign-on proxy (oauth2-proxy) that logs in    ║  "
+"  ║  through Keycloak at https://sso.example.com.                            ║  "
+" J║  Issuer: https://sso.example.com/realms/acme                             ║  "
+"  ║                                                                          ║  "
+"  ║  Leeroy can't log in with its client "ci-proxy":                         ║  "
+"  ║  device login refused: Invalid client or Invalid client credentials      ║  "
+"  ║  (unauthorized_client)                                                   ║  "
+" ▶║                                                                          ║  "
+"  ║  Ask your Keycloak admin for:                                            ║  "
+"  ║  1. A public client for Leeroy, e.g. "leeroy", in                        ║  "
+"  ║  https://sso.example.com/realms/acme: client authentication off, "OAuth  ║  "
+"  ║  2.0 Device Authorization Grant" on.                                     ║  "
+" A║  2. oauth2-proxy accepting its tokens: --skip-jwt-bearer-tokens          ║  "
+"  ║  --extra-jwt-issuers=https://sso.example.com/realms/acme=leeroy.         ║  "
+"  ║                                                                          ║  "
+"  ║  Enter log in: try anyway, with this issuer and client (replace Client   ║  "
+"  ║  ID with the new client's once you have it)                              ║: "
+"  ║  Esc close                                                               ║  "
+"──╚══════════════════════════════════════════════════════════════════════════╝──"
+" Enter  log in   o  open token page   Esc  close                                "

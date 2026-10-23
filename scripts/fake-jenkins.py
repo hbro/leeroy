@@ -3,6 +3,7 @@
 
     scripts/fake-jenkins.py [--port 8099] [--auth USER:TOKEN] [--delay SECS]
                             [--status CODE] [--tls] [--jobs N] [--churn]
+                            [--oidc] [--token-ttl SECS]
 
 Serves (under any path prefix, with an X-Jenkins header):
   GET /whoAmI/api/json   the current user
@@ -29,6 +30,18 @@ Serves (under any path prefix, with an X-Jenkins header):
             is echoed back too (to show a user name in screenshots).
 Also works as an HTTP proxy for any host (absolute request URLs), so Leeroy
 can be pointed at e.g. http://jenkins.example.com via proxy.url.
+Always an OpenID Connect provider too (issuer /realms/fake): discovery, device
+login (approved when /realms/fake/device is opened), browser login (the
+authorize URL redirects straight back with a code), token refresh (rotating
+refresh tokens); logins are logged to stdout. A valid bearer token shows as
+user "me".
+--oidc      be an SSO proxy in front of Jenkins (like oauth2-proxy): require
+            "Authorization: Bearer <its access token>" (401 for a wrong one);
+            without any, redirect via /oauth2/start to the provider's login
+            with the proxy's own client "fake-proxy" (confidential: device
+            login refused, as on a real Keycloak). Device logins of other
+            clients are approved by themselves after two polls
+--token-ttl access token lifetime in seconds with --oidc (default 300)
 --delay     sleep before answering (to see "connecting" / "refreshing")
 --status    always answer with this HTTP status
 --tls       serve HTTPS with a throwaway self-signed cert (needs openssl)
@@ -43,13 +56,76 @@ import argparse
 import re
 import base64
 import json
+import secrets
 import subprocess
 import ssl
 import tempfile
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import unquote
+from urllib.parse import parse_qs, unquote, urlencode, urlsplit
+
+REALM = "/realms/fake"
+OIDC = f"{REALM}/protocol/openid-connect"
+
+
+class Provider:
+    """The --oidc identity provider's state: codes and tokens."""
+
+    def __init__(self, ttl: int, approve_after: int | None) -> None:
+        self.ttl = ttl
+        # Polls until a device login approves itself (None: only via the page).
+        self.approve_after = approve_after
+        self.lock = threading.Lock()
+        self.devices: dict[str, int] = {}  # device code -> polls left
+        self.codes: set[str] = set()
+        self.access: dict[str, float] = {}  # token -> expiry
+        self.refresh: set[str] = set()
+
+    def issue(self) -> dict:
+        access, refresh = "acc-" + secrets.token_hex(8), "ref-" + secrets.token_hex(8)
+        self.access[access] = time.time() + self.ttl
+        self.refresh.add(refresh)
+        return {
+            "access_token": access,
+            "refresh_token": refresh,
+            "expires_in": self.ttl,
+            "token_type": "Bearer",
+        }
+
+    def token(self, form: dict) -> tuple[int, dict]:
+        grant = form.get("grant_type", "")
+        with self.lock:
+            if grant == "urn:ietf:params:oauth:grant-type:device_code":
+                code = form.get("device_code", "")
+                if code not in self.devices:
+                    return 400, {"error": "expired_token"}
+                if self.devices[code] > 0:
+                    if self.approve_after is not None:
+                        self.devices[code] -= 1
+                    return 400, {"error": "authorization_pending"}
+                del self.devices[code]
+                print("logged in (device code)", flush=True)
+                return 200, self.issue()
+            if grant == "authorization_code":
+                if form.get("code") not in self.codes or not form.get("code_verifier"):
+                    return 400, {"error": "invalid_grant"}
+                self.codes.discard(form["code"])
+                print("logged in (browser)", flush=True)
+                return 200, self.issue()
+            if grant == "refresh_token":
+                if form.get("refresh_token") not in self.refresh:
+                    return 400, {"error": "invalid_grant", "error_description": "Session not active"}
+                self.refresh.discard(form["refresh_token"])
+                print("refreshed a token", flush=True)
+                return 200, self.issue()
+        return 400, {"error": "unsupported_grant_type"}
+
+    def valid(self, authorization: str) -> bool:
+        token = authorization.removeprefix("Bearer ")
+        with self.lock:
+            return authorization.startswith("Bearer ") and self.access.get(token, 0) > time.time()
 
 VERSION = "2.504.1"
 COLORS = ["blue", "red", "yellow", "aborted", "notbuilt", "disabled", "blue_anime"]
@@ -482,8 +558,11 @@ def main() -> None:
     parser.add_argument("--churn", action="store_true")
     parser.add_argument("--no-views", action="store_true")
     parser.add_argument("--log-lines", type=int, default=20)
+    parser.add_argument("--oidc", action="store_true")
+    parser.add_argument("--token-ttl", type=int, default=300)
     args = parser.parse_args()
     job_requests = [0]
+    provider = Provider(args.token_ttl, 2 if args.oidc else None)
 
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self) -> None:
@@ -492,6 +571,10 @@ def main() -> None:
             time.sleep(args.delay)
             self.path = re.sub(r"^https?://[^/]+", "", self.path) or "/"
             path = self.path.split("?")[0]
+            if path.startswith(REALM):
+                return self.oidc_post(path)
+            if args.oidc and not provider.valid(self.headers.get("Authorization", "")):
+                return self.reply(401, {"error": "unauthorized"})
             if self.headers.get("Jenkins-Crumb") != CRUMB:
                 return self.reply(403, {"error": "No valid crumb was included"})
             if path == f"/$stapler/bound/{PROXY_ID}/triggerManualBuild":
@@ -534,7 +617,28 @@ def main() -> None:
             path = self.path.split("?")[0]
             user = "anonymous"
             auth = self.headers.get("Authorization", "")
-            if args.auth:
+            if path.startswith(REALM):
+                return self.oidc_get()
+            if args.oidc and path == "/oauth2/start":
+                base = self.base()
+                login = urlencode(
+                    {
+                        "client_id": "fake-proxy",
+                        "response_type": "code",
+                        "scope": "openid",
+                        "redirect_uri": base + "/oauth2/callback",
+                        "state": "proxy-state",
+                    }
+                )
+                return self.redirect(f"{base}{OIDC}/auth?{login}")
+            if args.oidc and not auth:
+                # A browser without a session: off to the login.
+                return self.redirect("/oauth2/start?" + urlencode({"rd": self.path}))
+            if args.oidc and not provider.valid(auth):
+                return self.reply(401, {"error": "unauthorized"})
+            if provider.valid(auth):
+                user = "me"
+            elif args.auth:
                 expected = "Basic " + base64.b64encode(args.auth.encode()).decode()
                 if auth != expected:
                     return self.reply(401, {"error": "unauthorized"})
@@ -729,6 +833,81 @@ def main() -> None:
                 if limit:  # build history / runs: each job's newest N builds
                     add_builds(tree["jobs"], int(limit.group(1)), "causes[" in query)
                 return self.reply(200, tree)
+            self.reply(404, {"error": "not found"})
+
+        def redirect(self, location: str) -> None:
+            self.send_response(302)
+            self.send_header("Location", location)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def base(self) -> str:
+            scheme = "https" if args.tls else "http"
+            return f"{scheme}://127.0.0.1:{args.port}"
+
+        def oidc_get(self) -> None:
+            url = urlsplit(self.path)
+            query = {k: v[0] for k, v in parse_qs(url.query).items()}
+            if url.path == f"{REALM}/.well-known/openid-configuration":
+                base = self.base()
+                return self.reply(
+                    200,
+                    {
+                        "issuer": base + REALM,
+                        "authorization_endpoint": base + OIDC + "/auth",
+                        "token_endpoint": base + OIDC + "/token",
+                        "device_authorization_endpoint": base + OIDC + "/auth/device",
+                    },
+                )
+            if url.path == f"{OIDC}/auth":
+                # "Logged in" right away: back to Leeroy with a code.
+                code = "code-" + secrets.token_hex(8)
+                with provider.lock:
+                    provider.codes.add(code)
+                back = urlencode({"code": code, "state": query.get("state", "")})
+                self.send_response(302)
+                self.send_header("Location", f"{query.get('redirect_uri', '')}?{back}")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            if url.path == f"{REALM}/device":
+                with provider.lock:
+                    for code in provider.devices:
+                        provider.devices[code] = 0
+                body = b"<html><p>Device approved: back to Leeroy.</p></html>"
+                return self.reply_bytes(body, {"Content-Type": "text/html"})
+            self.reply(404, {"error": "not found"})
+
+        def oidc_post(self, path: str) -> None:
+            length = int(self.headers.get("Content-Length", "0"))
+            form = {k: v[0] for k, v in parse_qs(self.rfile.read(length).decode()).items()}
+            if path == f"{OIDC}/auth/device":
+                if form.get("client_id") == "fake-proxy":
+                    return self.reply(
+                        401,
+                        {
+                            "error": "unauthorized_client",
+                            "error_description": "Invalid client or Invalid client credentials",
+                        },
+                    )
+                code = "dev-" + secrets.token_hex(8)
+                with provider.lock:
+                    provider.devices[code] = provider.approve_after or 1
+                device = self.base() + REALM + "/device"
+                return self.reply(
+                    200,
+                    {
+                        "device_code": code,
+                        "user_code": "FAKE-CODE",
+                        "verification_uri": device,
+                        "verification_uri_complete": device + "?user_code=FAKE-CODE",
+                        "expires_in": 600,
+                        "interval": 1,
+                    },
+                )
+            if path == f"{OIDC}/token":
+                status, body = provider.token(form)
+                return self.reply(status, body)
             self.reply(404, {"error": "not found"})
 
         def reply_bytes(self, body: bytes, headers: dict) -> None:

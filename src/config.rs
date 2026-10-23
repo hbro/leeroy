@@ -53,6 +53,14 @@ pub enum SettingKey {
     JenkinsUrl,
     JenkinsSkipTlsVerify,
     ProxyUrl,
+    AuthMode,
+    AuthUsername,
+    AuthPasswordStore,
+    AuthPasswordCommand,
+    AuthIssuer,
+    AuthClientId,
+    AuthLoginFlow,
+    AuthTokenStore,
     RefreshAuto,
     RefreshInterval,
     ConfirmQuit,
@@ -61,10 +69,18 @@ pub enum SettingKey {
 }
 
 impl SettingKey {
-    pub const ALL: [SettingKey; 8] = [
+    pub const ALL: [SettingKey; 16] = [
         SettingKey::JenkinsUrl,
         SettingKey::JenkinsSkipTlsVerify,
         SettingKey::ProxyUrl,
+        SettingKey::AuthMode,
+        SettingKey::AuthUsername,
+        SettingKey::AuthPasswordStore,
+        SettingKey::AuthPasswordCommand,
+        SettingKey::AuthIssuer,
+        SettingKey::AuthClientId,
+        SettingKey::AuthLoginFlow,
+        SettingKey::AuthTokenStore,
         SettingKey::RefreshAuto,
         SettingKey::RefreshInterval,
         SettingKey::ConfirmQuit,
@@ -77,6 +93,14 @@ impl SettingKey {
             SettingKey::JenkinsUrl => "Jenkins URL",
             SettingKey::JenkinsSkipTlsVerify => "Skip TLS verify",
             SettingKey::ProxyUrl => "Proxy URL",
+            SettingKey::AuthMode => "Authentication",
+            SettingKey::AuthUsername => "Username",
+            SettingKey::AuthPasswordStore => "Password from",
+            SettingKey::AuthPasswordCommand => "Password command",
+            SettingKey::AuthIssuer => "Issuer URL",
+            SettingKey::AuthClientId => "Client ID",
+            SettingKey::AuthLoginFlow => "Login with",
+            SettingKey::AuthTokenStore => "Keep login in",
             SettingKey::RefreshAuto => "Auto-refresh",
             SettingKey::RefreshInterval => "Refresh every",
             SettingKey::ConfirmQuit => "Confirm quit",
@@ -91,6 +115,14 @@ impl SettingKey {
             SettingKey::JenkinsUrl => ("jenkins", "url"),
             SettingKey::JenkinsSkipTlsVerify => ("jenkins", "skip_tls_verify"),
             SettingKey::ProxyUrl => ("proxy", "url"),
+            SettingKey::AuthMode => ("auth", "mode"),
+            SettingKey::AuthUsername => ("auth", "username"),
+            SettingKey::AuthPasswordStore => ("auth", "password_store"),
+            SettingKey::AuthPasswordCommand => ("auth", "password_command"),
+            SettingKey::AuthIssuer => ("auth", "issuer"),
+            SettingKey::AuthClientId => ("auth", "client_id"),
+            SettingKey::AuthLoginFlow => ("auth", "login_flow"),
+            SettingKey::AuthTokenStore => ("auth", "token_store"),
             SettingKey::RefreshAuto => ("refresh", "auto"),
             SettingKey::RefreshInterval => ("refresh", "interval"),
             SettingKey::ConfirmQuit => ("ui", "confirm_quit"),
@@ -105,6 +137,14 @@ impl SettingKey {
             SettingKey::JenkinsUrl => "LEEROY_JENKINS_URL",
             SettingKey::JenkinsSkipTlsVerify => "LEEROY_JENKINS_SKIP_TLS_VERIFY",
             SettingKey::ProxyUrl => "LEEROY_PROXY_URL",
+            SettingKey::AuthMode => "LEEROY_AUTH_MODE",
+            SettingKey::AuthUsername => "LEEROY_AUTH_USERNAME",
+            SettingKey::AuthPasswordStore => "LEEROY_AUTH_PASSWORD_STORE",
+            SettingKey::AuthPasswordCommand => "LEEROY_AUTH_PASSWORD_COMMAND",
+            SettingKey::AuthIssuer => "LEEROY_AUTH_ISSUER",
+            SettingKey::AuthClientId => "LEEROY_AUTH_CLIENT_ID",
+            SettingKey::AuthLoginFlow => "LEEROY_AUTH_LOGIN_FLOW",
+            SettingKey::AuthTokenStore => "LEEROY_AUTH_TOKEN_STORE",
             SettingKey::RefreshAuto => "LEEROY_REFRESH_AUTO",
             SettingKey::RefreshInterval => "LEEROY_REFRESH_INTERVAL",
             SettingKey::ConfirmQuit => "LEEROY_UI_CONFIRM_QUIT",
@@ -116,9 +156,17 @@ impl SettingKey {
     /// Which group of the settings view this belongs to.
     pub fn section(self) -> Section {
         match self {
-            SettingKey::JenkinsUrl | SettingKey::JenkinsSkipTlsVerify | SettingKey::ProxyUrl => {
-                Section::Jenkins
-            }
+            SettingKey::JenkinsUrl
+            | SettingKey::JenkinsSkipTlsVerify
+            | SettingKey::ProxyUrl
+            | SettingKey::AuthMode
+            | SettingKey::AuthUsername
+            | SettingKey::AuthPasswordStore
+            | SettingKey::AuthPasswordCommand
+            | SettingKey::AuthIssuer
+            | SettingKey::AuthClientId
+            | SettingKey::AuthLoginFlow
+            | SettingKey::AuthTokenStore => Section::Jenkins,
             SettingKey::RefreshAuto
             | SettingKey::RefreshInterval
             | SettingKey::ConfirmQuit
@@ -147,7 +195,30 @@ impl SettingKey {
         match self {
             SettingKey::Theme => Some(&crate::theme::ThemeChoice::VALUES),
             SettingKey::Timestamps => Some(&TIMESTAMP_VALUES),
+            SettingKey::AuthMode => Some(&crate::auth::MODE_VALUES),
+            SettingKey::AuthPasswordStore => Some(&crate::auth::PASSWORD_STORE_VALUES),
+            SettingKey::AuthLoginFlow => Some(&crate::auth::LOGIN_FLOW_VALUES),
+            SettingKey::AuthTokenStore => Some(&crate::auth::TOKEN_STORE_VALUES),
             _ => None,
+        }
+    }
+
+    /// Whether the row applies with these (effective) settings: the auth
+    /// keys only for their mode (and password store).
+    pub fn applies(self, settings: &Settings) -> bool {
+        use crate::auth::{AuthMode, PasswordStore};
+        let mode = settings.auth_mode();
+        let store = PasswordStore::parse(settings.get(SettingKey::AuthPasswordStore));
+        match self {
+            SettingKey::AuthUsername | SettingKey::AuthPasswordStore => mode == AuthMode::Basic,
+            SettingKey::AuthPasswordCommand => {
+                mode == AuthMode::Basic && store == PasswordStore::Command
+            }
+            SettingKey::AuthIssuer
+            | SettingKey::AuthClientId
+            | SettingKey::AuthLoginFlow
+            | SettingKey::AuthTokenStore => mode == AuthMode::Oidc,
+            _ => true,
         }
     }
 
@@ -162,7 +233,8 @@ impl SettingKey {
         match self {
             SettingKey::JenkinsUrl => concat!(
                 "Base URL of the Jenkins instance, e.g. https://jenkins.example.com\n",
-                "For authentication, add headers below rather than user:pass@ in the URL.",
+                "For authentication, use the Authentication setting below rather than\n",
+                "user:pass@ in the URL.",
             ),
             SettingKey::JenkinsSkipTlsVerify => concat!(
                 "Accept invalid TLS certificates (self-signed, expired, unknown CA) from Jenkins.\n",
@@ -175,6 +247,49 @@ impl SettingKey {
                 "SOCKS: socks5h:// or socks4a:// resolve DNS on the proxy (remote DNS);\n",
                 "socks5:// and socks4:// resolve DNS locally. HTTP(S) proxies always resolve remotely.\n",
                 "Unset: HTTPS_PROXY / HTTP_PROXY / ALL_PROXY / NO_PROXY are used.",
+            ),
+            SettingKey::AuthMode => concat!(
+                "How Leeroy logs in to Jenkins (the headers below are sent too, except an\n",
+                "Authorization header outside headers mode):\n",
+                "  headers   only the custom headers (the default)\n",
+                "  anonymous no credentials\n",
+                "  basic     username + password or Jenkins API token (also for a\n",
+                "            Jenkins that logs in through Keycloak itself: use an API token)\n",
+                "  oidc      Keycloak / OpenID Connect login, for a proxy in front of Jenkins\n",
+                "            that accepts bearer tokens",
+            ),
+            SettingKey::AuthUsername => "Jenkins (or proxy) user name for basic auth.",
+            SettingKey::AuthPasswordStore => concat!(
+                "Where the password or API token comes from:\n",
+                "  keyring  the OS keyring (the default); set it with the Password row\n",
+                "  command  the first line printed by a command, e.g. pass show jenkins\n",
+                "  file     this config file (plain text, mode 0600)\n",
+                "$LEEROY_AUTH_PASSWORD wins over all of them.",
+            ),
+            SettingKey::AuthPasswordCommand => concat!(
+                "Run at every connect; the first line it prints is the password, e.g.\n",
+                "  pass show work/jenkins\n",
+                "It gets no terminal: a GPG pinentry must be graphical or cached by gpg-agent.",
+            ),
+            SettingKey::AuthIssuer => concat!(
+                "The OpenID Connect issuer; for Keycloak the realm URL, e.g.\n",
+                "  https://sso.example.com/realms/acme",
+            ),
+            SettingKey::AuthClientId => concat!(
+                "A public client of the provider. In Keycloak: client authentication off,\n",
+                "\"OAuth 2.0 Device Authorization Grant\" on (device login), and valid\n",
+                "redirect URI http://127.0.0.1/* (browser login).",
+            ),
+            SettingKey::AuthLoginFlow => concat!(
+                "  device   show a code to enter at a URL, in any browser (the default; works\n",
+                "           over SSH)\n",
+                "  browser  open the browser and get the answer on 127.0.0.1 (same machine)",
+            ),
+            SettingKey::AuthTokenStore => concat!(
+                "Where the login is kept between runs (the refresh token):\n",
+                "  keyring  the OS keyring (the default)\n",
+                "  file     a private file next to the log, in Leeroy's state directory\n",
+                "  memory   nowhere: log in at every start",
             ),
             SettingKey::RefreshAuto => concat!(
                 "Start with auto-refresh on (the default). Toggle it any time with R for the\n",
@@ -204,16 +319,7 @@ impl SettingKey {
     pub fn validate(self, value: &str) -> Result<String, String> {
         let value = value.trim();
         match self {
-            SettingKey::JenkinsUrl => {
-                let url = parse_url(value)?;
-                if !matches!(url.scheme(), "http" | "https") {
-                    return Err(format!(
-                        "unsupported scheme {:?}: use http or https",
-                        url.scheme()
-                    ));
-                }
-                Ok(value.to_owned())
-            }
+            SettingKey::JenkinsUrl => parse_http_url(value).map(|_| value.to_owned()),
             SettingKey::ProxyUrl => {
                 let url = parse_url(value)?;
                 if !PROXY_SCHEMES.contains(&url.scheme()) {
@@ -224,6 +330,47 @@ impl SettingKey {
                     ));
                 }
                 Ok(value.to_owned())
+            }
+            SettingKey::AuthIssuer => {
+                parse_http_url(value).map(|_| value.trim_end_matches('/').to_owned())
+            }
+            SettingKey::AuthUsername => {
+                if value.is_empty() {
+                    Err("empty user name".into())
+                } else if value.contains(':') {
+                    Err("a basic-auth user name can't contain ':'".into())
+                } else {
+                    Ok(value.to_owned())
+                }
+            }
+            SettingKey::AuthClientId => {
+                if value.is_empty() || value.contains(char::is_whitespace) {
+                    Err(format!("invalid client id {value:?}"))
+                } else {
+                    Ok(value.to_owned())
+                }
+            }
+            SettingKey::AuthPasswordCommand => {
+                if value.is_empty() {
+                    Err("empty command".into())
+                } else {
+                    Ok(value.to_owned())
+                }
+            }
+            SettingKey::AuthMode
+            | SettingKey::AuthPasswordStore
+            | SettingKey::AuthLoginFlow
+            | SettingKey::AuthTokenStore => {
+                let lower = value.to_ascii_lowercase();
+                let choices = self.choices().unwrap_or_default();
+                if choices.contains(&lower.as_str()) {
+                    Ok(lower)
+                } else {
+                    Err(format!(
+                        "expected one of {}, got {value:?}",
+                        choices.join(", ")
+                    ))
+                }
             }
             SettingKey::RefreshInterval => match value.parse::<u64>() {
                 Ok(secs) if (MIN_REFRESH_SECS..=MAX_REFRESH_SECS).contains(&secs) => {
@@ -264,7 +411,10 @@ impl SettingKey {
     /// URLs are masked.
     pub fn display(self, value: &str) -> String {
         match self {
-            SettingKey::JenkinsUrl | SettingKey::ProxyUrl => redact_url(value),
+            SettingKey::JenkinsUrl | SettingKey::ProxyUrl | SettingKey::AuthIssuer => {
+                redact_url(value)
+            }
+            SettingKey::AuthMode => crate::auth::AuthMode::parse(Some(value)).label().to_owned(),
             _ if self.is_seconds() => format!("{value} s"),
             _ if self.is_bool() => match parse_bool(value) {
                 Some(true) => "on".into(),
@@ -278,16 +428,13 @@ impl SettingKey {
 /// Documentation for `[jenkins.headers]`: shown in the settings view and
 /// written as a comment above the table when it's first created.
 pub const HEADERS_DOC: &str = concat!(
-    "Extra HTTP headers sent with every request to Jenkins, e.g. for authentication.\n",
+    "Extra HTTP headers sent with every request to Jenkins, e.g. X-Forwarded-User for a\n",
+    "trusted proxy or an API key header.\n",
     "Edit as \"Name: value\"; clear the field to remove it. Values are masked, except while editing.\n",
-    "Examples:\n",
-    "  Authorization: Basic <base64 of user:password>\n",
+    "With Authentication \"headers\", an Authorization header logs in too:\n",
+    "  Authorization: Basic <base64 of user:password>   (printf '%s' 'user:password' | base64 -w0)\n",
     "  Authorization: Bearer <token>\n",
-    "  X-Forwarded-User: <user>\n",
-    "Basic auth covers reverse-proxy logins and a Jenkins user + API token alike.\n",
-    "Base64: printf '%s' 'user:password' | base64 -w0\n",
-    "From a password manager, via env var (read-only here, never saved):\n",
-    "  LEEROY_JENKINS_HEADERS_AUTHORIZATION=\"Basic $(printf 'me:%s' \"$(pass show jenkins | head -n1)\" | base64 -w0)\"",
+    "Via env var (read-only here, never saved): LEEROY_JENKINS_HEADERS_<NAME>",
 );
 
 const HEADERS_ENV_PREFIX: &str = "LEEROY_JENKINS_HEADERS_";
@@ -376,11 +523,30 @@ fn check_basic_auth(value: &str) -> Result<(), String> {
 /// Shown when an old config still uses the removed basic-auth settings.
 const LEGACY_AUTH_HELP: &str = "\
 jenkins.username / jenkins.token (and $LEEROY_JENKINS_USERNAME / $LEEROY_JENKINS_TOKEN) \
-were replaced by custom headers. For HTTP basic auth, remove them and add:
-  [jenkins.headers]
-  Authorization = \"Basic <base64 of user:token>\"
-(create the value with: printf '%s' 'user:token' | base64 -w0), or set
-$LEEROY_JENKINS_HEADERS_AUTHORIZATION instead.";
+were replaced by the [auth] settings. For basic auth, remove them and add:
+  [auth]
+  mode = \"basic\"
+  username = \"<user>\"
+then set the password or API token in the settings (0), or pass it as
+$LEEROY_AUTH_PASSWORD.";
+
+/// The env var for the password (basic auth). Env only: never saved.
+pub const PASSWORD_ENV: &str = "LEEROY_AUTH_PASSWORD";
+
+/// A password or API token as typed (or printed by a command): one line.
+pub fn validate_password(value: &str) -> Result<(), String> {
+    if value.is_empty() {
+        Err("empty password".into())
+    } else if value.contains(['\n', '\r']) {
+        Err(
+            "the password contains a newline (e.g. a multi-line `pass show` entry: \
+             use `pass show NAME | head -n1`)"
+                .into(),
+        )
+    } else {
+        Ok(())
+    }
+}
 
 /// `true`/`false`, plus the usual env var spellings (`1`/`0`, `yes`/`no`, `on`/`off`).
 pub fn parse_bool(value: &str) -> Option<bool> {
@@ -392,6 +558,18 @@ pub fn parse_bool(value: &str) -> Option<bool> {
 }
 
 pub const PROXY_SCHEMES: &[&str] = &["http", "https", "socks4", "socks4a", "socks5", "socks5h"];
+
+/// A URL with a host and scheme http or https.
+fn parse_http_url(value: &str) -> Result<url::Url, String> {
+    let url = parse_url(value)?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(format!(
+            "unsupported scheme {:?}: use http or https",
+            url.scheme()
+        ));
+    }
+    Ok(url)
+}
 
 fn parse_url(value: &str) -> Result<url::Url, String> {
     let url = url::Url::parse(value).map_err(|err| format!("invalid URL: {err}"))?;
@@ -426,6 +604,7 @@ pub fn redact_url(value: &str) -> String {
 pub struct Settings {
     pub jenkins: JenkinsSettings,
     pub proxy: ProxySettings,
+    pub auth: AuthSettings,
     pub refresh: RefreshSettings,
     pub ui: UiSettings,
 }
@@ -458,6 +637,39 @@ pub struct RefreshSettings {
 /// Accept a TOML integer for a seconds setting (range checked by `validate`).
 fn seconds_from_toml<'de, D: serde::Deserializer<'de>>(de: D) -> Result<Option<String>, D::Error> {
     Option::<i64>::deserialize(de).map(|secs| secs.map(|s| s.to_string()))
+}
+
+/// `[auth]`: see [`crate::auth`]. All values are kept as text like the
+/// other settings; `password` only with `password_store = "file"`.
+#[derive(Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct AuthSettings {
+    pub mode: Option<String>,
+    pub username: Option<String>,
+    pub password_store: Option<String>,
+    pub password_command: Option<String>,
+    pub password: Option<String>,
+    pub issuer: Option<String>,
+    pub client_id: Option<String>,
+    pub login_flow: Option<String>,
+    pub token_store: Option<String>,
+}
+
+/// Hand-written so the password never ends up in logs.
+impl std::fmt::Debug for AuthSettings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AuthSettings")
+            .field("mode", &self.mode)
+            .field("username", &self.username)
+            .field("password_store", &self.password_store)
+            .field("password_command", &self.password_command)
+            .field("password", &self.password.as_ref().map(|_| "••••"))
+            .field("issuer", &self.issuer)
+            .field("client_id", &self.client_id)
+            .field("login_flow", &self.login_flow)
+            .field("token_store", &self.token_store)
+            .finish()
+    }
 }
 
 #[derive(Clone, Default, PartialEq, Eq, Deserialize)]
@@ -505,6 +717,14 @@ impl Settings {
                 .skip_tls_verify
                 .map(|b| if b { "true" } else { "false" }),
             SettingKey::ProxyUrl => self.proxy.url.as_deref(),
+            SettingKey::AuthMode => self.auth.mode.as_deref(),
+            SettingKey::AuthUsername => self.auth.username.as_deref(),
+            SettingKey::AuthPasswordStore => self.auth.password_store.as_deref(),
+            SettingKey::AuthPasswordCommand => self.auth.password_command.as_deref(),
+            SettingKey::AuthIssuer => self.auth.issuer.as_deref(),
+            SettingKey::AuthClientId => self.auth.client_id.as_deref(),
+            SettingKey::AuthLoginFlow => self.auth.login_flow.as_deref(),
+            SettingKey::AuthTokenStore => self.auth.token_store.as_deref(),
             SettingKey::RefreshAuto => self.refresh.auto.map(|b| if b { "true" } else { "false" }),
             SettingKey::RefreshInterval => self.refresh.interval.as_deref(),
             SettingKey::ConfirmQuit => self
@@ -548,6 +768,14 @@ impl Settings {
                 return;
             }
             SettingKey::ProxyUrl => &mut self.proxy.url,
+            SettingKey::AuthMode => &mut self.auth.mode,
+            SettingKey::AuthUsername => &mut self.auth.username,
+            SettingKey::AuthPasswordStore => &mut self.auth.password_store,
+            SettingKey::AuthPasswordCommand => &mut self.auth.password_command,
+            SettingKey::AuthIssuer => &mut self.auth.issuer,
+            SettingKey::AuthClientId => &mut self.auth.client_id,
+            SettingKey::AuthLoginFlow => &mut self.auth.login_flow,
+            SettingKey::AuthTokenStore => &mut self.auth.token_store,
             SettingKey::RefreshAuto => {
                 self.refresh.auto = value.as_deref().and_then(parse_bool);
                 return;
@@ -561,6 +789,52 @@ impl Settings {
             SettingKey::Timestamps => &mut self.ui.timestamps,
         };
         *slot = value;
+    }
+
+    pub fn auth_mode(&self) -> crate::auth::AuthMode {
+        crate::auth::AuthMode::parse(self.get(SettingKey::AuthMode))
+    }
+
+    /// The auth settings as [`crate::auth::AuthConfig`] (no secrets).
+    pub fn auth_config(&self) -> crate::auth::AuthConfig {
+        use crate::auth::*;
+        let text = |key| self.get(key).map(str::to_owned);
+        match self.auth_mode() {
+            AuthMode::Headers => AuthConfig::Headers,
+            AuthMode::Anonymous => AuthConfig::Anonymous,
+            AuthMode::Basic => AuthConfig::Basic(BasicConfig {
+                username: text(SettingKey::AuthUsername),
+                store: PasswordStore::parse(self.get(SettingKey::AuthPasswordStore)),
+                command: text(SettingKey::AuthPasswordCommand),
+            }),
+            AuthMode::Oidc => AuthConfig::Oidc(OidcConfig {
+                issuer: text(SettingKey::AuthIssuer),
+                client_id: text(SettingKey::AuthClientId),
+                flow: LoginFlow::parse(self.get(SettingKey::AuthLoginFlow)),
+                store: TokenStore::parse(self.get(SettingKey::AuthTokenStore)),
+            }),
+        }
+    }
+
+    /// A custom `Authorization` header that isn't sent because the auth mode
+    /// brings its own (or, anonymous, none): its name as stored.
+    pub fn ignored_header(&self) -> Option<&str> {
+        if self.auth_mode() == crate::auth::AuthMode::Headers {
+            return None;
+        }
+        self.header("authorization").map(|(name, _)| name)
+    }
+
+    /// The custom headers that are sent: all of them, except an ignored
+    /// `Authorization` (see [`Settings::ignored_header`]).
+    pub fn sent_headers(&self) -> Vec<(String, String)> {
+        let ignored = self.ignored_header();
+        self.jenkins
+            .headers
+            .iter()
+            .filter(|(name, _)| Some(name.as_str()) != ignored)
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect()
     }
 
     /// The header named `name` (case-insensitive): `(name as stored, value)`.
@@ -604,6 +878,10 @@ impl Settings {
             bail!("{LEGACY_AUTH_HELP}");
         }
         let mut settings = Settings::default();
+        if let Some(password) = vars.get(PASSWORD_ENV) {
+            validate_password(password).map_err(|err| eyre!("invalid ${PASSWORD_ENV}: {err}"))?;
+            settings.auth.password = Some(password.clone());
+        }
         for key in SettingKey::ALL {
             if let Some(raw) = vars.get(key.env_var()) {
                 let value = key
@@ -634,6 +912,9 @@ impl Settings {
         for (name, value) in &self.jenkins.headers {
             validate_header(name, value).map_err(|err| eyre!("invalid jenkins.headers: {err}"))?;
         }
+        if let Some(password) = &self.auth.password {
+            validate_password(password).map_err(|err| eyre!("invalid auth.password: {err}"))?;
+        }
         Ok(())
     }
 
@@ -647,6 +928,9 @@ impl Settings {
         }
         for (name, value) in &overrides.jenkins.headers {
             merged.set_header(name, Some(value.clone()));
+        }
+        if overrides.auth.password.is_some() {
+            merged.auth.password.clone_from(&overrides.auth.password);
         }
         merged
     }
@@ -771,14 +1055,19 @@ pub fn resolve_path_for(
     }
 }
 
-/// Default log file: `$LEEROY_LOG`, else per platform
-/// `$XDG_STATE_HOME/leeroy/leeroy.log` (default `~/.local/state/…`) or
-/// `%LOCALAPPDATA%\leeroy\leeroy.log` (machine-local, not roaming), else the
-/// temp directory.
+/// Default log file: `$LEEROY_LOG`, else `leeroy.log` in [`state_dir_for`].
 pub fn log_path_for(platform: Platform, env: impl Fn(&str) -> Option<OsString>) -> PathBuf {
     if let Some(path) = non_empty(env("LEEROY_LOG")) {
         return path.into();
     }
+    state_dir_for(platform, env).join("leeroy.log")
+}
+
+/// Leeroy's state directory (log, tokens file): per platform
+/// `$XDG_STATE_HOME/leeroy` (default `~/.local/state/leeroy`) or
+/// `%LOCALAPPDATA%\leeroy` (machine-local, not roaming), else in the temp
+/// directory.
+pub fn state_dir_for(platform: Platform, env: impl Fn(&str) -> Option<OsString>) -> PathBuf {
     let dir = match platform {
         Platform::Windows => non_empty(env("LOCALAPPDATA")).map(PathBuf::from),
         Platform::Unix => non_empty(env("XDG_STATE_HOME"))
@@ -788,9 +1077,7 @@ pub fn log_path_for(platform: Platform, env: impl Fn(&str) -> Option<OsString>) 
                 non_empty(env("HOME")).map(|h| PathBuf::from(h).join(".local").join("state"))
             }),
     };
-    dir.unwrap_or_else(std::env::temp_dir)
-        .join("leeroy")
-        .join("leeroy.log")
+    dir.unwrap_or_else(std::env::temp_dir).join("leeroy")
 }
 
 /// Load the config file. A missing file means default settings.
@@ -867,6 +1154,7 @@ pub fn save(path: &Path, settings: &Settings) -> Result<()> {
     }
 
     save_headers(&mut doc, &settings.jenkins.headers);
+    keep_typed_password(&mut doc, settings.auth.password.as_deref());
 
     let dir = target
         .parent()
@@ -881,6 +1169,25 @@ pub fn save(path: &Path, settings: &Settings) -> Result<()> {
     tmp.persist(&target)
         .wrap_err_with(|| format!("writing {}", target.display()))?;
     Ok(())
+}
+
+/// `auth.password` (only used with `password_store = "file"`).
+fn keep_typed_password(doc: &mut DocumentMut, password: Option<&str>) {
+    match password {
+        Some(password) => {
+            if !doc.contains_key("auth") {
+                doc["auth"] = toml_edit::table();
+            }
+            if doc["auth"].get("password").and_then(|v| v.as_str()) != Some(password) {
+                doc["auth"]["password"] = toml_edit::value(password);
+            }
+        }
+        None => {
+            if let Some(auth) = doc.get_mut("auth").and_then(|t| t.as_table_like_mut()) {
+                auth.remove("password");
+            }
+        }
+    }
 }
 
 /// Sync `[jenkins.headers]` with `headers`, keeping comments on existing
@@ -1268,13 +1575,109 @@ mod tests {
     #[test]
     fn removed_auth_settings_fail_loudly() {
         let err = Settings::from_env(vars(&[("LEEROY_JENKINS_TOKEN", "t")])).unwrap_err();
-        assert!(format!("{err}").contains("Authorization"), "{err}");
+        assert!(format!("{err}").contains("mode = \"basic\""), "{err}");
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(FILE_NAME);
         fs::write(&path, "[jenkins]\nusername = \"me\"\n").unwrap();
         let err = load(&path).unwrap_err();
-        assert!(format!("{err}").contains("[jenkins.headers]"), "{err}");
+        assert!(format!("{err}").contains("[auth]"), "{err}");
+        // The new [auth] table has a username of its own: that's fine.
+        fs::write(&path, "[auth]\nmode = \"basic\"\nusername = \"me\"\n").unwrap();
+        assert_eq!(
+            load(&path).unwrap().auth_mode(),
+            crate::auth::AuthMode::Basic
+        );
+    }
+
+    #[test]
+    fn auth_settings_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(FILE_NAME);
+        let mut settings = Settings::default();
+        settings.set(SettingKey::AuthMode, Some("basic".into()));
+        settings.set(SettingKey::AuthUsername, Some("me".into()));
+        settings.set(SettingKey::AuthPasswordStore, Some("file".into()));
+        settings.auth.password = Some("p4ss".into());
+        save(&path, &settings).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains("[auth]") && text.contains("password = \"p4ss\""),
+            "{text}"
+        );
+        assert_eq!(load(&path).unwrap(), settings);
+        settings.auth.password = None;
+        save(&path, &settings).unwrap();
+        assert!(!fs::read_to_string(&path).unwrap().contains("p4ss"));
+    }
+
+    #[test]
+    fn auth_keys_apply_per_mode() {
+        let mut settings = Settings::default();
+        let shown = |s: &Settings| {
+            SettingKey::ALL
+                .into_iter()
+                .filter(|k| k.toml_path().0 == "auth" && k.applies(s))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(shown(&settings), vec![SettingKey::AuthMode]);
+        settings.set(SettingKey::AuthMode, Some("basic".into()));
+        assert_eq!(
+            shown(&settings),
+            vec![
+                SettingKey::AuthMode,
+                SettingKey::AuthUsername,
+                SettingKey::AuthPasswordStore
+            ]
+        );
+        settings.set(SettingKey::AuthPasswordStore, Some("command".into()));
+        assert!(shown(&settings).contains(&SettingKey::AuthPasswordCommand));
+        settings.set(SettingKey::AuthMode, Some("oidc".into()));
+        assert_eq!(
+            shown(&settings),
+            vec![
+                SettingKey::AuthMode,
+                SettingKey::AuthIssuer,
+                SettingKey::AuthClientId,
+                SettingKey::AuthLoginFlow,
+                SettingKey::AuthTokenStore
+            ]
+        );
+    }
+
+    #[test]
+    fn auth_values_are_validated() {
+        assert_eq!(SettingKey::AuthMode.validate("OIDC"), Ok("oidc".into()));
+        assert!(SettingKey::AuthMode.validate("kerberos").is_err());
+        assert!(SettingKey::AuthUsername.validate("me:you").is_err());
+        assert_eq!(
+            SettingKey::AuthIssuer.validate("https://sso.example.com/realms/acme/"),
+            Ok("https://sso.example.com/realms/acme".into())
+        );
+        assert!(SettingKey::AuthIssuer.validate("ftp://sso").is_err());
+        assert!(SettingKey::AuthClientId.validate("my client").is_err());
+        let err = Settings::from_env(vars(&[(PASSWORD_ENV, "a\nb")])).unwrap_err();
+        assert!(format!("{err}").contains("head -n1"), "{err}");
+        let env = Settings::from_env(vars(&[(PASSWORD_ENV, "tok")])).unwrap();
+        assert_eq!(
+            Settings::default().overlaid(&env).auth.password.as_deref(),
+            Some("tok")
+        );
+    }
+
+    #[test]
+    fn authorization_header_is_only_sent_in_headers_mode() {
+        let mut settings = Settings::default();
+        settings.set_header("authorization", Some("Bearer x".into()));
+        settings.set_header("X-Api-Key", Some("k".into()));
+        assert_eq!(settings.ignored_header(), None);
+        assert_eq!(settings.sent_headers().len(), 2);
+        settings.set(SettingKey::AuthMode, Some("basic".into()));
+        assert_eq!(settings.ignored_header(), Some("authorization"));
+        assert_eq!(
+            settings.sent_headers(),
+            vec![("X-Api-Key".to_owned(), "k".to_owned())]
+        );
     }
 
     #[test]
@@ -1282,6 +1685,7 @@ mod tests {
         let mut settings = Settings::default();
         settings.set(SettingKey::JenkinsUrl, Some("https://me:urlpass@ci".into()));
         settings.set_header("Authorization", Some("Basic s3cret".into()));
+        settings.auth.password = Some("pw-s3cret".into());
         let debug = format!("{settings:?}");
         assert!(
             !debug.contains("s3cret") && !debug.contains("urlpass"),
@@ -1474,7 +1878,7 @@ mod tests {
         assert!(text.contains("[jenkins]\n"), "{text}");
         assert!(text.contains("[jenkins.headers]\n"), "{text}");
         assert!(
-            text.contains("# Examples:"),
+            text.contains("# Extra HTTP headers sent with every request"),
             "headers table documented: {text}"
         );
         assert!(!text.contains("jenkins = {"), "{text}");

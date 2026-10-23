@@ -10,6 +10,7 @@ use futures::StreamExt;
 use leeroy::{
     app::{Action, App, Effect, SettingsState},
     config::{self, Settings},
+    credentials,
     event::map_key,
     jenkins,
     proxy::ProxyEnv,
@@ -31,10 +32,12 @@ const TICK_RATE: Duration = Duration::from_millis(250);
 ///
 /// Every setting can also be set with an env var, which takes precedence over
 /// the config file: LEEROY_JENKINS_URL, LEEROY_JENKINS_SKIP_TLS_VERIFY,
-/// LEEROY_PROXY_URL, LEEROY_REFRESH_AUTO, LEEROY_REFRESH_INTERVAL, and
-/// LEEROY_JENKINS_HEADERS_<NAME> per HTTP header (e.g.
-/// LEEROY_JENKINS_HEADERS_AUTHORIZATION). Without a proxy setting, the usual
-/// HTTPS_PROXY / HTTP_PROXY / ALL_PROXY / NO_PROXY env vars apply.
+/// LEEROY_PROXY_URL, LEEROY_AUTH_MODE (headers, anonymous, basic, oidc),
+/// LEEROY_AUTH_USERNAME, LEEROY_AUTH_PASSWORD, LEEROY_REFRESH_AUTO,
+/// LEEROY_REFRESH_INTERVAL, and LEEROY_JENKINS_HEADERS_<NAME> per HTTP header
+/// (e.g. LEEROY_JENKINS_HEADERS_X_API_KEY); see the settings view (0) for
+/// all of them. Without a proxy setting, the usual HTTPS_PROXY / HTTP_PROXY /
+/// ALL_PROXY / NO_PROXY env vars apply.
 #[derive(Debug, Parser)]
 #[command(version)]
 struct Cli {
@@ -107,8 +110,13 @@ async fn run(mut terminal: DefaultTerminal, mut app: App) -> Result<()> {
     let mut tick = tokio::time::interval(TICK_RATE);
     // Background tasks (e.g. Jenkins API calls) send their results here.
     let (action_tx, mut action_rx) = mpsc::unbounded_channel::<Action>();
+    let state_dir =
+        config::state_dir_for(config::Platform::current(), |name| std::env::var_os(name));
     let mut executor = Executor {
         tx: action_tx,
+        tokens_path: leeroy::secrets::tokens_path(&state_dir),
+        login_task: None,
+        detect_task: None,
         connect_task: None,
         fetch_task: None,
         build_task: None,
@@ -152,6 +160,12 @@ async fn run(mut terminal: DefaultTerminal, mut app: App) -> Result<()> {
 /// Runs side effects requested by `App::update`, reporting back via `tx`.
 struct Executor {
     tx: UnboundedSender<Action>,
+    /// The OpenID Connect tokens file (refresh tokens, `token_store = "file"`).
+    tokens_path: PathBuf,
+    /// The login under way, aborted when cancelled or replaced.
+    login_task: Option<AbortHandle>,
+    /// The login detection under way, aborted when a new one starts.
+    detect_task: Option<AbortHandle>,
     /// The in-flight connection check, aborted when a newer one starts.
     connect_task: Option<AbortHandle>,
     /// The in-flight job list fetch, aborted when a newer one starts.
@@ -194,6 +208,108 @@ impl Executor {
                     let _ = tx.send(Action::ConnectFinished { generation, result });
                 });
                 self.connect_task = Some(task.abort_handle());
+            }
+            Effect::ResolveCredentials {
+                generation,
+                config,
+                password,
+                tokens,
+            } => {
+                if let Some(previous) = self.connect_task.take() {
+                    previous.abort();
+                }
+                tracing::info!(auth = ?config.auth, generation, "getting credentials");
+                let (tx, tokens_path) = (tx.clone(), self.tokens_path.clone());
+                let task = tokio::spawn(async move {
+                    let result =
+                        credentials::resolve(&config, password, tokens, &tokens_path).await;
+                    if let Err(err) = &result {
+                        tracing::warn!(%err, generation, "getting credentials failed");
+                    }
+                    let _ = tx.send(Action::CredentialsResolved { generation, result });
+                });
+                self.connect_task = Some(task.abort_handle());
+            }
+            Effect::Login {
+                generation,
+                config,
+                flow,
+            } => {
+                if let Some(previous) = self.login_task.take() {
+                    previous.abort();
+                }
+                tracing::info!(?flow, generation, "logging in");
+                let (tx, tokens_path) = (tx.clone(), self.tokens_path.clone());
+                let task = tokio::spawn(async move {
+                    let prompt_tx = tx.clone();
+                    let result = credentials::login(&config, flow, &tokens_path, |prompt| {
+                        let _ = prompt_tx.send(Action::LoginStarted { generation, prompt });
+                    })
+                    .await;
+                    match &result {
+                        Ok(_) => tracing::info!(generation, "logged in"),
+                        Err(err) => tracing::warn!(%err, generation, "login failed"),
+                    }
+                    let _ = tx.send(Action::LoginFinished { generation, result });
+                });
+                self.login_task = Some(task.abort_handle());
+            }
+            Effect::DetectLogin { config } => {
+                if let Some(previous) = self.detect_task.take() {
+                    previous.abort();
+                }
+                let tx = tx.clone();
+                let task = tokio::spawn(async move {
+                    let result = leeroy::detect::detect(&config).await;
+                    tracing::info!(?result, "detected login");
+                    let _ = tx.send(Action::LoginDetected {
+                        url: config.url,
+                        result,
+                    });
+                });
+                self.detect_task = Some(task.abort_handle());
+            }
+            Effect::CancelLogin => {
+                if let Some(task) = self.login_task.take() {
+                    task.abort();
+                    tracing::info!("login cancelled");
+                }
+            }
+            Effect::RefreshToken {
+                generation,
+                config,
+                refresh,
+            } => {
+                let (tx, tokens_path) = (tx.clone(), self.tokens_path.clone());
+                tokio::spawn(async move {
+                    let result = credentials::refresh(&config, &refresh, &tokens_path).await;
+                    match &result {
+                        Ok(_) => tracing::debug!(generation, "token refreshed"),
+                        Err(err) => tracing::info!(%err, generation, "token refresh failed"),
+                    }
+                    let _ = tx.send(Action::TokenRefreshed { generation, result });
+                });
+            }
+            Effect::StoreSecret {
+                store,
+                account,
+                secret,
+            } => {
+                let (tx, tokens_path) = (tx.clone(), self.tokens_path.clone());
+                tokio::spawn(async move {
+                    let result =
+                        credentials::store(store, &account, secret.as_ref(), &tokens_path).await;
+                    match &result {
+                        Ok(()) => tracing::info!(
+                            ?store,
+                            account,
+                            deleted = secret.is_none(),
+                            "stored secret"
+                        ),
+                        Err(err) => tracing::warn!(?store, account, %err, "storing secret failed"),
+                    }
+                    let _ = tx.send(Action::SecretStored(result));
+                });
             }
             Effect::FetchJobs { generation, config } => {
                 if let Some(previous) = self.fetch_task.take() {

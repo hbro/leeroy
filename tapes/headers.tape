@@ -8,7 +8,8 @@ Type "0"
 Enter
 Type "http://127.0.0.1:8099"
 Enter
-Down 3
+Ctrl+S
+Down 4
 Enter
 Type "X-Forwarded-User: me"
 Enter
