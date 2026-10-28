@@ -4,7 +4,7 @@ expression: "format!(\"{}\", render(&app).backend())"
 ---
 " Leeroy  ● https://ci.example.com · Jenkins 2.504.1 · me       h/?  help   ⟳ 0s "
 " 1 Jobs   2 Builds   3 Pipelines   4 Pipeline runs                   0 Settings "
-"shop · #8 · 2 of 2 · failure ───────────────────────────────────────────────────"
+"shop · #8 · 2 of 2 · failure · loading older runs… ─────────────────────────────"
 "▶ ● shop/build #8                                     2023-11-14 22:21       20s"
 "  └─ ○ shop/test  not reached                                                   "
 "     └─ ○ shop/deploy  not reached                                              "

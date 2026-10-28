@@ -21,7 +21,7 @@ use crate::{
     history::HistoryLoad,
     instance::InfoLoad,
     jobs::{JobStatus, JobsLoad},
-    pipelines::{PipelineLoad, RUN_BUILDS, RunStatus, TreeItem, run_span, run_tree},
+    pipelines::{HISTORY_BUILDS, PipelineLoad, RunStatus, TreeItem, run_span, run_tree},
     proxy::SystemProxy,
     theme::{Appearance, Theme},
 };
@@ -480,10 +480,20 @@ fn pipelines_message(app: &App, what: &str) -> Option<Vec<Line<'static>>> {
             Line::styled(error.clone(), Style::new().fg(t.error)),
             Line::styled("Press r to retry", hint),
         ],
-        (ConnectionStatus::Connected { .. }, _) => vec![
-            Line::raw(""),
-            Line::styled(format!("Loading {what}…"), Style::new().italic()),
-        ],
+        (ConnectionStatus::Connected { .. }, _) => {
+            // Big instances take a while: show that it's still going.
+            let waited = app
+                .pipelines
+                .loading_since
+                .map(|since| app.now.saturating_duration_since(since))
+                .filter(|waited| waited.as_secs() >= 3)
+                .map(|waited| format!(" {}", format_duration(waited)))
+                .unwrap_or_default();
+            vec![
+                Line::raw(""),
+                Line::styled(format!("Loading {what}…{waited}"), Style::new().italic()),
+            ]
+        }
         _ => vec![
             Line::raw(""),
             Line::styled("Not connected", Style::new().italic()),
@@ -657,7 +667,10 @@ fn render_pipelines(frame: &mut Frame, area: Rect, app: &App) {
                 Line::raw(""),
                 Line::styled("No pipelines", Style::new().italic()),
                 Line::styled(
-                    format!("No job triggered another in its last {RUN_BUILDS} builds"),
+                    format!(
+                        "No job triggered another in its last {} builds",
+                        app.settings.effective().pipeline_builds()
+                    ),
                     t.dim(),
                 ),
             ]
@@ -717,7 +730,8 @@ fn render_runs(frame: &mut Frame, area: Rect, app: &App) {
     let state = &app.pipelines;
     let pipelines = state.pipelines();
     let runs = state.visible_runs();
-    let mut title = format!("Pipeline runs ({})", runs.len());
+    // Only the runs in the list request (and opened pipelines' histories).
+    let mut title = format!("Pipeline runs ({} recent)", runs.len());
     if state.refreshing {
         title.push_str(" · refreshing…");
     }
@@ -740,7 +754,10 @@ fn render_runs(frame: &mut Frame, area: Rect, app: &App) {
                 Line::raw(""),
                 Line::styled("No pipeline runs", Style::new().italic()),
                 Line::styled(
-                    format!("None of the last {RUN_BUILDS} builds of any job triggered another"),
+                    format!(
+                        "None of the last {} builds of any job triggered another",
+                        app.settings.effective().pipeline_builds()
+                    ),
                     t.dim(),
                 ),
             ]
@@ -814,8 +831,8 @@ fn render_run(frame: &mut Frame, area: Rect, app: &App) {
             Line::styled("This run is no longer loaded", Style::new().italic()),
             Line::styled(
                 format!(
-                    "Only runs started within the last {RUN_BUILDS} builds of a job are \
-                     shown: ←/→ to move on, End for the latest"
+                    "Only runs within the last {HISTORY_BUILDS} builds of the pipeline's \
+                     jobs are shown: ←/→ to move on, End for the latest"
                 ),
                 t.dim(),
             ),
@@ -841,6 +858,9 @@ fn render_run(frame: &mut Frame, area: Rect, app: &App) {
     }
     if state.refreshing {
         title.push_str(" · refreshing…");
+    }
+    if state.history_in_flight.as_deref() == Some(view.first_job.as_str()) {
+        title.push_str(" · loading older runs…");
     }
     let selected = view.selected.min(run.builds.len() - 1);
     let inner = view_block(t, "").inner(area);
@@ -1502,6 +1522,20 @@ fn render_settings(frame: &mut Frame, area: Rect, app: &App) {
                     ),
                     None if key == SettingKey::RefreshInterval => {
                         Span::styled(format!("{} s (default)", DEFAULT_REFRESH_SECS), dim)
+                    }
+                    None if key == SettingKey::PipelineBuilds => {
+                        Span::styled(format!("{} (default)", crate::pipelines::LIST_BUILDS), dim)
+                    }
+                    Some(value) if key == SettingKey::PipelineBuilds => {
+                        let builds: usize = value.parse().unwrap_or_default();
+                        if builds > crate::pipelines::LIST_BUILDS {
+                            Span::styled(
+                                format!("{value}  (more than the default: slower to load)"),
+                                Style::new().fg(t.warning),
+                            )
+                        } else {
+                            Span::raw(value.to_owned())
+                        }
                     }
                     None if key == SettingKey::ProxyUrl => {
                         Span::styled(system_proxy_note(&s.system_proxy()), dim)

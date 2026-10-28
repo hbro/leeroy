@@ -10,6 +10,25 @@ A release's section is used as its GitHub release notes.
 
 ## [Unreleased]
 
+### Changed
+
+- Answers from Jenkins are gzip-compressed on the way: the job list and the
+  pipelines are about 20–25× smaller, which makes them load many times faster
+  over a slow link or proxy (on one instance with 5000 jobs through SOCKS: the
+  Pipelines tab from 5–30 s to under 2 s).
+- The Pipelines and Pipeline runs tabs load much less: every job's last 3
+  builds instead of 20, enough for each pipeline's latest run. Opening a
+  pipeline loads its own jobs' last 20 builds, so `←`/`→` still reach its
+  older runs. The Runs tab says "recent" accordingly. The list request asks
+  Jenkins for about a seventh of the builds it used to.
+- **Pipeline builds** in the settings (`pipelines.builds`,
+  `$LEEROY_PIPELINES_BUILDS`) sets that number of builds per job (default 3).
+  More than 3 can make the Pipelines tabs much slower, or time out, on big
+  instances.
+- The requests that ask every job for builds (Builds tab, pipelines) wait up
+  to 2 minutes instead of 20 seconds; the Pipelines tabs show how long
+  they've been loading.
+
 ## [0.6.1] - 2026-10-28
 
 ### Fixed

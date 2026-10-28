@@ -418,13 +418,44 @@ impl Executor {
                     let _ = tx.send(Action::InfoFetched { generation, result });
                 });
             }
-            Effect::FetchPipelines { generation, config } => {
+            Effect::FetchPipelineHistory {
+                generation,
+                pipeline,
+                jobs,
+                config,
+            } => {
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    let result = jenkins::fetch_pipeline_history(&config, &jobs).await;
+                    match &result {
+                        Ok(builds) => tracing::info!(
+                            pipeline,
+                            jobs = jobs.len(),
+                            builds = builds.len(),
+                            "fetched pipeline history"
+                        ),
+                        Err(err) => {
+                            tracing::warn!(pipeline, %err, "fetching pipeline history failed")
+                        }
+                    }
+                    let _ = tx.send(Action::PipelineHistoryFetched {
+                        generation,
+                        pipeline,
+                        result,
+                    });
+                });
+            }
+            Effect::FetchPipelines {
+                generation,
+                builds,
+                config,
+            } => {
                 if let Some(previous) = self.pipelines_task.take() {
                     previous.abort();
                 }
                 let tx = tx.clone();
                 let task = tokio::spawn(async move {
-                    let result = jenkins::fetch_pipelines(&config).await;
+                    let result = jenkins::fetch_pipelines(&config, builds).await;
                     match &result {
                         Ok(data) => tracing::info!(
                             jobs = data.jobs.len(),

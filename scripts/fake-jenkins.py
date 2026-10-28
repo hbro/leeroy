@@ -18,7 +18,8 @@ Serves (under any path prefix, with an X-Jenkins header):
       /queue/api/json the build queue (the `i` overlay)
   GET /api/json          a job tree: folders, a multibranch project, every status;
                          with tree=...builds[...]{0,N}: each job's newest N builds
-  GET /job/../api/json             the job: allBuilds (numbers, with gaps) + lastBuild
+  GET /job/../api/json             the job: allBuilds (numbers, with gaps) + lastBuild;
+                                   with tree=builds[...]{0,N}: its newest N builds
   GET /job/../<n>/api/json         build n (404 if it doesn't exist)
   GET /job/../lastBuild/api/json   the job's last build (404 if never built)
   GET /job/../<n>/wfapi/describe   stages of a Pipeline run (404 for freestyle)
@@ -752,6 +753,12 @@ def main() -> None:
                 if tail[-2:] == ["api", "json"]:
                     tail = tail[:-2]
                 if not tail:
+                    query = unquote(self.path.split("?", 1)[1]) if "?" in self.path else ""
+                    limit = re.search(r"builds\[.*\]\{0,(\d+)\}", query)
+                    if limit:  # one job's newest N builds (a pipeline's history)
+                        item = {"fullName": full_name, "color": color}
+                        add_builds([item], int(limit.group(1)), "causes[" in query)
+                        return self.reply(200, {"builds": item["builds"]})
                     numbers = build_numbers(full_name, color)
                     params = (
                         [

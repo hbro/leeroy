@@ -37,6 +37,9 @@ url = "socks5h://user:pass@bastion.example.com:1080"
 auto = true    # default: start with auto-refresh on (toggle with R at any time)
 interval = 10  # default; seconds between automatic refreshes, minimum 1
 
+[pipelines]
+builds = 3     # default; builds per job the Pipelines tabs look at (see Pipelines)
+
 [ui]
 confirm_quit = true  # default: ask before quitting with q
 theme = "auto"       # default; or "dark" / "light", see "Colours" below
@@ -58,6 +61,7 @@ can't be edited in the TUI while set):
 | Issuer URL, client ID, login with, keep login in | `LEEROY_AUTH_ISSUER`, `LEEROY_AUTH_CLIENT_ID`, `LEEROY_AUTH_LOGIN_FLOW`, `LEEROY_AUTH_TOKEN_STORE` |
 | Auto-refresh | `LEEROY_REFRESH_AUTO` |
 | Refresh interval | `LEEROY_REFRESH_INTERVAL` (seconds, ≥ 1) |
+| Pipeline builds | `LEEROY_PIPELINES_BUILDS` (1–100) |
 | Confirm quit | `LEEROY_UI_CONFIRM_QUIT` |
 | Theme | `LEEROY_UI_THEME` (`auto`/`dark`/`light`) |
 | Timestamps | `LEEROY_UI_TIMESTAMPS` (`relative`/`absolute`) |

@@ -1736,3 +1736,16 @@ fn filter_shows_while_the_list_is_loading() {
     assert!(screen.contains(" / shop"), "{screen}");
     insta::assert_snapshot!(screen);
 }
+
+#[test]
+fn pipelines_loading_shows_how_long() {
+    let mut app = app_with_jobs();
+    apply(&mut app, &[Action::SwitchTab(Tab::Pipelines)]);
+    let (now, wall) = (app.now, app.wall_now);
+    app.update(Action::Tick(
+        now + Duration::from_secs(12),
+        wall + Duration::from_secs(12),
+    ));
+    let screen = format!("{}", render(&app).backend());
+    assert!(screen.contains("Loading pipelines… 12s"), "{screen}");
+}

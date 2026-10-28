@@ -25,12 +25,28 @@ Leeroy finds the relations in two places, because Jenkins records them in two
 incomplete ways: the job configuration (freestyle "build other projects" and
 `upstream` triggers) and the *upstream cause* of every triggered build (which
 also covers a Jenkinsfile's `build job:` step). One request asks every job for
-both, looking at its last 20 builds, so runs older than that aren't shown.
+both, looking at its last 3 builds (**Pipeline builds** in the settings,
+`pipelines.builds`): enough for every pipeline's latest run, and light enough
+for instances with thousands of jobs (it may still take a while there; the tab
+shows for how long). Opening a pipeline loads its own jobs' last 20 builds, so
+`←`/`→` reach its older runs; `r` in the run view loads them again.
+
+> **Warning:** setting **Pipeline builds** higher than 3 makes Jenkins load
+> that many builds of *every* job for these tabs. On an instance with many
+> jobs that can make them load much slower, or time out (after 2 minutes).
+> Raise it only on small instances, or to see more runs in the Pipeline runs
+> tab; to see older runs of one pipeline, open it instead.
+>
+> Lower (1) is lighter still, but a pipeline can then disappear from the list
+> while its newest start is running or failed before it triggered anything
+> (Jenkins only records a Jenkinsfile's `build job:` relation in the triggered
+> builds).
 
 ## Pipeline runs
 
-Every run of every pipeline, newest first, named like its pipeline plus the
-number of the build that started it (`app #12`). `Enter` opens it in the run
+The recent runs of every pipeline, newest first: those within the last 3 builds
+(**Pipeline builds**) of each job, plus the older runs of pipelines you opened. Named like its
+pipeline plus the number of the build that started it (`app #12`). `Enter` opens it in the run
 view; `B` starts a new run of its pipeline (asks first); `/` filters by pipeline
 name or any `job #number` in the run.
 

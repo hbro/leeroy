@@ -63,13 +63,14 @@ pub enum SettingKey {
     AuthTokenStore,
     RefreshAuto,
     RefreshInterval,
+    PipelineBuilds,
     ConfirmQuit,
     Theme,
     Timestamps,
 }
 
 impl SettingKey {
-    pub const ALL: [SettingKey; 16] = [
+    pub const ALL: [SettingKey; 17] = [
         SettingKey::JenkinsUrl,
         SettingKey::JenkinsSkipTlsVerify,
         SettingKey::ProxyUrl,
@@ -83,6 +84,7 @@ impl SettingKey {
         SettingKey::AuthTokenStore,
         SettingKey::RefreshAuto,
         SettingKey::RefreshInterval,
+        SettingKey::PipelineBuilds,
         SettingKey::ConfirmQuit,
         SettingKey::Theme,
         SettingKey::Timestamps,
@@ -103,6 +105,7 @@ impl SettingKey {
             SettingKey::AuthTokenStore => "Keep login in",
             SettingKey::RefreshAuto => "Auto-refresh",
             SettingKey::RefreshInterval => "Refresh every",
+            SettingKey::PipelineBuilds => "Pipeline builds",
             SettingKey::ConfirmQuit => "Confirm quit",
             SettingKey::Theme => "Theme",
             SettingKey::Timestamps => "Timestamps",
@@ -125,6 +128,7 @@ impl SettingKey {
             SettingKey::AuthTokenStore => ("auth", "token_store"),
             SettingKey::RefreshAuto => ("refresh", "auto"),
             SettingKey::RefreshInterval => ("refresh", "interval"),
+            SettingKey::PipelineBuilds => ("pipelines", "builds"),
             SettingKey::ConfirmQuit => ("ui", "confirm_quit"),
             SettingKey::Theme => ("ui", "theme"),
             SettingKey::Timestamps => ("ui", "timestamps"),
@@ -147,6 +151,7 @@ impl SettingKey {
             SettingKey::AuthTokenStore => "LEEROY_AUTH_TOKEN_STORE",
             SettingKey::RefreshAuto => "LEEROY_REFRESH_AUTO",
             SettingKey::RefreshInterval => "LEEROY_REFRESH_INTERVAL",
+            SettingKey::PipelineBuilds => "LEEROY_PIPELINES_BUILDS",
             SettingKey::ConfirmQuit => "LEEROY_UI_CONFIRM_QUIT",
             SettingKey::Theme => "LEEROY_UI_THEME",
             SettingKey::Timestamps => "LEEROY_UI_TIMESTAMPS",
@@ -169,6 +174,7 @@ impl SettingKey {
             | SettingKey::AuthTokenStore => Section::Jenkins,
             SettingKey::RefreshAuto
             | SettingKey::RefreshInterval
+            | SettingKey::PipelineBuilds
             | SettingKey::ConfirmQuit
             | SettingKey::Theme
             | SettingKey::Timestamps => Section::Application,
@@ -225,6 +231,14 @@ impl SettingKey {
     /// Whole seconds, stored as a TOML integer.
     pub fn is_seconds(self) -> bool {
         matches!(self, SettingKey::RefreshInterval)
+    }
+
+    /// Whole numbers, stored as a TOML integer.
+    pub fn is_integer(self) -> bool {
+        matches!(
+            self,
+            SettingKey::RefreshInterval | SettingKey::PipelineBuilds
+        )
     }
 
     /// User-facing documentation, one line per `\n`. Shown in the settings
@@ -294,6 +308,12 @@ impl SettingKey {
             SettingKey::RefreshAuto => concat!(
                 "Start with auto-refresh on (the default). Toggle it any time with R for the\n",
                 "running session; turn this off to start with auto-refresh off.",
+            ),
+            SettingKey::PipelineBuilds => concat!(
+                "How many builds of every job the Pipelines and Pipeline runs tabs look at\n",
+                "(default 3): enough for each pipeline's latest run. Opening a pipeline loads\n",
+                "its own jobs' last 20 builds anyway. WARNING: more than 3 can make these\n",
+                "tabs load much slower, or time out, on instances with many jobs.",
             ),
             SettingKey::RefreshInterval => concat!(
                 "Seconds between automatic refreshes (minimum 1). Default: 10.\n",
@@ -372,6 +392,12 @@ impl SettingKey {
                     ))
                 }
             }
+            SettingKey::PipelineBuilds => match value.parse::<usize>() {
+                Ok(builds) if (1..=MAX_PIPELINE_BUILDS).contains(&builds) => Ok(builds.to_string()),
+                _ => Err(format!(
+                    "expected a number of builds between 1 and {MAX_PIPELINE_BUILDS}, got {value:?}"
+                )),
+            },
             SettingKey::RefreshInterval => match value.parse::<u64>() {
                 Ok(secs) if (MIN_REFRESH_SECS..=MAX_REFRESH_SECS).contains(&secs) => {
                     Ok(secs.to_string())
@@ -606,6 +632,7 @@ pub struct Settings {
     pub proxy: ProxySettings,
     pub auth: AuthSettings,
     pub refresh: RefreshSettings,
+    pub pipelines: PipelineSettings,
     pub ui: UiSettings,
 }
 
@@ -621,6 +648,7 @@ pub struct UiSettings {
 pub const TIMESTAMP_VALUES: [&str; 2] = ["relative", "absolute"];
 
 pub const DEFAULT_REFRESH_SECS: u64 = 10;
+pub const MAX_PIPELINE_BUILDS: usize = 100;
 pub const MIN_REFRESH_SECS: u64 = 1;
 pub const MAX_REFRESH_SECS: u64 = 86_400;
 
@@ -630,13 +658,22 @@ pub struct RefreshSettings {
     pub auto: Option<bool>,
     /// Seconds, kept as text like the other settings (see [`Settings::get`]);
     /// a TOML integer in the file.
-    #[serde(deserialize_with = "seconds_from_toml")]
+    #[serde(deserialize_with = "integer_from_toml")]
     pub interval: Option<String>,
 }
 
-/// Accept a TOML integer for a seconds setting (range checked by `validate`).
-fn seconds_from_toml<'de, D: serde::Deserializer<'de>>(de: D) -> Result<Option<String>, D::Error> {
-    Option::<i64>::deserialize(de).map(|secs| secs.map(|s| s.to_string()))
+/// `[pipelines]`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct PipelineSettings {
+    /// Builds per job of the Pipelines tabs' request (a TOML integer).
+    #[serde(deserialize_with = "integer_from_toml")]
+    pub builds: Option<String>,
+}
+
+/// Accept a TOML integer for a number setting (range checked by `validate`).
+fn integer_from_toml<'de, D: serde::Deserializer<'de>>(de: D) -> Result<Option<String>, D::Error> {
+    Option::<i64>::deserialize(de).map(|n| n.map(|n| n.to_string()))
 }
 
 /// `[auth]`: see [`crate::auth`]. All values are kept as text like the
@@ -727,6 +764,7 @@ impl Settings {
             SettingKey::AuthTokenStore => self.auth.token_store.as_deref(),
             SettingKey::RefreshAuto => self.refresh.auto.map(|b| if b { "true" } else { "false" }),
             SettingKey::RefreshInterval => self.refresh.interval.as_deref(),
+            SettingKey::PipelineBuilds => self.pipelines.builds.as_deref(),
             SettingKey::ConfirmQuit => self
                 .ui
                 .confirm_quit
@@ -758,6 +796,14 @@ impl Settings {
         std::time::Duration::from_secs(secs)
     }
 
+    /// Builds per job of the Pipelines tabs (the default when unset).
+    pub fn pipeline_builds(&self) -> usize {
+        self.get(SettingKey::PipelineBuilds)
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(crate::pipelines::LIST_BUILDS)
+            .clamp(1, MAX_PIPELINE_BUILDS)
+    }
+
     /// Store a value. It must have passed [`SettingKey::validate`]; for
     /// boolean keys, an unparsable value unsets the setting.
     pub fn set(&mut self, key: SettingKey, value: Option<String>) {
@@ -781,6 +827,7 @@ impl Settings {
                 return;
             }
             SettingKey::RefreshInterval => &mut self.refresh.interval,
+            SettingKey::PipelineBuilds => &mut self.pipelines.builds,
             SettingKey::ConfirmQuit => {
                 self.ui.confirm_quit = value.as_deref().and_then(parse_bool);
                 return;
@@ -1126,8 +1173,8 @@ pub fn save(path: &Path, settings: &Settings) -> Result<()> {
                 let is_new = doc[table].get(name).is_none();
                 doc[table][name] = if key.is_bool() {
                     toml_edit::value(parse_bool(value).unwrap_or(false))
-                } else if key.is_seconds() {
-                    toml_edit::value(value.parse::<i64>().unwrap_or(DEFAULT_REFRESH_SECS as i64))
+                } else if key.is_integer() {
+                    toml_edit::value(value.parse::<i64>().unwrap_or_default())
                 } else {
                     toml_edit::value(value)
                 };
@@ -1609,6 +1656,29 @@ mod tests {
         settings.auth.password = None;
         save(&path, &settings).unwrap();
         assert!(!fs::read_to_string(&path).unwrap().contains("p4ss"));
+    }
+
+    #[test]
+    fn pipeline_builds_is_a_bounded_number_saved_as_an_integer() {
+        assert_eq!(Settings::default().pipeline_builds(), 3);
+        assert_eq!(SettingKey::PipelineBuilds.validate(" 5 "), Ok("5".into()));
+        assert!(SettingKey::PipelineBuilds.validate("0").is_err());
+        assert!(SettingKey::PipelineBuilds.validate("101").is_err());
+        assert!(SettingKey::PipelineBuilds.validate("many").is_err());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(FILE_NAME);
+        let mut settings = Settings::default();
+        settings.set(SettingKey::PipelineBuilds, Some("1".into()));
+        save(&path, &settings).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains("[pipelines]") && text.contains("builds = 1\n"),
+            "{text}"
+        );
+        assert!(text.contains("WARNING"), "documented: {text}");
+        assert_eq!(load(&path).unwrap().pipeline_builds(), 1);
+        let env = Settings::from_env(vars(&[("LEEROY_PIPELINES_BUILDS", "2")])).unwrap();
+        assert_eq!(env.pipeline_builds(), 2);
     }
 
     #[test]

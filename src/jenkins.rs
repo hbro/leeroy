@@ -19,6 +19,10 @@ use crate::{
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
+/// For the requests that ask every job for builds (Builds tab, pipelines):
+/// on an instance with thousands of jobs, Jenkins needs a while for them,
+/// most of all the first time (it loads builds from disk on demand).
+const SLOW_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Everything needed to reach one Jenkins instance.
 #[derive(Clone, PartialEq, Eq)]
@@ -83,11 +87,19 @@ pub fn client_with(
     config: &ConnectionConfig,
     redirects: reqwest::redirect::Policy,
 ) -> Result<reqwest::Client, String> {
+    build_client(config, redirects, REQUEST_TIMEOUT)
+}
+
+fn build_client(
+    config: &ConnectionConfig,
+    redirects: reqwest::redirect::Policy,
+    timeout: Duration,
+) -> Result<reqwest::Client, String> {
     let mut builder = reqwest::Client::builder()
         .redirect(redirects)
         .user_agent(concat!("leeroy/", env!("CARGO_PKG_VERSION")))
         .connect_timeout(CONNECT_TIMEOUT)
-        .timeout(REQUEST_TIMEOUT)
+        .timeout(timeout)
         .no_proxy()
         // Certs are checked against the OS trust store (rustls-platform-verifier),
         // so internal CAs installed system-wide work without this.
@@ -134,19 +146,45 @@ pub async fn fetch_history(
     limit: usize,
 ) -> Result<Vec<HistoryEntry>, String> {
     let path = format!("api/json?tree={}", history::tree_query(limit));
-    let response = get(config, &path, false).await?.ok_or("not found")?;
+    let response = get_slow(config, &path).await?.ok_or("not found")?;
     history::parse_history(&response.body)
 }
 
-/// Job relations and every job's recent builds with their upstream causes
-/// (see [`crate::pipelines`]).
-pub async fn fetch_pipelines(config: &ConnectionConfig) -> Result<PipelineData, String> {
-    let path = format!(
-        "api/json?tree={}",
-        pipelines::tree_query(pipelines::RUN_BUILDS)
-    );
-    let response = get(config, &path, false).await?.ok_or("not found")?;
+/// Job relations and every job's newest `builds` builds with their upstream
+/// causes (see [`crate::pipelines`]).
+pub async fn fetch_pipelines(
+    config: &ConnectionConfig,
+    builds: usize,
+) -> Result<PipelineData, String> {
+    let path = format!("api/json?tree={}", pipelines::tree_query(builds));
+    let response = get_slow(config, &path).await?.ok_or("not found")?;
     pipelines::parse(&response.body)
+}
+
+/// The older builds of `jobs` (a pipeline's parts), one request per job, all
+/// at once. A job that's gone (404) has none.
+pub async fn fetch_pipeline_history(
+    config: &ConnectionConfig,
+    jobs: &[String],
+) -> Result<Vec<pipelines::RunBuild>, String> {
+    let client = client(config)?;
+    let requests = jobs.iter().map(|job| {
+        let client = &client;
+        async move {
+            let path = format!(
+                "{}api/json?tree={}",
+                builds::job_path(job),
+                pipelines::history_query()
+            );
+            let get = reqwest::Method::GET;
+            match send(client, config, get, &path, true, &[], None).await? {
+                Some(response) => pipelines::parse_history(job, &response.body),
+                None => Ok(Vec::new()),
+            }
+        }
+    });
+    let builds = futures::future::try_join_all(requests).await?;
+    Ok(builds.into_iter().flatten().collect())
 }
 
 /// Details of the instance for the `i` overlay (three small requests).
@@ -270,6 +308,17 @@ struct Response {
 /// GET `path` (relative to the Jenkins URL) with the configured headers.
 /// Non-2xx answers become errors (401/403 explaining who refused and why),
 /// except 404 with `allow_not_found`, which gives `Ok(None)`.
+/// [`get`] with the [`SLOW_REQUEST_TIMEOUT`].
+async fn get_slow(config: &ConnectionConfig, path: &str) -> Result<Option<Response>, String> {
+    let client = build_client(
+        config,
+        reqwest::redirect::Policy::default(),
+        SLOW_REQUEST_TIMEOUT,
+    )?;
+    let get = reqwest::Method::GET;
+    send(&client, config, get, path, false, &[], None).await
+}
+
 async fn get(
     config: &ConnectionConfig,
     path: &str,

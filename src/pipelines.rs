@@ -13,9 +13,13 @@
 //!   recorded for both kinds.
 //!
 //! One request asks for both: every job's static relations and its newest
-//! [`RUN_BUILDS`] builds with their causes. Runs link builds through the
-//! causes; the relations (union of both) give a pipeline's parts, which
-//! decide whether a run is complete (see [`run_status`]).
+//! [`LIST_BUILDS`] builds with their causes: enough for the pipelines and
+//! their latest runs, light enough for instances with thousands of jobs.
+//! Opening a pipeline loads its own jobs' newest [`HISTORY_BUILDS`] builds
+//! (one small request per job), kept per pipeline and merged in. Runs link
+//! builds through the causes; the relations (union of both) give a
+//! pipeline's parts, which decide whether a run is complete (see
+//! [`run_status`]).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::time::{Duration, SystemTime};
@@ -24,19 +28,29 @@ use serde::Deserialize;
 
 use crate::{input::TextInput, jobs::JobStatus};
 
-/// Builds per job looked at for causes: how far back runs (and observed
-/// edges) reach.
-pub const RUN_BUILDS: usize = 20;
+/// Builds per job in the list request: the latest runs (a few, so a
+/// pipeline whose newest start triggered nothing is still found).
+pub const LIST_BUILDS: usize = 3;
+
+/// Builds per job of an opened pipeline: how far back its runs reach.
+pub const HISTORY_BUILDS: usize = 20;
 
 const FOLDER_DEPTH: usize = crate::jobs::FOLDER_DEPTH;
+
+/// The newest `limit` builds with their upstream causes, as a `tree` field.
+fn builds_field(limit: usize) -> String {
+    format!(
+        "builds[number,result,building,timestamp,duration,\
+         actions[causes[upstreamProject,upstreamBuild]]]{{0,{limit}}}"
+    )
+}
 
 /// `tree` query: jobs (recursing into folders) with their static relations
 /// and newest `limit` builds' upstream causes.
 pub fn tree_query(limit: usize) -> String {
     let fields = format!(
-        "fullName,color,upstreamProjects[fullName],downstreamProjects[fullName],\
-         builds[number,result,building,timestamp,duration,\
-         actions[causes[upstreamProject,upstreamBuild]]]{{0,{limit}}}"
+        "fullName,color,upstreamProjects[fullName],downstreamProjects[fullName],{}",
+        builds_field(limit)
     );
     let mut tree = format!("jobs[{fields}]");
     for _ in 1..FOLDER_DEPTH {
@@ -142,6 +156,74 @@ fn parse_result(result: Option<&str>) -> Option<JobStatus> {
     })
 }
 
+/// `tree` query of one job's history (`job/<…>/api/json?tree=…`).
+pub fn history_query() -> String {
+    builds_field(HISTORY_BUILDS)
+}
+
+/// One job's builds from a [`history_query`] answer.
+pub fn parse_history(job: &str, json: &str) -> Result<Vec<RunBuild>, String> {
+    #[derive(Deserialize)]
+    struct History {
+        #[serde(default)]
+        builds: Vec<RawBuild>,
+    }
+    let history: History =
+        serde_json::from_str(json).map_err(|err| format!("unexpected build data: {err}"))?;
+    Ok(history
+        .builds
+        .into_iter()
+        .map(|raw| run_build(job, raw))
+        .collect())
+}
+
+/// A build with the upstream build that triggered it.
+fn run_build(job: &str, raw: RawBuild) -> RunBuild {
+    let parent = raw
+        .actions
+        .iter()
+        .flatten()
+        .flat_map(|a| &a.causes)
+        .find_map(|c| Some((c.upstream_project.clone()?, c.upstream_build?)));
+    RunBuild {
+        job: job.to_owned(),
+        number: raw.number,
+        result: parse_result(raw.result.as_deref()),
+        building: raw.building,
+        started: SystemTime::UNIX_EPOCH + Duration::from_millis(raw.timestamp),
+        duration: Duration::from_millis(raw.duration),
+        parent,
+    }
+}
+
+/// `list` with the builds of `histories` it doesn't have yet, and the
+/// relations their causes show (a `build job:` step only shows there).
+fn merged<'a>(list: &PipelineData, histories: impl Iterator<Item = &'a RunBuild>) -> PipelineData {
+    let mut data = list.clone();
+    let known_jobs: BTreeSet<&str> = list.jobs.iter().map(|j| j.name.as_str()).collect();
+    let mut have: BTreeSet<(String, u64)> = list
+        .builds
+        .iter()
+        .map(|b| (b.job.clone(), b.number))
+        .collect();
+    let mut edges: BTreeSet<(String, String)> = list.edges.iter().cloned().collect();
+    for build in histories {
+        if !have.insert((build.job.clone(), build.number)) {
+            continue; // the list's copy is newer (e.g. finished meanwhile)
+        }
+        if let Some((upstream, _)) = &build.parent
+            && upstream != &build.job
+            && known_jobs.contains(upstream.as_str())
+            && known_jobs.contains(build.job.as_str())
+        {
+            edges.insert((upstream.clone(), build.job.clone()));
+        }
+        data.builds.push(build.clone());
+    }
+    data.edges = edges.into_iter().collect();
+    data
+}
+
 pub fn parse(json: &str) -> Result<PipelineData, String> {
     let root: Node =
         serde_json::from_str(json).map_err(|err| format!("unexpected job data: {err}"))?;
@@ -199,21 +281,7 @@ fn collect(
             edges.insert((name.clone(), down));
         }
         for raw in item.builds {
-            let parent = raw
-                .actions
-                .iter()
-                .flatten()
-                .flat_map(|a| &a.causes)
-                .find_map(|c| Some((c.upstream_project.clone()?, c.upstream_build?)));
-            builds.push(RunBuild {
-                job: name.clone(),
-                number: raw.number,
-                result: parse_result(raw.result.as_deref()),
-                building: raw.building,
-                started: SystemTime::UNIX_EPOCH + Duration::from_millis(raw.timestamp),
-                duration: Duration::from_millis(raw.duration),
-                parent,
-            });
+            builds.push(run_build(&name, raw));
         }
         jobs.push(PipelineJob {
             name,
@@ -765,9 +833,14 @@ impl RunView {
 #[derive(Debug, Default)]
 pub struct PipelineState {
     pub load: PipelineLoad,
-    /// The last fetch, and the pipelines worked out from it: rebuilding those
-    /// on every keypress and frame made the lists sluggish on big instances.
-    /// Only [`Self::set_data`] changes them, together.
+    /// The last list fetch, as it came.
+    fetched: PipelineData,
+    /// Older builds of opened pipelines, by pipeline (first job).
+    histories: BTreeMap<String, Vec<RunBuild>>,
+    /// The list with the histories merged in, and the pipelines worked out
+    /// from it: rebuilding those on every keypress and frame made the lists
+    /// sluggish on big instances. Only [`Self::recompute`] changes them,
+    /// together (after [`Self::set_data`] or [`Self::add_history`]).
     data: PipelineData,
     computed: Vec<Pipeline>,
     /// Every run as `(pipeline, run)`, newest first (for the Runs tab).
@@ -775,6 +848,10 @@ pub struct PipelineState {
     pub refreshing: bool,
     pub fetched_at: Option<std::time::Instant>,
     pub attempted_at: Option<std::time::Instant>,
+    /// When the list request now under way started (for "loading… 12s").
+    pub loading_since: Option<std::time::Instant>,
+    /// The pipeline whose history is being fetched.
+    pub history_in_flight: Option<String>,
     pub list: ListState,
     pub runs: ListState,
 }
@@ -799,8 +876,33 @@ impl PipelineState {
         state
     }
 
-    /// Store a fetch and work out its pipelines (once).
+    /// Store a list fetch and work out its pipelines (once).
     pub fn set_data(&mut self, data: PipelineData) {
+        self.fetched = data;
+        self.recompute();
+    }
+
+    /// Store the older builds of `pipeline`'s jobs (replacing earlier ones).
+    pub fn add_history(&mut self, pipeline: &str, builds: Vec<RunBuild>) {
+        self.histories.insert(pipeline.to_owned(), builds);
+        self.recompute();
+    }
+
+    /// Whether `pipeline`'s history is loaded.
+    pub fn has_history(&self, pipeline: &str) -> bool {
+        self.histories.contains_key(pipeline)
+    }
+
+    /// Forget the data, e.g. of another instance (keeps the UI state).
+    pub fn clear(&mut self) {
+        self.fetched = PipelineData::default();
+        self.histories.clear();
+        self.history_in_flight = None;
+        self.recompute();
+    }
+
+    fn recompute(&mut self) {
+        let data = merged(&self.fetched, self.histories.values().flatten());
         let computed = pipelines(&data);
         let mut order: Vec<(usize, usize)> = computed
             .iter()
@@ -895,6 +997,55 @@ impl PipelineState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn history_adds_older_runs_and_relations_seen_only_in_causes() {
+        // A Pipeline's `build job:` step: no static relation, only causes.
+        let list = parse(
+            r#"{"jobs": [
+                {"fullName": "app", "color": "blue",
+                 "builds": [{"number": 3, "result": "SUCCESS", "timestamp": 3000}]},
+                {"fullName": "deploy", "color": "blue", "builds": []}
+            ]}"#,
+        )
+        .unwrap();
+        let mut state = PipelineState::with_data(list);
+        assert!(state.pipelines().is_empty(), "nothing triggered recently");
+        let history = parse_history(
+            "deploy",
+            r#"{"builds": [{"number": 7, "result": "SUCCESS", "timestamp": 2100,
+                 "actions": [{"causes": [{"upstreamProject": "app", "upstreamBuild": 2}]}]}]}"#,
+        )
+        .unwrap();
+        let mut older = parse_history(
+            "app",
+            r#"{"builds": [{"number": 2, "result": "SUCCESS", "timestamp": 2000},
+                           {"number": 3, "result": "FAILURE", "timestamp": 3000}]}"#,
+        )
+        .unwrap();
+        older.extend(history);
+        state.add_history("app", older);
+        assert_eq!(state.data().edges, vec![("app".into(), "deploy".into())]);
+        let pipeline = &state.pipelines()[0];
+        assert_eq!(pipeline.first_job, "app");
+        assert_eq!(pipeline.runs.len(), 2);
+        // The list's copy of #3 wins over the history's (it's newer).
+        let three = state
+            .data()
+            .builds
+            .iter()
+            .filter(|b| b.number == 3 && b.job == "app");
+        assert_eq!(three.count(), 1);
+        assert_eq!(state.data().builds[0].result, Some(JobStatus::Success));
+        state.clear();
+        assert!(state.pipelines().is_empty() && !state.has_history("app"));
+    }
+
+    #[test]
+    fn list_request_asks_for_a_few_builds_history_for_more() {
+        assert!(tree_query(LIST_BUILDS).contains("]{0,3}"));
+        assert!(history_query().starts_with("builds[") && history_query().ends_with("{0,20}"));
+    }
     use crate::builds::BuildStep;
 
     #[test]

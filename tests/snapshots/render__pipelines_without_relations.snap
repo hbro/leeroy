@@ -7,7 +7,7 @@ expression: render(&app).backend()
 "Pipelines (0) ──────────────────────────────────────────────────────────────────"
 "                                                                                "
 "                                  No pipelines                                  "
-"                 No job triggered another in its last 20 builds                 "
+"                  No job triggered another in its last 3 builds                 "
 "                                                                                "
 "                                                                                "
 "                                                                                "

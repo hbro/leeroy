@@ -153,8 +153,21 @@ the section is left out; the rest of the build view still works.
 
 ### Old pipeline runs are missing
 
-Pipelines and their runs are worked out from the last 20 builds of every job,
-so older runs aren't listed.
+The Pipelines and Pipeline runs tabs only look at the last 3 builds of every
+job (**Pipeline builds** in the settings). Open the pipeline (Enter): that loads
+its jobs' last 20 builds, and `←` goes back through them. Runs older than that
+aren't shown. Raising **Pipeline builds** shows more runs in the Pipeline runs
+tab, but can make these tabs much slower or time out on big instances (see
+[Pipelines](Pipelines.md)).
+
+### The Pipelines tab is slow or times out
+
+Its request asks every job for its last **Pipeline builds** builds (default
+3). On an instance with thousands of jobs Jenkins needs a while for that,
+most of all the first time (it loads old builds from disk); the tab shows how
+long it has been loading, and gives up after 2 minutes. Set **Pipeline
+builds** back to 3, or lower (see [Pipelines](Pipelines.md) for what 1
+misses).
 
 ### A promotion or re-run isn't part of the run
 

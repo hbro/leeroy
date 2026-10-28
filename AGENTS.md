@@ -16,7 +16,8 @@ Elm-style: pure core, thin IO shell.
   **No IO**: side effects (saving config, connecting) are returned as `Effect`s, which
   `main.rs`'s `Executor` runs and answers with an `Action` (`SettingsSaved`,
   `ConnectFinished`). `App::start()` returns the startup effects.
-- `src/jenkins.rs` — reqwest client; `get()` (headers, auth diagnostics, logging)
+- `src/jenkins.rs` — reqwest client (gzip on: Jenkins' JSON compresses ~25×, which
+  is most of the time over slow links); `get()` (headers, auth diagnostics, logging)
   behind `check()` (`whoAmI/api/json`) and `fetch_jobs()` (`api/json?tree=…`). Proxy
   is always passed in explicitly (`.no_proxy()`), so behaviour matches the UI.
 - `src/jobs.rs` — job model, `/api/json` parsing (folders flattened, not listed),
@@ -35,10 +36,15 @@ Elm-style: pure core, thin IO shell.
   (`App::history_refresh_limit`) load up to a page below the selection, never
   more than loaded. Job-name/`#number` filters are complete client-side.
 - `src/pipelines.rs` — Pipelines/Runs tabs and run view. One request
-  (`pipelines::tree_query`, `RUN_BUILDS` = 20 builds per job) gets every job's
-  static `upstreamProjects`/`downstreamProjects` plus builds with their
-  `UpstreamCause`s; edges = union (a Pipeline `build job:` only shows as a
-  cause). Pipeline = job with an untriggered build (no upstream cause at all)
+  (`pipelines::tree_query`, `Settings::pipeline_builds()` builds per job:
+  setting `pipelines.builds`, default `LIST_BUILDS` = 3; saving a new value
+  reloads; the slow 2 min timeout) gets every job's static `upstreamProjects`/`downstreamProjects` plus
+  builds with their `UpstreamCause`s; edges = union (a Pipeline `build job:`
+  only shows as a cause). Opening a run view fetches that pipeline's parts'
+  `HISTORY_BUILDS` = 20 builds (`Effect::FetchPipelineHistory`, one request
+  per job, once per pipeline, again on `r`), kept per pipeline in
+  `PipelineState` and merged in (builds and the edges their causes show) by
+  `recompute`; cleared on reconnect. The Runs tab is "recent" accordingly. Pipeline = job with an untriggered build (no upstream cause at all)
   that triggered something, and no configured upstream (a `static_edges`
   target is always a step, even when started by hand); its runs = all its untriggered builds (a failed
   one triggers nothing), trees via causes. Name = common prefix of its parts

@@ -4,7 +4,7 @@ expression: boxes
 ---
 " Leeroy  ● https://ci.example.com · Jenkins 2.504.1 · me       h/?  help   ⟳ 0s "
 " 1 Jobs   2 Builds   3 Pipelines   4 Pipeline runs                   0 Settings "
-"libs/core · #12 · 1 of 1 · unstable · running ──────────────────────────────────"
+"libs/core · #12 · 1 of 1 · unstable · running · loading older runs… ────────────"
 "┌─────────────────┐                                                             "
 "│ ● libs/core #12 │                                                             "
 "└┬────────────────┘                                                             "

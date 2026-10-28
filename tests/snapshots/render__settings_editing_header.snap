@@ -20,7 +20,7 @@ expression: screen
 " Application                                                                    "
 "   Auto-refresh      on                                                         "
 "   Refresh every     10 s (default)                                             "
-"   Confirm quit      on                                                         "
+"   Pipeline builds   3 (default)                                                "
 "                                                                                "
 "   Extra HTTP headers sent with every request to Jenkins, e.g. X-Forwarded-User "
 "   for a                                                                        "

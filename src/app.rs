@@ -178,6 +178,12 @@ pub enum Action {
         generation: u64,
         result: Result<PipelineData, String>,
     },
+    /// Outcome of [`Effect::FetchPipelineHistory`].
+    PipelineHistoryFetched {
+        generation: u64,
+        pipeline: String,
+        result: Result<Vec<crate::pipelines::RunBuild>, String>,
+    },
     /// Outcome of [`Effect::FetchConsole`] (the chunk from `start`).
     ConsoleFetched {
         generation: u64,
@@ -309,10 +315,19 @@ pub enum Effect {
         generation: u64,
         config: ConnectionConfig,
     },
-    /// Load job relations and recent builds' causes (Pipelines and Runs
-    /// tabs); answer with [`Action::PipelinesFetched`].
+    /// Load job relations and every job's newest `builds` builds' causes
+    /// (Pipelines and Runs tabs); answer with [`Action::PipelinesFetched`].
     FetchPipelines {
         generation: u64,
+        builds: usize,
+        config: ConnectionConfig,
+    },
+    /// Load the older builds of `pipeline`'s parts `jobs` (an opened
+    /// pipeline); answer with [`Action::PipelineHistoryFetched`].
+    FetchPipelineHistory {
+        generation: u64,
+        pipeline: String,
+        jobs: Vec<String>,
         config: ConnectionConfig,
     },
 }
@@ -950,6 +965,7 @@ impl App {
         self.history.refreshing = false;
         self.pipelines.load = PipelineLoad::NotLoaded;
         self.pipelines.refreshing = false;
+        self.pipelines.clear();
         let run_origin = self.run_origin();
         if matches!(self.view, View::Build | View::Console) {
             self.view = self.build_origin();
@@ -1468,6 +1484,7 @@ impl App {
                         View::Pipelines,
                     ));
                     self.view = View::Run;
+                    return self.fetch_run_history(false);
                 }
             }
             Action::OpenBuild if self.view == View::Runs => {
@@ -1481,6 +1498,7 @@ impl App {
                         View::Runs,
                     ));
                     self.view = View::Run;
+                    return self.fetch_run_history(false);
                 }
             }
             Action::OpenBuild if self.view == View::Run => {
@@ -2163,6 +2181,7 @@ impl App {
                 let state = &mut self.pipelines;
                 state.refreshing = false;
                 state.attempted_at = Some(now);
+                state.loading_since = None;
                 match result {
                     Ok(data) => {
                         state.set_data(data);
@@ -2203,6 +2222,25 @@ impl App {
                         state.runs.move_selection(0, run_rows);
                     }
                     Err(error) => state.load = PipelineLoad::Failed(error),
+                }
+            }
+            Action::PipelineHistoryFetched {
+                generation,
+                pipeline,
+                result,
+            } => {
+                if generation != self.connection_generation {
+                    return Vec::new();
+                }
+                self.pipelines.history_in_flight = None;
+                match result {
+                    Ok(builds) => self.pipelines.add_history(&pipeline, builds),
+                    Err(err) => {
+                        self.notice = Some(Notice::error(
+                            format!("Couldn't load the older runs: {err}"),
+                            self.now,
+                        ))
+                    }
                 }
             }
             Action::JobsFetched { generation, result } => {
@@ -2419,9 +2457,41 @@ impl App {
             self.pipelines.refreshing = true;
         } else {
             self.pipelines.load = PipelineLoad::Loading;
+            self.pipelines.loading_since = Some(self.now);
         }
         vec![Effect::FetchPipelines {
             generation: self.connection_generation,
+            builds: self.settings.effective().pipeline_builds(),
+            config,
+        }]
+    }
+
+    /// The run view's pipeline history: fetched once per pipeline (again with
+    /// `again`, i.e. `r`), one fetch at a time.
+    fn fetch_run_history(&mut self, again: bool) -> Vec<Effect> {
+        let state = &self.pipelines;
+        let Some(view) = self.run.as_ref() else {
+            return Vec::new();
+        };
+        if state.history_in_flight.is_some() || (!again && state.has_history(&view.first_job)) {
+            return Vec::new();
+        }
+        let Some(pipeline) = state
+            .pipelines()
+            .iter()
+            .find(|p| p.first_job == view.first_job)
+        else {
+            return Vec::new();
+        };
+        let (pipeline, jobs) = (pipeline.first_job.clone(), pipeline.parts.clone());
+        let Some(config) = self.request_config() else {
+            return Vec::new();
+        };
+        self.pipelines.history_in_flight = Some(pipeline.clone());
+        vec![Effect::FetchPipelineHistory {
+            generation: self.connection_generation,
+            pipeline,
+            jobs,
             config,
         }]
     }
@@ -2654,8 +2724,13 @@ impl App {
             ConnectionStatus::Connected { .. } if self.view == View::Builds => {
                 self.fetch_history(self.history_refresh_limit())
             }
+            ConnectionStatus::Connected { .. } if self.view == View::Run => {
+                let mut effects = self.fetch_pipelines();
+                effects.extend(self.fetch_run_history(true));
+                effects
+            }
             ConnectionStatus::Connected { .. }
-                if matches!(self.view, View::Pipelines | View::Runs | View::Run) =>
+                if matches!(self.view, View::Pipelines | View::Runs) =>
             {
                 self.fetch_pipelines()
             }
@@ -2792,6 +2867,7 @@ impl App {
         let before = s.connection_config();
         let password_before = s.known_password();
         let auto_before = s.effective().is_on(SettingKey::RefreshAuto);
+        let builds_before = s.effective().pipeline_builds();
         s.file = draft;
         s.selected = s.selected.min(s.rows().len() - 1);
         // Changing the default applies to the running session right away.
@@ -2807,10 +2883,14 @@ impl App {
             settings: s.file.clone(),
         }];
         let changed = s.connection_config() != before || s.known_password() != password_before;
+        let builds_changed = s.effective().pipeline_builds() != builds_before;
         if let Some(password) = pending {
             effects.extend(self.store_password(password));
         } else if reconnect == Reconnect::Always || reconnect == Reconnect::IfChanged && changed {
             effects.extend(self.connect());
+        } else if builds_changed && self.pipelines.load != PipelineLoad::NotLoaded {
+            // Loaded with the old number: load again with the new one.
+            effects.extend(self.fetch_pipelines());
         }
         effects
     }
@@ -4906,6 +4986,127 @@ mod tests {
         .unwrap()
     }
 
+    fn older_run() -> Vec<crate::pipelines::RunBuild> {
+        crate::pipelines::parse_history(
+            "app",
+            r#"{"builds": [{"number": 2, "result": "FAILURE", "timestamp": 500},
+                           {"number": 3, "result": "SUCCESS", "timestamp": 1000}]}"#,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn opening_a_pipeline_loads_its_older_runs_once() {
+        let mut app = connected_with_jobs(&["a"]);
+        app.update(Action::SwitchTab(Tab::Pipelines));
+        let generation = app.connection_generation;
+        app.update(Action::PipelinesFetched {
+            generation,
+            result: Ok(pipeline_data()),
+        });
+        assert!(matches!(
+            app.update(Action::OpenBuild).as_slice(),
+            [Effect::FetchPipelineHistory { .. }]
+        ));
+        let runs = |app: &App| app.pipelines.pipelines()[0].runs.len();
+        assert_eq!(runs(&app), 1);
+        assert_eq!(
+            app.update(Action::BuildStep(BuildStep::Older)),
+            Vec::new(),
+            "nothing older yet"
+        );
+        app.update(Action::PipelineHistoryFetched {
+            generation,
+            pipeline: "app".into(),
+            result: Ok(older_run()),
+        });
+        assert_eq!(runs(&app), 2, "the older run, merged in");
+        assert_eq!(app.pipelines.history_in_flight, None);
+        app.update(Action::BuildStep(BuildStep::Older));
+        assert_eq!(app.run.as_ref().unwrap().target, RunRef::Number(2));
+        // Kept across list refreshes: opening it again fetches nothing...
+        app.update(Action::PipelinesFetched {
+            generation,
+            result: Ok(pipeline_data()),
+        });
+        assert_eq!(runs(&app), 2);
+        app.update(Action::Back);
+        assert_eq!(app.update(Action::OpenBuild), Vec::new());
+        // ...but r in the run view loads it again, with the list.
+        let effects = app.update(Action::Refresh);
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::FetchPipelineHistory { .. }))
+        );
+        assert!(pipelines_fetch(&effects));
+        // Another connection: forgotten.
+        app.update(Action::SwitchTab(Tab::Settings));
+        select(
+            &mut app,
+            SettingsRow::Setting(SettingKey::JenkinsSkipTlsVerify),
+        );
+        app.update(Action::StartEdit);
+        save(&mut app);
+        assert!(!app.pipelines.has_history("app"));
+        assert_eq!(app.pipelines.history_in_flight, None);
+    }
+
+    #[test]
+    fn a_failed_history_keeps_the_latest_runs() {
+        let mut app = connected_with_jobs(&["a"]);
+        app.update(Action::SwitchTab(Tab::Pipelines));
+        let generation = app.connection_generation;
+        app.update(Action::PipelinesFetched {
+            generation,
+            result: Ok(pipeline_data()),
+        });
+        app.update(Action::OpenBuild);
+        app.update(Action::PipelineHistoryFetched {
+            generation,
+            pipeline: "app".into(),
+            result: Err("timed out".into()),
+        });
+        assert!(app.notice.as_ref().unwrap().text.contains("older runs"));
+        assert_eq!(app.pipelines.pipelines()[0].runs.len(), 1);
+        assert_eq!(app.pipelines.history_in_flight, None);
+    }
+
+    #[test]
+    fn pipeline_builds_setting_sets_the_request_and_reloads() {
+        let mut app = connected_with_jobs(&["a"]);
+        let builds = |effects: &[Effect]| {
+            effects.iter().find_map(|e| match e {
+                Effect::FetchPipelines { builds, .. } => Some(*builds),
+                _ => None,
+            })
+        };
+        assert_eq!(
+            builds(&app.update(Action::SwitchTab(Tab::Pipelines))),
+            Some(3)
+        );
+        let generation = app.connection_generation;
+        app.update(Action::PipelinesFetched {
+            generation,
+            result: Ok(pipeline_data()),
+        });
+        app.update(Action::SwitchTab(Tab::Settings));
+        select(&mut app, SettingsRow::Setting(SettingKey::PipelineBuilds));
+        app.update(Action::StartEdit);
+        app.update(Action::ClearInput);
+        type_str(&mut app, "1");
+        app.update(Action::ConfirmEdit);
+        assert_eq!(builds(&save(&mut app)), Some(1), "saved: loaded again");
+        // Saving something else doesn't reload them.
+        select(&mut app, SettingsRow::Setting(SettingKey::ConfirmQuit));
+        app.update(Action::StartEdit);
+        app.update(Action::PipelinesFetched {
+            generation,
+            result: Ok(pipeline_data()),
+        });
+        assert_eq!(builds(&save(&mut app)), None);
+    }
+
     #[test]
     fn pipelines_and_runs_share_one_fetch() {
         let mut app = connected_with_jobs(&["a"]);
@@ -4957,10 +5158,12 @@ mod tests {
             generation,
             result: Ok(pipeline_data()),
         });
-        assert!(
-            app.update(Action::OpenBuild).is_empty(),
-            "no fetch: data is here"
-        );
+        // The run is there; only the pipeline's older runs are fetched.
+        assert!(matches!(
+            app.update(Action::OpenBuild).as_slice(),
+            [Effect::FetchPipelineHistory { pipeline, jobs, .. }]
+                if pipeline == "app" && jobs == &["app".to_owned(), "deploy".to_owned()]
+        ));
         assert_eq!(app.view, View::Run);
         app.update(Action::SelectNext); // deploy #9, triggered by app #3
         let effects = app.update(Action::OpenBuild);
