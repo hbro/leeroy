@@ -1724,3 +1724,15 @@ fn settings_show_why_the_connection_failed() {
     assert!(screen.contains("--skip-jwt-bearer-tokens"), "{screen}");
     insta::assert_snapshot!(screen);
 }
+
+#[test]
+fn filter_shows_while_the_list_is_loading() {
+    let mut app = app_with_jobs();
+    let mut actions = vec![Action::SwitchTab(Tab::Pipelines), Action::StartFilter];
+    actions.extend(type_str("shop"));
+    apply(&mut app, &actions);
+    let screen = format!("{}", render(&app).backend());
+    assert!(screen.contains("Loading"), "{screen}");
+    assert!(screen.contains(" / shop"), "{screen}");
+    insta::assert_snapshot!(screen);
+}

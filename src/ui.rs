@@ -179,12 +179,6 @@ fn render_tabs(frame: &mut Frame, area: Rect, app: &App) {
 fn render_jobs(frame: &mut Frame, area: Rect, app: &App) {
     let t = app.theme();
     let hint = t.dim();
-    let centered_message = |lines: Vec<Line<'static>>| {
-        Paragraph::new(lines)
-            .alignment(Alignment::Center)
-            .wrap(Wrap { trim: true })
-            .block(view_block(t, "Jobs"))
-    };
     let lines = match &app.connection {
         ConnectionStatus::NotConfigured => vec![
             Line::raw(""),
@@ -218,7 +212,31 @@ fn render_jobs(frame: &mut Frame, area: Rect, app: &App) {
             JobsLoad::Loaded(_) => return render_job_list(frame, area, app),
         },
     };
-    frame.render_widget(centered_message(lines), area);
+    let jobs = &app.jobs;
+    let filter = (jobs.filter_input.as_ref(), jobs.filter.as_str());
+    render_list_message(frame, area, t, "Jobs", lines, filter);
+}
+
+/// A list tab's message (loading, failed, not connected) in its frame, under
+/// the filter line: `/` works before the list is there.
+fn render_list_message(
+    frame: &mut Frame,
+    area: Rect,
+    t: &Theme,
+    title: &str,
+    lines: Vec<Line<'static>>,
+    (input, applied): (Option<&crate::input::TextInput>, &str),
+) {
+    let block = view_block(t, title);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let rest = filter_line(frame, inner, t, input, applied);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: true }),
+        rest,
+    );
 }
 
 fn render_job_list(frame: &mut Frame, area: Rect, app: &App) {
@@ -313,12 +331,6 @@ fn render_job_list(frame: &mut Frame, area: Rect, app: &App) {
 fn render_history(frame: &mut Frame, area: Rect, app: &App) {
     let t = app.theme();
     let hint = t.dim();
-    let message = |lines: Vec<Line<'static>>| {
-        Paragraph::new(lines)
-            .alignment(Alignment::Center)
-            .wrap(Wrap { trim: true })
-            .block(view_block(t, "Builds"))
-    };
     let lines = match (&app.connection, &app.history.load) {
         (ConnectionStatus::Connected { .. }, HistoryLoad::Loaded) => {
             return render_history_list(frame, area, app);
@@ -339,7 +351,9 @@ fn render_history(frame: &mut Frame, area: Rect, app: &App) {
             Line::styled("See the Jobs tab (1) or the settings (0)", hint),
         ],
     };
-    frame.render_widget(message(lines), area);
+    let history = &app.history;
+    let filter = (history.filter_input.as_ref(), history.filter.as_str());
+    render_list_message(frame, area, t, "Builds", lines, filter);
 }
 
 fn render_history_list(frame: &mut Frame, area: Rect, app: &App) {
@@ -614,11 +628,9 @@ fn run_table<'a>(app: &App, rows: Vec<RunRow<'a>>, selected: usize) -> Table<'a>
 fn render_pipelines(frame: &mut Frame, area: Rect, app: &App) {
     let t = app.theme();
     if let Some(lines) = pipelines_message(app, "pipelines") {
-        let message = Paragraph::new(lines)
-            .alignment(Alignment::Center)
-            .wrap(Wrap { trim: true })
-            .block(view_block(t, "Pipelines"));
-        return frame.render_widget(message, area);
+        let list = &app.pipelines.list;
+        let filter = (list.filter_input.as_ref(), list.filter.as_str());
+        return render_list_message(frame, area, t, "Pipelines", lines, filter);
     }
     let state = &app.pipelines;
     let pipelines = state.visible_pipelines();
@@ -698,11 +710,9 @@ fn render_pipelines(frame: &mut Frame, area: Rect, app: &App) {
 fn render_runs(frame: &mut Frame, area: Rect, app: &App) {
     let t = app.theme();
     if let Some(lines) = pipelines_message(app, "runs") {
-        let message = Paragraph::new(lines)
-            .alignment(Alignment::Center)
-            .wrap(Wrap { trim: true })
-            .block(view_block(t, "Pipeline runs"));
-        return frame.render_widget(message, area);
+        let runs = &app.pipelines.runs;
+        let filter = (runs.filter_input.as_ref(), runs.filter.as_str());
+        return render_list_message(frame, area, t, "Pipeline runs", lines, filter);
     }
     let state = &app.pipelines;
     let pipelines = state.pipelines();

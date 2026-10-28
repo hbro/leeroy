@@ -10,6 +10,11 @@ A release's section is used as its GitHub release notes.
 
 ## [Unreleased]
 
+### Fixed
+
+- The `/` filter shows while a list (jobs, builds, pipelines, runs) is still
+  loading, instead of only once it's there.
+
 ## [0.6.0] - 2026-10-23
 
 ### Added
