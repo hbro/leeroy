@@ -10,6 +10,8 @@ A release's section is used as its GitHub release notes.
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-10-28
+
 ### Fixed
 
 - The `/` filter shows while a list (jobs, builds, pipelines, runs) is still
@@ -222,7 +224,8 @@ A release's section is used as its GitHub release notes.
 - Prebuilt binaries for Linux (x86_64, ARM64), macOS (Apple Silicon, Intel)
   and Windows (x86_64).
 
-[Unreleased]: https://github.com/hbro/leeroy/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/hbro/leeroy/compare/v0.6.1...HEAD
+[0.6.1]: https://github.com/hbro/leeroy/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/hbro/leeroy/compare/v0.5.2...v0.6.0
 [0.5.2]: https://github.com/hbro/leeroy/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/hbro/leeroy/compare/v0.5.0...v0.5.1
